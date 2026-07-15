@@ -19,6 +19,9 @@ territory. Walk each layer, decide which assurance level v0.1 actually needs:
 - Externally signed checkpoints: the prepare/sign/register ceremony, off-host
   mirror, signing key never in the daemon, checkpoint chains, KTD15 state
   digest anchoring. Keep for v0.1, or defer to the chain-only assurance tier?
+  **Note (from T05):** T05's keep-verdict on the KTD15 state digest is
+  conditional on checkpoints surviving here — cutting/deferring them re-opens
+  that piece of T05.
 - KTD16's blind query index (keyed tags, verify-against-primary, rebuild) —
   exists to make rotation status cheap. Defer with rotation, keep, or
   simplify to full-scan-at-small-scale?
