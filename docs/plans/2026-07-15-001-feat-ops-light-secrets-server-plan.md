@@ -22,10 +22,16 @@ execution: code
 - **Open blockers:** None. Rotation semantics, auth surface, storage, transport,
   and audit-chain design are settled in the Planning Contract; the two remaining
   open questions (fnox-native protocol, project name) gate phase 2 and
-  cosmetics, not v0.1.
-- **Execution profile:** Rust, single binary. Test-first on the authorization,
-  token-lifecycle, and audit-chain paths; every acceptance example lands as an
-  automated test in the compatibility harness (U11).
+  cosmetics, not v0.1. Two internal gates order the work without blocking it:
+  U0 (client characterization) freezes fnox and Vault/OpenBao wire evidence
+  before the API router is finalized, and U2's storage spike proves redb can
+  carry the atomic state-plus-audit transaction (KTD8) before higher units
+  build on it.
+- **Execution profile:** Rust, single binary. U0 first characterizes the pinned
+  fnox and Vault/OpenBao client behavior as recorded fixtures. Test-first on
+  the authorization, token-lifecycle, and audit-chain paths; every acceptance
+  example lands as an automated test in the compatibility harness (U11), which
+  drives the actual pinned `fnox`, `vault`, and `bao` binaries.
 - **Stop conditions:** Surface a blocker instead of guessing when a change would
   alter Product Contract scope, weaken the fail-closed postures (R18, R20, R26),
   or contradict a session-settled decision.
@@ -91,7 +97,14 @@ operator has wanted to work in.
   the same crate, and one shared crypto model on both sides makes the phase-2
   native provider cheaper.) The server holds an `age` identity supplied at boot
   rather than running an unseal ceremony — the ops-light thesis applied to
-  crypto, not an exception to it.
+  crypto, not an exception to it. (planning-revised 2026-07-15: `age` remains
+  the only recipient mechanism and the boot-time seal boundary, but it wraps a
+  compact fixed-purpose keyring rather than encrypting every stored record
+  directly — KTD3. The settled decision's substance survives — no seal state
+  machine, no policy-driven KEK/DEK hierarchy, recipients stay the
+  operator-facing model — while recipient rotation becomes a cheap keyring
+  rewrap and every ciphertext gets bound to its record so valid ciphertext
+  cannot be transplanted between paths.)
 
 - **Dedicated secrets service over a password manager.** (session-settled:
   user-directed — chosen over 1Password: password-manager primitives are built
@@ -117,6 +130,17 @@ operator has wanted to work in.
   — chosen over building for AI agents first: "Vault is too much" is the pain
   that exists today; agent workloads are anticipated, not present.)
 
+- **The bundled CLI over a local control socket is the management surface.**
+  (planning-settled 2026-07-15: the Vault-compatible API is the data-plane
+  integration surface for clients; identity, grant, credential, rotation,
+  audit, backup, and key operations live on an owner-only local Unix socket
+  driven by the bundled CLI, plus offline subcommands for init, restore, and
+  key rotation. One process, one binary, two routers — management never rides
+  the remote listener, so the highest-privilege operations are simply not
+  remotely reachable, and no incompatible pseudo-Vault management endpoints
+  get invented. Remote administration, if it ever exists, is a later phase
+  with its own authentication design.)
+
 The topology the Vault-compat decision buys:
 
 ```mermaid
@@ -138,18 +162,25 @@ flowchart TB
 - A3. Operator — runs the server and performs rotations. The same person as A1
   at this team size.
 - A4. AI agent — a non-human workload with a short-lived, narrow need.
-  Anticipated, out of v0.1.
+  Anticipated, out of v0.1. The identity schema carries a `kind` field from
+  day one (`human` | `workload`, extensible) so the agent type lands later
+  without a data migration; no agent-specific enforcement ships in v0.1.
 
 ### Key Flows
 
 - F1. Operator brings the server up
   - **Trigger:** A3 has a fresh host and no server running.
   - **Actors:** A3
-  - **Steps:** Download the binary; supply the encryption key material and the
-    one-time bootstrap credential; start the server; create the first identity
-    and its credential through the bootstrap credential, which disables itself.
-  - **Outcome:** The server is serving and one identity can read and write.
-  - **Covered by:** R15, R16, R17, R18, R21
+  - **Steps:** Download the binary; run `init` locally against an exclusively
+    locked empty data directory, which creates the store, encrypted keyring,
+    audit genesis, and first management identity in one transaction and shows
+    that identity's short-lived credential exactly once; start `serve` with the
+    `age` identity supplied through an approved credential channel; issue
+    normal operator and workload credentials over the local control socket.
+  - **Outcome:** The server is serving and one identity can read and write. No
+    initialization or management route was ever reachable remotely, and no
+    bootstrap credential exists to handle, leak, or disable.
+  - **Covered by:** R15, R16, R17, R18, R21, R30, R34
 
 - F2. Developer reads a secret
   - **Trigger:** A1 runs a command that needs `POPULI_API_KEY`.
@@ -157,15 +188,18 @@ flowchart TB
   - **Steps:** fnox resolves the secret through its Vault provider against the
     server; the server authenticates the identity, checks the path scope,
     returns the value; the read is audited.
-  - **Outcome:** The value reaches the process environment and never touches
-    disk.
-  - **Covered by:** R1, R2, R7, R8, R13
+  - **Outcome:** The server returns the value only after authorization and a
+    durable audit commit, and never intentionally persists the returned
+    plaintext. What fnox, the shell, swap, or the consuming process do with
+    the value after delivery sits outside the server's guarantee (Threat
+    Model).
+  - **Covered by:** R1, R2, R7, R8, R13, R26
 
 - F3. Application authenticates at boot
   - **Trigger:** A2 starts and needs credentials.
   - **Actors:** A2
-  - **Steps:** The workload presents its bootstrap credential; the server issues
-    a TTL-bound token; the workload reads its scoped paths.
+  - **Steps:** The workload presents its AppRole role_id and secret_id; the
+    server issues a TTL-bound token; the workload reads its scoped paths.
   - **Outcome:** The workload runs without a static key on disk.
   - **Covered by:** R7, R8, R9, R17
 
@@ -174,127 +208,278 @@ flowchart TB
   - **Actors:** A3, A1, A2
   - **Steps:** The operator enumerates the secret's consumers — every identity
     whose scope grants read on the path, annotated with last-read recency over
-    R23's window; mints the new value in the upstream SaaS product; writes it to
-    the server, cutting consumers over on their next read; verifies consumers
-    are reading the new version; revokes the old credential in the upstream SaaS
-    product — an action the server records but cannot perform; marks the
-    rotation complete and the old version is retired.
+    R23's window; starts a rotation, which snapshots that consumer set; mints
+    the new value in the upstream SaaS product; writes it to the server with
+    check-and-set so a concurrent write cannot silently clobber the cutover;
+    watches the rotation status view report each snapshotted consumer as
+    on-current, on-prior, or silent-since-write from the versioned read audit
+    (R33) — verification by observation, not guesswork; revokes the old
+    credential in the upstream SaaS product — an action the server records but
+    cannot perform; marks the rotation complete, which succeeds only while the
+    written version is still current, and the old version is retired.
   - **Outcome:** The key is rotated with the consumer list known before the
-    change, not discovered by an outage.
-  - **Covered by:** R10, R11, R12, R23
+    change, not discovered by an outage — and cutover is confirmed per
+    consumer by observed reads of the exact new version.
+  - **Covered by:** R10, R11, R12, R23, R33
 
 ### Requirements
 
 **Vault API compatibility**
 
-- R1. The server serves the Vault KV v2 read, write, list, delete, and
-  versioned-read endpoints, plus the mount-discovery preflight
-  (`sys/internal/ui/mounts/<path>`, reporting KV version 2) and
-  `sys/seal-status` (always reporting unsealed), so an unmodified Vault client
-  can use it as a backend.
-- R2. fnox's existing Vault provider reaches the server with no change to fnox
-  beyond configuration.
+- R1. The server serves the Vault KV v2 read, write, list,
+  soft-delete/undelete/destroy, and versioned-read endpoints, including write
+  `cas` (check-and-set) semantics and metadata read/write carrying
+  `custom_metadata`, `max_versions`, and `cas_required`, plus the
+  mount-discovery preflight (`sys/internal/ui/mounts/<path>`, reporting KV
+  version 2), `sys/seal-status` (always reporting unsealed), and `sys/health`,
+  so an unmodified Vault client can use it as a backend. The exact
+  method/path/status matrix is published in `docs/compatibility.md` and
+  generated from contract tests; endpoints outside it (PATCH included) are
+  rejected explicitly (R3), never silently approximated as ordinary writes.
+- R2. Every fnox version in the published compatibility matrix resolves a
+  secret through its unmodified Vault provider by configuration only. The
+  actual pinned fnox binary — not merely the Vault CLI it is currently
+  understood to shell out to — is the acceptance subject (U0, U11).
 - R3. The server declares which parts of the Vault API it implements and returns
   an explicit unsupported response for requests outside that declared surface.
-- R31. The server implements Vault token authentication (`X-Vault-Token`) plus
-  the AppRole login endpoint: a workload presents its role_id and secret_id and
-  receives a TTL-bound token (R9). Token auth and AppRole are the entire
-  supported auth surface.
+- R31. The server implements Vault token authentication (`X-Vault-Token`), the
+  AppRole login endpoint (a workload presents its role_id and secret_id and
+  receives a TTL-bound token, R9), and `GET /v1/auth/token/lookup-self`
+  (identity, TTL remaining, creation time — never credential material). v0.1
+  tokens are non-renewable: login responses advertise `renewable: false` and
+  `renew-self` returns R3's explicit unsupported error; workloads re-login via
+  AppRole. That is the entire supported auth surface.
 
 **Storage and crypto**
 
-- R4. Secret material is encrypted at rest under a key that cannot be derived
-  from the storage medium alone.
-- R5. Secret material in buffers the server allocates and controls is zeroized
-  once its lifetime ends; transient copies made inside the serialization, HTTP,
-  and TLS layers are minimized but sit outside the zeroization guarantee.
+- R4. Secret values and confidential audit payloads are encrypted at rest under
+  purpose-separated record keys that cannot be derived from the storage medium
+  alone. Every ciphertext is authenticated against its immutable logical
+  context (store, record type, path, version, key id), so valid ciphertext
+  copied to another path, version, or store fails authentication rather than
+  decrypting.
+- R5. Plaintext secret material is held only in bounded server-owned secret
+  buffers for the minimum request lifetime and is zeroized on drop. The
+  guarantee excludes unavoidable copies inside the allocator, kernel, HTTP/TLS
+  stack, and client; best-effort process-dump hardening is documented
+  separately from this guarantee.
 - R6. The server persists to a single-node store with no external database
   requirement.
 - R20. Credentials and secret material never traverse the network in cleartext,
-  and the server refuses plaintext remote connections.
-- R21. The server's `age` identity has a documented handling story that does not
-  end in a plaintext file on disk, a shell history, or a process argument.
-- R24. Raw bootstrap credentials and issued tokens are disclosed once at
-  creation and never persisted, logged, or recoverable afterward; the server
-  validates them against cryptographically protected, non-recoverable verifiers
-  that support revocation and rotation.
+  and the server refuses plaintext remote connections. Reverse-proxy deployment
+  is supported only when the backend hop is loopback or a Unix socket and the
+  proxy boundary is explicitly configured; forwarded client-identity headers
+  are ignored by default.
+- R21. The server's active `age` identity and any offline recovery copy have
+  distinct documented custody stories, neither of which ends in a plaintext
+  file on disk, a shell history, or a process argument. The active identity is
+  supplied at boot through an approved credential channel; the recovery copy
+  lives off-host (R32).
+- R24. Raw credentials — the first management credential, AppRole secret_ids,
+  and issued tokens — are disclosed once at creation and never persisted,
+  logged, or recoverable afterward. Each credential carries a public accessor
+  that selects exactly one record; the secret portion is validated against a
+  keyed, non-recoverable verifier under a key held in the encrypted keyring,
+  so possession of the database alone is insufficient to verify guesses or
+  mint credentials. Verifiers support revocation and rotation.
 
 **Identity and access**
 
 - R7. Every human, application, and integration authenticates as a distinct
-  identity.
-- R8. An identity's access is scoped to a subset of secret paths rather than the
-  whole store. A scope is defined over logical secret paths and governs every
-  API form of that path — data, metadata, list, delete, and versioned reads.
+  identity. Identities carry a `kind` field (`human` | `workload`, extensible)
+  used for display and audit; v0.1 attaches no kind-specific enforcement.
+- R8. An identity's access is scoped to a subset of secret paths rather than
+  the whole store. Authorization operates on one canonical resource — the
+  configured mount plus a validated sequence of logical path segments — that
+  the router constructs exactly once per request; every API form of a path
+  (data, metadata, list, delete, undelete, destroy, versioned read) converts
+  to that resource before the grant check. The parser rejects rather than
+  normalizes ambiguous forms: encoded separators, dot segments, empty middle
+  segments, repeated separators, control characters, invalid UTF-8, and
+  double-decoding. Grants are exact-path or segment-prefix subtree matches
+  over that canonical form — no globs, no regular expressions, no deny rules,
+  no policy language.
 - R9. A credential issued to an identity carries a TTL and can be revoked before
   that TTL expires.
-- R22. Management capabilities — creating identities, changing scopes, issuing
-  and revoking credentials, completing rotations, reading the audit log, and
-  enumerating a secret's consumers (R10) — require an explicit grant distinct
-  from any secret-path read or write grant. Audit records are confidential at
-  rest and accessible for query, export, and verification only under that grant.
-- R28. Disabling an identity or reducing its scope takes effect for every
-  outstanding credential before its next authorized request, independent of
-  token TTL, and the resulting rejection is audited.
+- R22. Authorization uses a closed, versioned capability set rather than one
+  boolean management bit. Secret capabilities are distinct: read-current,
+  read-history (any non-current version), list, write, soft-delete/undelete,
+  and destroy — reading history or destroying versions is never implied by
+  read-current or write. Management capabilities are likewise distinct:
+  identity and grant management, credential issue/revoke, rotation management,
+  consumer enumeration (R10), audit read/export, backup, key rotation, and
+  diagnostics — so an audit-pulling integration needs no power to mint
+  credentials. Built-in bundles (e.g. `admin`, `auditor`) are convenience
+  aliases over the fixed set, not a policy language. Audit records are
+  confidential at rest and accessible for query, export, and verification only
+  under the audit capabilities.
+- R28. Identity disable, grant reduction, credential revocation, and authorized
+  requests are linearized through the storage transaction boundary (KTD8): any
+  request whose authorization transaction begins after the administrative
+  change commits observes the new state, independent of token TTL; an already
+  linearized in-flight request may complete. Tokens are capability-thin — they
+  carry identity, expiry, and revocation state, never a snapshot of grants —
+  and every authorized request reloads current grants, which is what makes
+  this requirement implementable without an invalidation bus. Every resulting
+  rejection is audited.
 
 **Rotation**
 
 - R10. The server records which identities have read a given secret. A secret's
-  consumer list is every identity whose scope (R8) grants read on its path,
-  annotated with its last recorded read inside R23's window — recency annotates
-  the list; it never filters an identity out of it.
-- R11. A secret retains prior versions when a new value is written. Writing the
-  replacement cuts consumers over immediately — KV v2 reads return the latest
-  version — and version history keeps the previous value readable for rollback
-  until the rotation is marked complete and the old version retired. The staging
-  window lives upstream: the old SaaS credential stays valid until the operator
-  revokes it after cutover.
+  consumer view reports two separately labeled facts that are never collapsed
+  into one unqualified list: **authorized** — every identity whose current
+  grants (R8) permit read on the path — and **observed** — identities with
+  audited reads, each carrying last-read time and the version served (R13),
+  inside R23's window. Recency and observation annotate the authorized list;
+  they never filter an identity out of it. (A declared-consumer registry for
+  pre-migration dependencies stays deferred — see Deferred / Open Questions.)
+- R11. A secret retains prior versions when a new value is written, and writes
+  are monotonically versioned with Vault KV v2 check-and-set: `cas=0` is
+  create-only, a positive `cas` must equal the current version, and paths with
+  `cas_required` reject unconditional writes — so two operators cannot
+  silently clobber each other's cutover. Writing the replacement cuts
+  consumers over immediately — KV v2 reads return the latest version — and
+  version history keeps the previous value readable for rollback (under the
+  read-history capability, R22) until the rotation is marked complete and the
+  old version retired. Starting a rotation snapshots the consumer set and
+  writes the target version atomically; completing it succeeds only while
+  that target is still the current version; rollback copies a prior value
+  into a new higher version — the current-version pointer never moves
+  backward. The staging window lives upstream: the old SaaS credential stays
+  valid until the operator revokes it after cutover.
 - R12. The server surfaces a secret's age — time since its last completed
-  rotation, or since creation when never rotated — against a per-secret rotation
-  interval, and reports "no interval set" when none is configured.
-- R23. R10's enumeration is computed over a documented lookback window, and
-  R13's audit retention is at least as long as that window.
+  rotation, or since creation when never rotated — against a per-secret
+  rotation interval stored in KV v2 `custom_metadata` under a documented key,
+  and reports "no interval set" when none is configured. A value written
+  outside a rotation is labeled `changed_since_last_completed_rotation`; the
+  age display never implies the current value was covered by an older
+  completed rotation.
+- R23. R10's observed view is computed over a documented lookback window — the
+  authorized view does not expire — and R13's audit retention is at least as
+  long as that window.
 - R29. Deleting a secret version is reversible and distinct from destruction; a
-  management-gated destroy operation irreversibly removes a version, and
-  retention behavior for retired and deleted versions is documented.
+  destroy-capability-gated operation irreversibly removes a version, and
+  full metadata-plus-all-versions deletion additionally requires explicit
+  confirmation and an audited reason. Per-secret and mount-default
+  `max_versions` bound retained history; retention never destroys the prior
+  version of a rotation that has not been marked complete, and behavior for
+  retired and deleted versions is documented.
+- R33. After a replacement write, a management-gated rotation status view
+  reports, for each consumer in the rotation's snapshot, whether its latest
+  audited read fetched the current version (`on-current`), a prior version
+  (`on-prior`), or nothing since the write (`silent-since-write`) — computed
+  from R13's versioned read events. Observation only: no automatic revocation,
+  no campaign state machine in v0.1.
 
 **Audit**
 
-- R13. Every read, write, delete, and authentication attempt, and every
-  identity, scope, and credential lifecycle change, is written to an append-only
-  log whose entries record identity, path, operation, timestamp, and outcome —
-  never secret values or credential material.
-- R14. The audit log is tamper-evident: a removed or edited entry is detectable.
-- R25. Secret values and credential material never appear in any server output —
-  audit entries, application and access logs, traces, metrics labels, error
-  responses, panic output, or crash diagnostics — including echoes of request
-  headers and bodies.
-- R26. If an audit entry cannot be written, the audited operation fails — the
-  server never completes a read, write, or credential operation it could not
-  record.
-- R27. Unauthenticated surfaces enforce request-size and attempt-rate limits,
-  and audit-log capacity is monitored with a documented fail-closed response
-  before storage exhaustion.
+- R13. Every read, write, delete, authorization decision, and admitted
+  authentication attempt, and every identity, scope, credential, and rotation
+  lifecycle change, is written to an append-only log whose entries record
+  identity, path, operation, timestamp, outcome, and — for successful secret
+  reads and writes — the version served or written; never secret values or
+  credential material. Requests dropped by the pre-verifier rate limiter are
+  accounted for in bounded aggregate entries (source bucket, count, window)
+  rather than one durable row per flood packet, so an unauthenticated attacker
+  cannot fill the disk one audit entry at a time.
+- R14. The audit log is tamper-evident at two documented assurance levels:
+  local chain verification detects any edited, removed, inserted, or reordered
+  entry; verification against an independently retained signed checkpoint
+  additionally detects wholesale re-chaining and truncation through the
+  anchored sequence. The verifier reports the anchored prefix and the
+  unanchored tail separately. The claim excludes an attacker controlling the
+  running process and its signing key before entries are anchored — detection
+  of offline and post-checkpoint tampering, not prevention of live forgery.
+- R25. Except for the body of an explicitly authorized successful secret-read
+  response, secret values and credential material never appear in any server
+  output — audit entries, application and access logs, traces, metrics labels,
+  error responses, panic output, or crash diagnostics — including echoes of
+  request headers and bodies. Secret paths and identity names are additionally
+  banned from metrics labels.
+- R26. Every state mutation and its audit entry commit atomically in one
+  storage transaction — neither becomes visible without the other. Every
+  successful secret read withholds its response until the read's audit entry
+  has committed; if the audit commit fails, the client receives an error and
+  no secret material is returned. The audited outcome for a read means
+  "authorized and response prepared" — no server can attest the client
+  received the bytes.
+- R27. Unauthenticated surfaces enforce request-size and attempt-rate limits
+  with bounded limiter state (no per-attacker-address permanent allocation).
+  Authenticated surfaces enforce request-size limits, a global concurrency
+  cap, and per-identity rate limits sufficient to bound decrypt-plus-audit
+  write amplification from a stolen token or a looping client. Bodies, header
+  counts, path lengths, JSON depth, list results, and secret value sizes all
+  have documented bounds that fail before unbounded allocation. Audit-log and
+  disk capacity have warning and stop-admitting thresholds with a documented
+  fail-closed response before storage exhaustion, plus a reserved recovery
+  allowance so checkpoint export, backup, and orderly shutdown remain possible
+  after the data plane has failed closed.
 
 **Operations**
 
 - R15. The server ships as a single binary with no runtime dependency on a
   cluster, an external database, or a platform team.
 - R16. A first-time operator reaches a first successful secret read by following
-  one documented sequence.
-- R17. The server's bootstrap credential has a documented handling story that
-  does not end in a plaintext file on disk.
+  one documented sequence, and recurring operations run through task-oriented
+  CLI commands (identity, grant, token, approle, secret, rotation, audit, key,
+  backup) with human-readable and stable JSON output.
+- R17. The first management credential is generated by local `init`, shown once
+  to a TTY or caller-supplied file descriptor, stored only as a verifier, and
+  never accepted by the remote listener. Its documented handling story does
+  not end in a plaintext file on disk.
 - R18. The server refuses to start in an unsafe configuration rather than
   warning and continuing. Unsafe configurations include, at minimum: no
-  encryption key material configured, no bootstrap credential configured on an
-  uninitialized store (R17 — the means of creating the first identity), and a
-  remote listener with no transport encryption.
-- R30. The bootstrap credential is single-use and short-lived: it is
-  irreversibly disabled once the first management identity exists, cannot be
-  re-enabled on an initialized store, and every attempted use is audited.
-- R32. A single operator can take an encrypted backup of the store and audit log
-  while the server runs, and restore it onto a fresh host by a documented,
-  tested sequence.
+  encryption key material configured; `serve` on an uninitialized store;
+  `init` on an initialized or concurrently opened store; a remote listener
+  with no transport encryption; unknown configuration keys; secret material
+  supplied via argv; unsafe data-directory ownership, permissions, or
+  symlinked sensitive paths; a store/keyring mismatch; an unknown or newer
+  schema version or a non-`ready` lifecycle state (R35); and a data directory
+  whose filesystem cannot hold the exclusive lock. Validation completes before
+  the listener binds, and every refusal exits non-zero naming the setting.
+- R30. Initialization is local, exclusive, and one-time: creation of the store
+  id, schema version, encrypted keyring, audit genesis, first management
+  identity, and its credential verifier occurs in one transaction against an
+  exclusively locked empty data directory. Repeated or concurrent `init`
+  cannot create a second first-administrator, re-initialization of an
+  initialized store is refused, and every attempt is audited.
+- R32. A single operator can take an encrypted, transactionally consistent
+  backup of the store and audit log while the server runs, and restore it onto
+  a fresh host by a documented, tested sequence. The backup archive carries a
+  manifest (store id, schema version, keyring version, chain head, latest
+  included checkpoint, checksums) and never contains the private `age`
+  identity or the checkpoint signing key; the documented recovery package
+  pairs the archive with offline copies of those keys, and the docs state
+  plainly that a store backup without them is not a recovery. Restore targets
+  an empty directory, verifies archive integrity, chain, and checkpoint
+  relationship before the store becomes startable, and — because a restored
+  snapshot could otherwise resurrect credentials revoked after it was taken —
+  opens a new credential epoch that invalidates all pre-restore tokens and
+  secret_ids by default. Identities, grants, secrets, and audit history
+  survive; bearer credentials are reissued.
+- R34. The remote listener exposes only the declared Vault-compatible data
+  plane. Identity, grant, credential, rotation, consumer, audit-query, backup,
+  and key operations are reachable only through the owner-restricted local
+  control socket (still authenticated and audited) or offline CLI commands —
+  never remotely.
+- R35. The store carries an explicit schema/format version and a lifecycle
+  state (`ready` | `reencrypting` | `restoring`). `serve` requires
+  `lifecycle=ready` and refuses schema versions newer than the binary;
+  migrations are forward-only, take a verified backup first, record the
+  transition in the audit log, and CI retains a restore-and-migrate fixture
+  for every released schema. Binary rollback after a completed migration
+  stays deferred; the version stamp is what makes that deferral safe.
+- R36. The server distinguishes liveness from readiness — readiness is false
+  whenever the keyring, schema, transaction/audit path, or capacity state
+  cannot uphold the fail-closed guarantees — reloads TLS certificate material
+  without a restart (restarts are expensive while key supply is
+  operator-attended), and shuts down gracefully: stop admission, drain bounded
+  in-flight work, flush, write a final checkpoint, zeroize key material.
+- R37. CLI commands accepting secret values or private key material read them
+  from stdin, an inherited file descriptor, an approved credential channel, or
+  a hidden interactive prompt — never argv; environment-variable input is
+  development-only behind an explicit unsafe flag. No plaintext bulk-export
+  feature ships in v0.1; backup and audit exports are encrypted by default.
 
 **Project and licensing**
 
@@ -321,10 +506,13 @@ flowchart TB
   - **Covers R10, R11.**
   - **Given:** A Populi API key that three distinct identities have read within
     the documented lookback window (R23).
-  - **When:** The operator writes a replacement value.
+  - **When:** The operator starts a rotation and writes a replacement value
+    with check-and-set.
   - **Then:** The operator can list those three identities, consumers receive
-    the new value on their next read, and the previous version stays readable
-    through versioned read until the rotation is marked complete.
+    the new value on their next read, the previous version stays readable
+    (under the read-history capability) until the rotation is marked complete,
+    a concurrent write with a stale `cas` fails without replacing the rotation
+    target, and completion fails if a later version has superseded the target.
 
 - AE4. Missing encryption key at boot
   - **Covers R18.**
@@ -341,26 +529,68 @@ flowchart TB
 
 - AE6. Scope denial across path forms
   - **Covers R8, R13.**
-  - **Given:** An identity scoped to `apps/canvas/*`.
+  - **Given:** An identity with a subtree grant on `apps/canvas`.
   - **When:** It requests `apps/populi/api-key` through any endpoint form,
-    including list on the metadata path.
-  - **Then:** The request is denied and the denial is audited.
+    including list on the metadata path, and through ambiguous encodings
+    (encoded slashes, dot segments, doubled separators) of paths inside and
+    outside its grant.
+  - **Then:** The request is denied and the denial is audited; ambiguous
+    encodings are rejected outright and can never authorize as a resource
+    different from the one checked.
 
 - AE7. Backup and restore
   - **Covers R32, R14.**
-  - **Given:** A running server holding secrets, identities, and audit history.
-  - **When:** The operator takes a backup, provisions a fresh host, and restores
-    onto it.
-  - **Then:** Every secret is readable, every identity authenticates, and the
-    audit chain verifies against the last off-host checkpoint.
+  - **Given:** A running server holding secrets, identities, and audit history,
+    with a token revoked after the backup was taken.
+  - **When:** The operator takes a backup, provisions a fresh host, restores
+    onto it, and supplies the offline-recovered `age` identity.
+  - **Then:** Every secret is readable, every identity and grant survives, the
+    audit chain verifies against the last off-host checkpoint, every
+    pre-restore token and secret_id is rejected (the revoked token stays
+    revoked), and a freshly issued credential authenticates.
 
 - AE8. Clean-host onboarding
   - **Covers R2, R16.**
   - **Given:** A fresh consumer host with no Vault tooling installed.
   - **When:** A developer follows the documented sequence — install the pinned
-    `vault` CLI, set `VAULT_ADDR`, authenticate.
-  - **Then:** Their first secret read succeeds with no fnox change beyond
-    configuration.
+    fnox binary plus whatever prerequisite U0 proved that version requires,
+    configure the Vault provider, authenticate — and runs `fnox` commands that
+    resolve a secret from the server.
+  - **Then:** The fnox-driven read succeeds with no fnox change beyond
+    configuration — the fnox binary itself, not a stand-in CLI, is the subject.
+
+- AE9. Crash atomicity of state and audit
+  - **Covers R26, KTD8.**
+  - **Given:** A secret write (and, separately, a token revocation) with the
+    process killed at injected points around the commit.
+  - **When:** The server restarts and the store is inspected.
+  - **Then:** Either both the state change and its audit entry exist, or
+    neither does — no committed mutation without its audit record, no audit
+    record for a mutation that never landed.
+
+- AE10. Audit-commit failure returns no secret
+  - **Covers R26.**
+  - **Given:** A readable secret and a fault-injected audit-commit failure.
+  - **When:** An authorized client reads the secret.
+  - **Then:** The response is an error and contains no secret bytes.
+
+- AE11. Rotation status observes version adoption
+  - **Covers R10, R13, R33; Key Flow F4.**
+  - **Given:** Two identities in a rotation's consumer snapshot; the operator
+    writes the new version.
+  - **When:** Only one identity reads after the write.
+  - **Then:** The status view shows one consumer `on-current` and one
+    `silent-since-write`, from audited read versions — not from grant
+    inference.
+
+- AE12. Management surface is not remotely reachable
+  - **Covers R34.**
+  - **Given:** A remote client with a valid management-capable token.
+  - **When:** It attempts identity creation, credential issuance, audit query,
+    or any control operation against the remote listener.
+  - **Then:** The routes do not exist on that listener — explicit rejection,
+    not an authorization failure — while the same operations succeed over the
+    local control socket.
 
 ### Success Criteria
 
@@ -396,18 +626,32 @@ flowchart TB
   production adoption.
 - Dynamic secrets: minting Database, Kubernetes, or AWS credentials on demand.
   These do not apply to static third-party SaaS keys, which is the workload.
+- A declared-consumer registry and pre-migration inventory import (the user's
+  earlier deferral stands; KTD11's metadata record and R10's labeled views are
+  the reserved seam).
+- Rotation campaigns beyond R33's status view: multi-step state machines,
+  per-consumer acknowledgements, signed closeouts, drift detectors, canaries,
+  and webhooks. R13's version-on-audit is the seam they build on.
+- OIDC/JWT auth (after AppRole is solid) and an embedded Vault-CLI shim for
+  BUSL avoidance (after U11 pins real CLI behavior).
 
 **Outside this product's identity**
 
 - HA, clustering, and consensus. The single-node ceiling is the product.
-- A custom key hierarchy and an unseal ceremony. `age` recipients are the model;
-  an identity supplied at boot is the seal. R1's `sys/seal-status` is a
-  compatibility stub answering "unsealed", not a seal implementation.
-- A policy DSL. Path-scoped grants, not a language to learn.
+- A configurable key hierarchy and an unseal ceremony. `age` recipients are
+  the model; an identity supplied at boot is the seal; KTD3's fixed-purpose
+  keyring is plumbing under that seal, not a policy surface. R1's
+  `sys/seal-status` is a compatibility stub answering "unsealed", not a seal
+  implementation. Auto-unseal via KMS, TPM, or HSM integration is likewise
+  out.
+- A policy DSL. Path-scoped grants over a fixed capability set, not a language
+  to learn.
 - Human passwords, secure notes, and documents. 1Password keeps those.
 - Vault's full API surface and plugin ecosystem. KV v2 plus auth is the
   boundary.
-- A hosted or SaaS tier.
+- A hosted or SaaS tier, a web administration UI, and a remotely reachable
+  administration API (R34 — management is local by design).
+- Plaintext bulk export (R37).
 
 ### Dependencies / Assumptions
 
@@ -417,15 +661,20 @@ flowchart TB
   contract's v0.1 goals — but if consumers migrate onto the interim tool, the
   post-v0.1 real-rotation milestone must be re-justified against migrating them
   a second time. The decoupling itself is settled.
-- **fnox's Vault provider does not speak HTTP — it shells out to the `vault`
-  CLI.** It runs `Command::new("vault")` with
-  `vault kv get -field=<field> <path>` and fails with an install hint when the
-  binary is absent. R2 still holds, since pointing `VAULT_ADDR` at the server
-  stays configuration-only, but two consequences follow: the compatibility
-  target is the CLI's behavior rather than the KV v2 API alone (which is why R1
-  declares the mount preflight and seal-status), and every consumer host needs
-  HashiCorp's BUSL-1.1-licensed `vault` binary installed. R15's single-binary
-  claim covers the server, not its clients.
+- **fnox transport behavior is versioned evidence, not a permanent
+  assumption.** The evidence as of this writing: fnox's Vault provider shells
+  out to the `vault` CLI — `Command::new("vault")` running
+  `vault kv get -field=<field> <path>`, failing with an install hint when the
+  binary is absent — but the provider surface has grown configuration
+  (`address`, `token`, `credential_command`) that may change transport across
+  releases. U0 pins the target fnox tags, captures their requests on the wire
+  and at the process boundary, and derives client prerequisites and the
+  compatibility endpoint set from those recordings. Consequences that hold
+  under the current evidence: the compatibility target is the CLI's behavior
+  rather than the KV v2 API alone (which is why R1 declares the mount
+  preflight and seal-status), and every consumer host needs HashiCorp's
+  BUSL-1.1-licensed `vault` binary installed. R15's single-binary claim covers
+  the server, not its clients.
 - **The shared-key problem is upstream and no server fixes it.** Teammates and
   integrations sharing one Populi or Canvas key can only be ended by minting
   separate credentials inside each SaaS product. R10 makes the sharing visible;
@@ -451,16 +700,21 @@ flowchart TB
 - The `lx_data_lake` credentials reach FERPA-protected student records (Populi
   enrollments and grades, a Canvas token, a live Postgres DSN). This is why
   production adoption is not a v0.1 gate.
-- **Server restart requires the operator to supply the `age` identity
-  interactively.** Unattended restart is out of scope for v0.1, and this
-  availability cost is accepted as part of the no-unseal-ceremony position — R21
-  rules out every unattended terminus short of an OS secret-storage facility,
-  which v0.1 does not assume.
-- **Compatibility is validated against a documented, pinned `vault` CLI version
-  range.** The mount-discovery preflight (`sys/internal/ui/mounts`) is a
-  Vault-internal endpoint whose contract may change across client releases, so
-  R2's configuration-only guarantee holds for the tested versions, not for all
-  future CLIs.
+- **Server restart key delivery supports two R21-compliant termini:**
+  operator-attended supply (stdin/FD/TTY) and an OS secret-storage facility —
+  specifically a configured credentials directory in the systemd
+  `LoadCredential`/`LoadCredentialEncrypted` layout, read at boot. v0.1
+  implements no custom unseal ceremony and no network KMS client. Hosts
+  without OS secret storage keep the attended path, and that availability cost
+  is accepted as part of the no-unseal-ceremony position; environment-variable
+  key delivery is development-only (R37).
+- **Compatibility is validated against a documented, pinned client matrix** —
+  initially HashiCorp `vault` CLI 1.15.x and 1.17.x, OpenBao `bao` 2.x, and
+  the two most recent fnox releases at U0 time; exact patch pins live in CI
+  and `docs/operating.md` (KTD14). The mount-discovery preflight
+  (`sys/internal/ui/mounts`) is a Vault-internal endpoint whose contract may
+  change across client releases, so R2's configuration-only guarantee holds
+  for the tested versions, not for all future CLIs.
 - **Developer tokens persist on consumer hosts by default** (`VAULT_TOKEN` or
   the vault CLI's `~/.vault-token`). The accepted v0.1 mitigation is R8 path
   scoping plus short TTL and revocation (R9); an OS-keychain token helper is
@@ -468,7 +722,7 @@ flowchart TB
 - **Workload secret-zero terminus:** each application's AppRole secret_id is
   delivered by its deployment mechanism (systemd credential, injected
   environment). The static secret is relocated into deployment configuration,
-  and that is the accepted v0.1 posture; R30's single-use bootstrap covers only
+  and that is the accepted v0.1 posture; R30's local one-time init covers only
   the server's own initialization.
 
 ### Outstanding Questions
@@ -530,453 +784,912 @@ Technical Decisions below. Each change resolves a 2026-07-15 review finding the
 user signed off on; none alters the product's problem frame, actors, or
 positioning.
 
+A second 2026-07-15 revision round incorporated a three-way competitive plan
+review. Substantive outcomes: remote bootstrap replaced by local `init` plus a
+local control plane (R17/R30/R34); the `age` decision evolved to a keyring
+wrap with record AEAD (KTD3); state and audit unified into one transactional
+durability domain (R26/KTD8); credentials recast as accessor-plus-keyed-MAC
+with no hot-path password KDF (KTD5); CAS, capability separation, canonical
+paths, version-on-audit, and the rotation status view added (R8/R11/R13/R22/
+R33); backup gained a manifest and credential epoch (R32); schema versioning,
+operational lifecycle, and CLI hygiene added (R35–R37); U0 client
+characterization added; threat model added below. The problem frame, actors,
+positioning, single-node ceiling, and the deferrals the user already ruled on
+(pre-migration inventory, production adoption) are unchanged.
+
+### Threat Model and Security Invariants
+
+**Protected against in v0.1**
+
+- Theft or copying of the data directory or a backup archive without the
+  offline `age` identity — ciphertext plus verifiers only; the database alone
+  can neither disclose values nor validate or mint credentials (R4, R24).
+- Unauthenticated remote callers, and authenticated callers reaching outside
+  their granted capabilities and paths, including via ambiguous path encodings
+  and non-data endpoint forms (R8, R22).
+- Ciphertext substitution: valid encrypted records transplanted between paths,
+  versions, or stores fail authenticated decryption (R4, KTD3).
+- Crash, restart, and power loss at documented storage fault boundaries: no
+  state change without its audit entry, no audit entry for a change that never
+  landed (R26, KTD8).
+- Offline editing, deletion, reordering, or truncation of audit history
+  through the last independently retained checkpoint (R14).
+- Restore-based credential resurrection: a restored snapshot cannot revive
+  tokens or secret_ids revoked after it was taken (R32).
+- Resource-exhaustion on the unauthenticated surface, including audit-fill
+  floods, within R27's documented bounds.
+
+**Not protected against in v0.1**
+
+- A live attacker with root, kernel, or debugger control of the running,
+  unlocked process — including its in-memory keyring and checkpoint signing
+  key before entries are anchored.
+- An operator or attacker holding both the store and the boot-supplied key
+  material.
+- A client, shell, or consuming process that retains, logs, swaps, or leaks a
+  secret after an authorized read (F2's boundary).
+- Compromise of the upstream SaaS product or of a credential at its point of
+  minting.
+- Host loss between the most recent backup/checkpoint and failure — the
+  accepted single-node RPO.
+
+**Trusted dependencies**
+
+- The host OS and CSPRNG, filesystem locking and fsync/rename semantics on a
+  supported local filesystem, the TLS private key, the boot credential
+  channel, the independently retained checkpoint copy, and the operator's
+  wall clock (see Assumptions — clock model).
+
+**Cross-cutting invariants**
+
+- Every authorization decision consumes one canonical resource representation
+  (R8); no handler sees a raw URI path.
+- No mutation becomes visible without its audit entry; no secret response
+  starts transmitting before its audit entry commits (R26).
+- Decryption happens only after current identity and grant state pass (R28) —
+  never speculatively.
+- Historical versions require a capability distinct from current reads (R22).
+- Raw bearer credentials are never persisted (R24); secret values never leave
+  the server except in an authorized read body (R25).
+
 ### Key Technical Decisions
 
-- KTD1. **HTTP surface: `axum` over rustls.** `axum` implements
-  `tower::Service`, so `tower-http` middleware (auth extraction, request limits,
-  tracing) composes without glue, and rustls TLS wires through `axum-server`.
-  Resolves OQ2's HTTP question. Rationale: fnox already depends on `rustls`; one
-  TLS stack across client and server. (Research: axum 0.8, Tokio-team
-  maintained; actix-web's throughput edge does not matter at single-node
-  nonprofit scale.)
+- KTD1. **HTTP surface: two `axum` routers in one process.** A remote
+  Vault-compatible data-plane router over rustls (via `axum-server`), and an
+  owner-restricted Unix-socket control-plane router for management (R34).
+  `axum` implements `tower::Service`, so `tower-http` middleware (auth
+  extraction, request limits, tracing) composes without glue. Both routers
+  call the same typed application services through the transaction coordinator
+  (KTD8); neither handler layer touches storage directly. Resolves OQ2's HTTP
+  question. Rationale: fnox already depends on `rustls`; one TLS stack across
+  client and server. (Research: axum 0.8, Tokio-team maintained; actix-web's
+  throughput edge does not matter at single-node nonprofit scale;
+  `axum-server` provides Unix-listener construction, TLS reload, and graceful
+  shutdown.)
 
-- KTD2. **Storage: `redb` embedded ACID store.** (session-settled: user-approved
-  — chosen over `rusqlite`/SQLite: pure-Rust copy-on-write B-trees with MVCC fit
-  a small versioned-blob KV, and a single dependency-light crate matches the
-  single-binary thesis; SQLite remains the fallback if 20 years of hardening
-  outweighs API fit.) Resolves OQ2's storage question. **Load-bearing caveat:**
-  redb's single-writer lock is silently skipped on filesystems without file-lock
-  support, permitting multi-process corruption — U1's startup MUST verify the
-  data directory supports locking and refuse to start otherwise (folds into
-  R18).
+- KTD2. **Storage: `redb` embedded ACID store, gated by a proof spike.**
+  (session-settled: user-approved — chosen over `rusqlite`/SQLite: pure-Rust
+  copy-on-write B-trees with MVCC fit a small versioned-blob KV, and a single
+  dependency-light crate matches the single-binary thesis; SQLite remains the
+  fallback if 20 years of hardening outweighs API fit.) Resolves OQ2's storage
+  question. The store is one redb file with multiple tables — secrets,
+  metadata, identities, grants, credentials, rotation records, audit chain,
+  and a `meta` table (format version, lifecycle state, store id) — because
+  KTD8's atomicity demands one durability domain. **Proof gate:** U2 opens
+  with a spike proving, on redb, the load-bearing operations everything above
+  depends on: multi-table atomic state-plus-audit commit, crash recovery at
+  injected kill points, a consistent live snapshot for backup, and the
+  rotation/audit query shapes. If the spike fails, the SQLite fallback
+  triggers and the swap is recorded here — before higher units are shaped
+  around the store. **Load-bearing caveat:** redb's single-writer lock is
+  silently skipped on filesystems without file-lock support, permitting
+  multi-process corruption — so startup takes its own explicit OS-level
+  exclusive lock (`fd-lock` on a lockfile in the data directory) and refuses
+  to start when it cannot be acquired, rather than trusting library-internal
+  locking (folds into R18); a second instance pointed at the same directory
+  exits non-zero.
 
-- KTD3. **Encryption at rest: `age` v0.12 envelope under one boot-supplied
-  server recipient.** Instantiates the settled `age` decision. Every stored blob
-  is `age`-encrypted to the server's single recipient; decryption happens on
-  demand in the request path. Resolves OQ6's topology question in favor of one
-  server recipient for every secret (simplest; the per-secret-recipient
-  alternative buys nothing while recipients stay out of the authorization path
-  per the Product Contract). The cost this accepts — rotating the server
-  identity is a full-store re-encrypt — is owned by U8.
+- KTD3. **Encryption at rest: an `age`-wrapped fixed-purpose keyring plus
+  record-level AEAD.** Instantiates the settled `age` decision as revised in
+  the Product Contract. `init` generates a compact keyring of independent
+  random symmetric keys — record-encryption key (with decrypt-only
+  predecessors after rotation), credential-verifier MAC key, audit-payload
+  key — each with a key id. The keyring is `age` v0.12-encrypted to the
+  boot-supplied server recipient (and optionally to one documented offline
+  recovery recipient), opened once at boot into `secrecy` types. Stored
+  records are AEAD-encrypted (`aes-gcm`, already in the fnox stack) with
+  associated data binding each ciphertext to store id, record type, mount,
+  canonical path, secret version, and key id — transplanted ciphertext fails
+  authentication. What this buys over per-blob `age`: recipient rotation
+  becomes an atomic keyring rewrap instead of a full-store re-encrypt, an
+  offline recovery recipient costs nothing per record, per-record overhead
+  drops, and purpose separation keeps token verification and audit
+  confidentiality off the secret-encryption key. Record-key rotation (the
+  rare full pass) is owned by U8. Recipients stay out of the authorization
+  path per the Product Contract; `age` remains the only asymmetric mechanism
+  and the seal boundary. The `age` crate is pre-1.0, so the exact version is
+  pinned and decrypt fixtures survive upgrades.
 
-- KTD4. **Audit chain: per-entry hash chain (`blake3`) with periodic
-  `ed25519-dalek`-signed checkpoints mirrored off-host.** Resolves OQ4
-  (per-entry, not per-batch) and answers R14's trust-anchor gap: a re-chaining
-  attacker with write access is caught because the off-host checkpoint pins a
-  chain head the attacker cannot retroactively rewrite. (Research: this is the
+- KTD4. **Audit chain: per-entry hash chain (`blake3`) over encrypted
+  payloads, with periodic `ed25519-dalek`-signed checkpoints exported as files
+  for an operator-owned off-host mirror.** Resolves OQ4 (per-entry, not
+  per-batch) and answers R14's trust-anchor gap: a re-chaining attacker with
+  write access is caught because the off-host checkpoint pins a chain head the
+  attacker cannot retroactively rewrite. (Research: this is the
   Certificate-Transparency / Trillian signed-tree-head pattern reduced to
   single-node scale; full Merkle inclusion-proof infrastructure would be
-  over-building for v0.1.) The checkpoint signing key is supplied at boot via
-  the same secret-delivery mechanism as the `age` identity, held only in a
-  `secrecy::SecretBox` and never persisted on the host; signed checkpoints are
-  mirrored off-host per R14, so a host-write attacker cannot re-sign a
-  re-chained log.
+  over-building for v0.1.) Entry payloads are encrypted under the keyring's
+  audit key (R22 confidentiality — paths and identity names reveal topology);
+  the plaintext envelope carries only sequence, timestamp, previous hash, and
+  ciphertext digest, so the chain verifies without decrypting. **Concrete
+  delivery mechanism:** the server periodically writes a signed checkpoint
+  blob (store id, sequence range, chain head, timestamp, signing-key id,
+  signature) to a configured export directory; `audit checkpoint` forces an
+  immediate export; the off-host copy step is operator-owned
+  (rsync/cron/systemd path unit) and documented in `docs/operating.md` — the
+  server speaks no S3 or webhooks in v0.1. `audit verify --checkpoint <path>`
+  verifies against the last exported copy and reports anchored prefix vs
+  unanchored tail (R14). The checkpoint signing key is supplied at boot via
+  the same credential channel as the `age` identity, held only in a
+  `secrecy::SecretBox`, never persisted on the host, and kept separate from
+  the keyring so encryption recovery and audit-signing authority stay
+  distinct trust roles.
 
-- KTD5. **Credential verifiers: `argon2`; tokens are server-generated 128-bit
-  random.** Raw bootstrap credentials, secret_ids, and tokens are shown once and
-  stored only as `argon2` verifiers (R24). Satisfies the entropy floor implied
-  by R9 on a network-reachable auth surface.
+- KTD5. **Credentials: structured opaque strings with indexed accessors and
+  keyed verifiers; no password KDF anywhere.** Tokens and AppRole secret_ids
+  are `<kind>.<accessor>.<secret>` — a public accessor selecting exactly one
+  record in O(1), plus a server-generated 256-bit random secret verified with
+  a keyed `blake3` MAC (key from the keyring, KTD3) under constant-time
+  comparison; unknown accessors run the same MAC against a fixed dummy
+  verifier so timing does not reveal existence. Argon2 is dropped: it is a
+  password KDF for low-entropy human secrets, and this system has none — on
+  the per-request token path it would turn every `vault kv get` into a
+  deliberate CPU burn and a DoS amplifier, and even for login-frequency
+  secret_ids the secrets are server-generated at full entropy. It returns
+  only if a human-chosen passphrase ever enters the product. Tokens are
+  capability-thin references — identity id, expiry, revocation state, never a
+  grant snapshot (R28). secret_ids support TTL and bounded use counts,
+  decremented atomically with token issuance and audit, matching Vault's own
+  AppRole accessor model. Satisfies R24 and R9's entropy floor without making
+  authentication the throughput ceiling.
 
-- KTD6. **Transport: bearer tokens over rustls TLS; server refuses plaintext
-  remote listeners.** (session-settled: user-approved — chosen over mTLS and
-  over leaning on Tailscale: TLS + `X-Vault-Token` is exactly what unmodified
-  Vault clients expect, so it satisfies R20 without a client-cert burden; a
-  network-layer-only posture the server cannot verify was rejected as an R20
-  rewrite, not a mechanism.) Resolves OQ5. A loopback-only listener may run
-  plaintext; any non-loopback bind without TLS fails R18 startup.
+- KTD6. **Transport: bearer tokens over rustls TLS on the data plane; server
+  refuses plaintext remote listeners.** (session-settled: user-approved —
+  chosen over mTLS and over leaning on Tailscale: TLS + `X-Vault-Token` is
+  exactly what unmodified Vault clients expect, so it satisfies R20 without a
+  client-cert burden; a network-layer-only posture the server cannot verify
+  was rejected as an R20 rewrite, not a mechanism.) Resolves OQ5. A
+  loopback-only listener (127.0.0.0/8 or `::1`) may run plaintext; any
+  non-loopback bind without TLS fails R18 startup. The control plane is a
+  local Unix socket with owner-only permissions and still requires a
+  management credential, so control actions stay attributable and audited
+  (R34). Secret-bearing responses carry `Cache-Control: no-store` and are
+  never compressed.
 
 - KTD7. **Secret material lives in `zeroize`/`secrecy` types.** Server-owned
-  plaintext buffers (the `age` identity, decrypted values before serialization)
-  are `SecretBox`/`SecretString` with pre-sized backing to avoid reallocation
-  leaving stale copies. Bounds R5 to what the composed stack can honor; copies
-  inside serde/hyper/rustls are acknowledged out of scope by R5's wording.
+  plaintext buffers (the `age` identity, the opened keyring, decrypted values
+  before serialization) are `SecretBox`/`SecretString` with pre-sized backing
+  to avoid reallocation leaving stale copies. Bounds R5 to what the composed
+  stack can honor; copies inside serde/hyper/rustls are acknowledged out of
+  scope by R5's wording.
+
+- KTD8. **One durability domain and one transaction coordinator.** Secrets,
+  metadata, identities, grants, credentials, rotation records, and the audit
+  chain live in one redb database, and every state-affecting operation flows
+  through a single transaction coordinator that owns the R26/R28 invariants.
+  Mutations (KV write/delete/destroy, identity/grant/credential/rotation
+  lifecycle) commit the state change and its audit entry in one multi-table
+  write transaction; the response is sent only after commit. Reads revalidate
+  the token and current grants inside the transaction boundary, decrypt,
+  prepare the bounded response, append the read audit entry (with served
+  version), commit, and only then transmit. A separate audit file, an async
+  audit queue, and best-effort dual-writes are rejected: each reintroduces the
+  crash window between state and record that R26 exists to close. Handlers
+  never receive a raw database handle or a standalone audit writer — the
+  coordinator is the only commit path, enforced by module visibility.
+  **Accepted cost:** every audited operation, reads included, is a durable
+  write; that serialization is the single-node throughput ceiling
+  (Performance and Capacity), named here so nobody "optimizes" R26 away
+  later. Off-host checkpoints (KTD4) remain external files; they pin chain
+  heads, they are not the primary log.
+
+- KTD9. **Authorization consumes a canonical `Resource` and a fixed
+  capability enum.** One parser converts every endpoint form to
+  `{mount, canonical_segments}` exactly once, rejecting ambiguous encodings
+  (R8); grants are `{mount, exact_or_subtree, prefix_segments, capabilities}`
+  records over the closed capability set (R22). Read-current and read-history
+  are distinct capabilities. No globs, no DSL. Authorization code accepts only
+  the typed resource — never a raw URI string.
+
+- KTD10. **Authorization returns a structured decision internally.** The
+  matcher yields `{allow, resource, operation, matched_grant | deny_reason}`
+  rather than a bare boolean. Hot-path handlers use `allow` only; the full
+  decision feeds the audit entry and a management-gated `authz explain`
+  command on the control plane, and is never echoed to unauthorized clients
+  (R25). A seam, not a policy debugger.
+
+- KTD11. **Per-secret metadata is a first-class, schema-versioned record**
+  separate from version ciphertext: KV `custom_metadata`, `max_versions`,
+  `cas_required`, and server fields (`last_completed_rotation_at`, rotation
+  state, metadata schema version). Version blobs stay encrypted; metadata is
+  integrity-covered and its changes audited, and listing/age/status queries
+  never decrypt value blobs. Reserved so post-v0.1 consumer declarations do
+  not force a ciphertext format break.
+
+- KTD12. **Default KV mount is `secret/`** (Vault's historical default),
+  reported as KV v2 by mount discovery and used in every fnox/`VAULT_ADDR`
+  example. One configured mount in v0.1; requests naming another mount or a
+  nonempty Vault namespace fail explicitly (R3).
+
+- KTD13. **License: MPL-2.0**, entire tree, no `ee/` carve-out (R19) —
+  matching the OpenBao research note's rotation-in-core ethos.
+
+- KTD14. **Compatibility matrix (initial):** HashiCorp `vault` CLI 1.15.x and
+  1.17.x, OpenBao `bao` 2.x, and the two most recent fnox releases captured by
+  U0. Exact patch pins live in CI and `docs/operating.md`; captured wire
+  fixtures live in `tests/fixtures/client-traces/` as first-class artifacts.
 
 ### High-Level Technical Design
 
-The request path is a middleware stack: TLS termination, then token
-authentication, then path-scope authorization, then the KV handler, with every
-terminal outcome written to the audit log before the response returns (R26
-fail-closed).
+The request path separates stateless transport middleware from a typed
+transaction boundary: TLS termination and request bounds, then token-accessor
+parsing and canonical resource construction, then one transaction-coordinator
+call that revalidates the credential against current identity and grant state,
+performs the read or mutation, prepares the bounded response, writes the audit
+entry, and commits — with the response transmitted only after commit (R26,
+KTD8). The control plane enters the same coordinator from the local socket.
 
 ```mermaid
 flowchart TB
-  client["Vault client / fnox<br/>(vault CLI)"] -->|HTTPS + X-Vault-Token| tls["rustls TLS<br/>(U9)"]
-  tls --> authn["Authn: token / AppRole<br/>(U4)"]
-  authn --> authz["Authz: path-scope check<br/>(U3)"]
-  authz --> kv["KV v2 handlers<br/>(U5)"]
-  kv --> store["Encrypted store<br/>redb + age (U2)"]
-  authn --> audit["Audit log: hash chain<br/>+ signed checkpoint (U6)"]
-  authz --> audit
-  kv --> audit
-  audit -.->|periodic checkpoint| offhost[("Off-host<br/>checkpoint mirror")]
+  client["Vault client / fnox<br/>(vault CLI)"] -->|HTTPS + X-Vault-Token| tls["rustls TLS + request bounds<br/>(U9)"]
+  cli["Bundled operator CLI"] -->|owner-only Unix socket| control["Control plane router<br/>(U1)"]
+  tls --> parse["Canonical resource +<br/>token accessor parse (U3)"]
+  parse --> txn["Transaction coordinator<br/>(U6)"]
+  control --> txn
+  txn --> authn["Authn: current token state<br/>(U4)"]
+  authn --> authz["Authz: capability + path grant<br/>(U3)"]
+  authz --> kv["KV v2 / rotation / mgmt services<br/>(U5, U7)"]
+  kv --> store[("redb: secrets + metadata +<br/>identities + audit chain (U2)")]
+  kv --> crypto["Record AEAD<br/>keyring from age (U2)"]
+  txn --> audit["Audit entries: encrypted payload,<br/>blake3 chain (U6)"]
+  audit --> store
+  audit -.->|signed checkpoint files| offhost[("Off-host<br/>checkpoint mirror")]
+  store -.->|consistent snapshot| backup["Encrypted backup archive<br/>+ signed manifest (U10)"]
 ```
 
-Audit write ordering: a read/write/auth outcome is committed to the audit log
-before the HTTP response is sent. If the audit append fails, the operation fails
-(R26) — the response the client sees is an error, not a silent success.
+Audit write ordering: a mutation and its audit entry commit in one transaction
+or neither is visible; a successful read commits its audit entry (including the
+served version) before the first response byte is sent. If the audit commit
+fails, the operation fails (R26) — the response the client sees is an error,
+not a silent success, and no secret material is returned.
+
+### Performance and Capacity Assumptions
+
+Written down so nobody "fixes" the fail-closed design into a fast broken one:
+
+- **Target load:** tens of concurrent clients, low hundreds of requests per
+  second at peak. Correctness and fail-closed behavior outrank throughput at
+  every margin.
+- **Every audited operation is a durable write** — reads included (KTD8). The
+  audit commit serializes on redb's single writer; that is the accepted
+  single-node ceiling, not a bug. Group-commit batching is a permissible later
+  optimization only if it still fails closed before the response.
+- **No plaintext secret cache across requests.** Metadata queries (versions,
+  ages, custom_metadata, listings) read KTD11 records without decrypting value
+  blobs. The store is never batch-decrypted at boot.
+- **Token verification is O(1) keyed hash** (KTD5), never a KDF; AppRole login
+  is the same class. R27's limits bound what a flood can spend.
+- **`age`/AEAD decrypt happens once per authorized value read** — acceptable
+  at target load.
+- **Benchmark honesty:** U11 records a baseline of authenticated, audited
+  reads and writes on a named reference host with durability settings stated;
+  later changes cannot materially regress it without explicit review.
 
 ### Assumptions
 
-- The deployment host provides a secret-delivery mechanism (systemd credentials
-  or injected environment) for the server's `age` identity, the bootstrap
-  credential, the audit checkpoint signing key, and each workload's AppRole
-  secret_id. v0.1 does not implement an unattended-restart key custodian; server
-  restart is operator-attended (Dependencies / Assumptions).
-- The data directory sits on a filesystem supporting POSIX file locks (KTD2
-  caveat). Startup verifies this.
+- The deployment host provides an approved boot credential channel for the
+  server's `age` identity and the checkpoint signing key: inherited file
+  descriptor, systemd credentials directory, or attended TTY —
+  environment-variable delivery is development-only behind an explicit flag
+  (R37). Each workload's AppRole secret_id is delivered by its deployment
+  mechanism. v0.1 implements no unattended-restart key custodian beyond the
+  systemd-credentials path (Dependencies / Assumptions).
+- The data directory sits on a supported local filesystem with working file
+  locks and documented fsync/rename semantics (KTD2 caveat). Startup takes an
+  explicit exclusive lock and verifies ownership and permissions; network and
+  userspace filesystems are outside the supported durability contract.
+- **Clock model:** the wall clock is trusted for token expiry (R9), rotation
+  age (R12), and audit display timestamps; hash-chain order is commit
+  sequence, not wall time. Startup logs a warning when the clock sits behind
+  the last audit timestamp; v0.1 does not attempt to fix operator clocks, and
+  operators running without NTP accept that TTL enforcement tracks their
+  clock. No monotonic-only TTLs — they do not survive restart usefully.
 
 ### Sequencing
 
-U1 → U2 form the foundation. U3 → U4 → U5 build the request path; U6 (audit)
-lands alongside U5 because R26 requires audit wiring before any handler can be
-considered done. U7–U10 layer on the working core. U11 (compat harness) runs
-continuously once U5 exists but is only complete when every acceptance example
-passes. See the Unit Index for the dependency graph.
+U0 freezes client evidence before the API surface is finalized. U1 → U2 form
+the foundation (init, lock, keyring, store, format/lifecycle metadata — with
+U2's redb proof spike gating everything above). U6 (transaction coordinator +
+audit core) lands **before** U5 handlers are considered done — KTD8 makes
+audit a storage concern, not a late add-on. Recommended order: U0 → U1 → U2 →
+U6 → U3 → U4 → U5, with U9 in parallel after U1. **The first product
+milestone is a secure vertical slice at the end of U5: a real fnox read over
+TLS through current-state authorization and atomic audit.** U7, U8, and U10
+layer on the proven core. U11 runs continuously once U5 exists but is only
+complete when every acceptance example passes. U12 closes. See the Unit Index
+for the dependency graph.
 
 ---
 
 ## Implementation Units
 
-| U-ID | Unit                                       | Key files                                                           | Depends on |
-| ---- | ------------------------------------------ | ------------------------------------------------------------------- | ---------- |
-| U1   | Scaffold, config, fail-closed startup      | `src/main.rs`, `src/config.rs`, `src/startup.rs`                    | —          |
-| U2   | Encrypted single-node store                | `src/store/mod.rs`, `src/store/crypto.rs`                           | U1         |
-| U3   | Identity, scope, and token model           | `src/identity/mod.rs`, `src/identity/scope.rs`                      | U2         |
-| U4   | Vault-compatible auth surface              | `src/auth/token.rs`, `src/auth/approle.rs`                          | U3         |
-| U5   | Vault KV v2 API surface                    | `src/api/kv.rs`, `src/api/sys.rs`                                   | U2, U4     |
-| U6   | Tamper-evident audit log                   | `src/audit/mod.rs`, `src/audit/chain.rs`, `src/audit/checkpoint.rs` | U1         |
-| U7   | Rotation surfaces                          | `src/rotation.rs`, `src/api/kv.rs`                                  | U5, U6     |
-| U8   | Server-identity rotation (re-encrypt)      | `src/store/reencrypt.rs`, `src/cli.rs`                              | U2         |
-| U9   | TLS transport and plaintext refusal        | `src/transport.rs`, `src/startup.rs`                                | U1         |
-| U10  | Backup and restore                         | `src/backup.rs`, `src/cli.rs`                                       | U2, U6     |
-| U11  | Compatibility harness and acceptance tests | `tests/compat/`, `tests/acceptance/`                                | U5, U6, U7 |
-| U12  | Operator documentation and licensing       | `README.md`, `docs/operating.md`, `LICENSE`                         | U1–U11     |
+| U-ID | Unit                                        | Key files                                                            | Depends on |
+| ---- | ------------------------------------------- | -------------------------------------------------------------------- | ---------- |
+| U0   | Client characterization and contract capture | `research/compat/`, `tests/fixtures/client-traces/`                  | —          |
+| U1   | Scaffold, config, local init, control socket, fail-closed startup | `src/main.rs`, `src/config.rs`, `src/startup.rs`, `src/control/`, `src/cli.rs` | U0 |
+| U2   | Keyring and encrypted single-node store      | `src/store/mod.rs`, `src/store/crypto.rs`, `src/store/keyring.rs`    | U1         |
+| U3   | Identity, capability, resource, and token model | `src/identity/mod.rs`, `src/authz/resource.rs`, `src/authz/grant.rs` | U2, U6   |
+| U4   | Vault-compatible auth surface                | `src/auth/token.rs`, `src/auth/approle.rs`                           | U3         |
+| U5   | Vault KV v2 API surface + vertical slice     | `src/api/kv.rs`, `src/api/sys.rs`                                    | U2, U4, U6 |
+| U6   | Transaction coordinator and tamper-evident audit | `src/txn.rs`, `src/audit/mod.rs`, `src/audit/chain.rs`, `src/audit/checkpoint.rs` | U2 |
+| U7   | Rotation surfaces                            | `src/rotation.rs`, `src/api/kv.rs`                                   | U5, U6     |
+| U8   | Key rotation (recipient rewrap + record re-encrypt) | `src/store/reencrypt.rs`, `src/cli.rs`                        | U2         |
+| U9   | TLS transport, limits, and plaintext refusal | `src/transport.rs`, `src/startup.rs`                                 | U1         |
+| U10  | Backup and restore                           | `src/backup.rs`, `src/cli.rs`                                        | U2, U6     |
+| U11  | Compatibility harness, acceptance, fault and fuzz suites | `tests/compat/`, `tests/acceptance/`, `tests/fault/`, `fuzz/` | U5, U6, U7 |
+| U12  | Operator experience: doctor, docs, licensing | `README.md`, `docs/operating.md`, `docs/compatibility.md`, `LICENSE` | U1–U11     |
 
-### U1. Scaffold, config, and fail-closed startup
+### U0. Client characterization and compatibility contract capture
 
-- **Goal:** A single binary that loads configuration, validates it, and refuses
-  to start in any unsafe configuration.
-- **Requirements:** R15, R16, R18, R6 (data-dir), KTD2 caveat.
+- **Goal:** Replace assumptions about fnox and Vault/OpenBao client behavior
+  with reproducible recorded evidence from pinned versions, before the API
+  router is finalized.
+- **Requirements:** R1, R2; KTD14; the fnox-transport assumption in
+  Dependencies / Assumptions.
 - **Dependencies:** none.
+- **Files:** `research/compat/`, `tests/fixtures/client-traces/`,
+  `docs/compatibility.md` (initial draft).
+- **Approach:** Run each pinned client — the two most recent fnox releases,
+  `vault` 1.15.x/1.17.x, `bao` 2.x — against a recording stub server. Capture
+  method, path, query, headers, body shape, TLS configuration, subprocess
+  execution (does this fnox version shell out to the `vault` CLI or speak
+  HTTP itself?), retry behavior, and status/error handling. Commit normalized
+  fixtures and a human-readable compatibility matrix. Answer explicitly: which
+  endpoints does each client actually hit (preflight? seal-status? health?
+  lookup-self?), how are tokens and TLS roots supplied, and can a fresh host
+  run fnox without the BUSL `vault` binary.
+- **Exit gate:** R1's endpoint matrix, AE8's documented sequence, and U5/U11's
+  fixtures are updated from captured behavior — evidence, not prose memory —
+  before U5's router is implemented.
+- **Test scenarios:**
+  - Each pinned client's capture replays cleanly against the fixture set (the
+    recording is deterministic enough to assert against).
+  - The matrix names, per client version, every endpoint required and every
+    prerequisite binary.
+- **Verification:** Fixtures committed; matrix reviewed; R1/AE8 updated where
+  captured behavior contradicts the plan's assumptions.
+
+### U1. Scaffold, config, local init, control socket, and fail-closed startup
+
+- **Goal:** A single binary whose `init` creates a valid store locally and
+  exactly once, whose `serve` loads configuration, validates it, and refuses
+  to start in any unsafe configuration, and whose management surface is an
+  owner-only local control socket.
+- **Requirements:** R15, R16, R17, R18, R30, R34, R35, R36 (shutdown), R37,
+  R6 (data-dir), KTD1, KTD2 caveat.
+- **Dependencies:** U0.
 - **Files:** `src/main.rs`, `src/config.rs`, `src/startup.rs`,
-  `tests/startup.rs`.
-- **Approach:** `clap` for CLI, config from environment plus a config file.
-  Startup validation runs before the listener binds: encryption key material
-  present, bootstrap credential present on an uninitialized store, data
-  directory supports file locking, and no non-loopback listener without TLS. Any
-  failure exits non-zero naming the missing or unsafe setting.
+  `src/control/mod.rs`, `src/cli.rs`, `tests/startup.rs`.
+- **Approach:** `clap` for the CLI (`init`, `serve`, plus subcommands landing
+  in later units), config from environment plus a config file with unknown
+  keys rejected and secret values accepted only through typed secret-source
+  descriptors (stdin/FD/credentials-dir/TTY; env behind a dev-only flag —
+  R37). `init` takes the explicit exclusive lock (KTD2), refuses a non-empty
+  or already-initialized directory, and creates store id, schema version,
+  keyring, audit genesis, and the first management identity in one
+  transaction, printing that identity's credential once (R30, R17). `serve`
+  validation runs before the listener binds: key material present and keyring
+  decryptable, store initialized, schema version known and `lifecycle=ready`
+  (R35), data-directory ownership/permissions safe, exclusive lock acquired,
+  and no non-loopback listener without TLS. Any failure exits non-zero naming
+  the missing or unsafe setting. The control-plane router binds an owner-only
+  Unix socket (R34); graceful shutdown drains, flushes, checkpoints, and
+  zeroizes (R36).
 - **Execution note:** Test-first on the refusal matrix — each unsafe
   configuration is a failing test before the check exists.
 - **Test scenarios:**
-  - Covers AE4. Boot with no encryption key material configured → exits non-zero
-    naming the missing setting; does not generate a throwaway key.
-  - Boot on an uninitialized store with no bootstrap credential → exits
-    non-zero.
+  - Covers AE4. Boot with no encryption key material configured → exits
+    non-zero naming the missing setting; does not generate a throwaway key.
+  - `serve` on an uninitialized store → exits non-zero; `init` on an
+    initialized store → refused; two concurrent `init` runs → exactly one
+    first management identity exists (R30).
   - Boot with a non-loopback listener and no TLS configured → exits non-zero
     (R18/R20 seam).
-  - Boot with a data directory on a lock-unsupported filesystem → exits non-zero
-    (KTD2 caveat).
-  - Boot with a complete valid configuration → listener binds, health responds.
+  - A second server instance against the same data directory → exits non-zero
+    on the explicit OS lock (KTD2 caveat).
+  - Boot with `lifecycle=reencrypting` or `restoring`, or a schema version
+    newer than the binary → exits non-zero (R35).
+  - Secret material passed via argv or an unknown config key present → exits
+    non-zero (R37, R18).
+  - Management routes are absent from the remote router and served on the
+    control socket (feeds AE12).
+  - Boot with a complete valid configuration → listener binds, health
+    responds.
 - **Verification:** `cargo test --test startup` green; manual `--help` shows
   documented settings.
 
-### U2. Encrypted single-node store
+### U2. Keyring and encrypted single-node store
 
-- **Goal:** A versioned key-value store persisting `age`-encrypted blobs to a
-  single redb file.
-- **Requirements:** R4, R5, R6, R11, R21, KTD2, KTD3, KTD7.
+- **Goal:** A versioned key-value store in one redb file, persisting only
+  AEAD ciphertext for values under keys held in an `age`-wrapped keyring, with
+  first-class per-secret metadata and format/lifecycle stamps.
+- **Requirements:** R4, R5, R6, R11 (versioning), R21, R35 (stamps), KTD2,
+  KTD3, KTD7, KTD11.
 - **Dependencies:** U1.
-- **Files:** `src/store/mod.rs`, `src/store/crypto.rs`, `tests/store.rs`.
-- **Approach:** redb tables keyed by logical path; each value is an
-  `age`-encrypted, versioned record (version number, created_time, ciphertext).
-  The server `age` identity loads into a `secrecy::SecretBox` at boot (R21 —
-  never written to disk, shell history, or argv). Encrypt on write, decrypt on
+- **Files:** `src/store/mod.rs`, `src/store/crypto.rs`,
+  `src/store/keyring.rs`, `tests/store.rs`.
+- **Approach:** Opens with the **KTD2 proof spike**: demonstrate on redb the
+  multi-table atomic commit, kill-point crash recovery, live consistent
+  snapshot, and the rotation/audit query shapes — the SQLite fallback triggers
+  here or never. Then: a `meta` table (store id, `format_version`, `lifecycle`
+  per R35); a `secret_meta` table per KTD11; a `secrets` table keyed by
+  logical path holding versioned records (version number, created_time, key
+  id, nonce, ciphertext). The server `age` identity loads into a
+  `secrecy::SecretBox` at boot and decrypts the keyring exactly once (R21 —
+  never written to disk, shell history, or argv); values are AEAD-encrypted
+  under the keyring's record key with associated data binding store id, record
+  type, mount, path, version, and key id (KTD3). Encrypt on write, decrypt on
   read; plaintext buffers zeroize on drop.
-- **Execution note:** Characterization test the redb round-trip and the
+- **Execution note:** Characterization-test the redb round-trip and the
   version-append semantics before layering the API on top.
 - **Test scenarios:**
-  - Write then read a secret → plaintext round-trips; on-disk bytes are `age`
+  - Write then read a secret → plaintext round-trips; on-disk bytes are
     ciphertext, not plaintext.
   - Write twice → both versions retained; versioned read returns each;
     unversioned read returns latest (R11).
-  - Decrypt with a wrong/absent identity → fails closed, no partial plaintext.
+  - Open the keyring with a wrong/absent identity → fails closed, no partial
+    plaintext.
+  - Copy a valid ciphertext record to a different path or version → decryption
+    fails on associated-data mismatch (R4).
+  - Metadata queries (versions, custom_metadata, age inputs) complete without
+    touching the record-decrypt path (KTD11).
   - Value buffer is zeroized after use (assert via a wrapper that observes
     drop).
   - Test expectation for on-disk format: byte-inspect that no plaintext secret
     substring appears in the redb file.
+  - Unknown `format_version` in `meta` → open refused (R35).
 - **Verification:** `cargo test --test store` green; hexdump spot-check shows
-  ciphertext.
+  ciphertext; spike results recorded against KTD2's gate.
 
-### U3. Identity, scope, and token model
+### U3. Identity, capability, resource, and token model
 
-- **Goal:** Distinct identities, path-scoped grants that govern every KV path
-  form, TTL-bearing revocable tokens, and a management grant distinct from
-  read/write.
-- **Requirements:** R7, R8, R9, R22, R28, KTD5.
-- **Dependencies:** U2.
-- **Files:** `src/identity/mod.rs`, `src/identity/scope.rs`,
-  `src/identity/token.rs`, `tests/identity.rs`.
-- **Approach:** Identities and grants persist in the store. A scope is a set of
-  logical path patterns; the authorization check maps every KV API form
-  (`data/`, `metadata/`, list, delete, versioned) of a requested path back to
-  the logical path before matching (R8). Tokens carry a TTL and revocation
-  state; scope reductions and identity disable take effect on the next request
-  regardless of TTL (R28). Management capabilities (R22) require an explicit
-  grant, including audit-read and consumer-enumeration.
-- **Execution note:** Test-first — this is the authorization boundary; an authz
-  bug is a full-store disclosure.
+- **Goal:** Distinct typed identities, canonical-resource authorization with
+  segment-prefix grants over a fixed capability set governing every KV path
+  form, and TTL-bearing revocable capability-thin tokens.
+- **Requirements:** R7, R8, R9, R22, R28, KTD5 (thin tokens), KTD9, KTD10.
+- **Dependencies:** U2, U6 (linearization runs through the coordinator).
+- **Files:** `src/identity/mod.rs`, `src/authz/resource.rs`,
+  `src/authz/grant.rs`, `src/identity/token.rs`, `tests/identity.rs`.
+- **Approach:** Identities (with `kind`, R7) and grants persist in the store.
+  One parser converts every KV API form (`data/`, `metadata/`, list, delete,
+  undelete, destroy, `?version=N`) to the canonical
+  `Resource {mount, segments}` before matching, rejecting ambiguous encodings
+  outright (R8, KTD9). Grants are
+  `{mount, exact_or_subtree, prefix_segments, capabilities}` over the closed
+  capability enum (R22) — read-current and read-history distinct. The matcher
+  returns KTD10's structured decision; handlers consume `allow`, audit
+  consumes the rest. Tokens are capability-thin — identity id, TTL, revocation
+  state, never a grant snapshot — and every authorized request reloads
+  current grants inside the transaction boundary, which is what makes R28
+  hold without an invalidation channel.
+- **Execution note:** Test-first — this is the authorization boundary; an
+  authz bug is a full-store disclosure. Property-test the parser and matcher.
 - **Test scenarios:**
-  - Covers AE6. Identity scoped to `apps/canvas/*` requests
+  - Covers AE6. Identity with a subtree grant on `apps/canvas` requests
     `apps/populi/api-key` via data, metadata, and list forms → each denied.
-  - Prefix-boundary: grant on `apps/foo` does not reach `apps/foobar`.
+  - Property test: all endpoint forms of the same logical path authorize as
+    the same resource; ambiguous encodings (encoded slash, dot segments,
+    doubled separators, control bytes, invalid UTF-8, double-decode) are
+    rejected before grant evaluation.
+  - Prefix-boundary: grant on `apps/foo` does not reach `apps/foobar`
+    (segment boundaries, not string prefixes).
   - Revoke a token before its TTL → next request rejected (feeds AE2).
   - Reduce a scope while a token is live → the removed path is denied on the
-    next request without waiting for TTL (R28).
-  - A read/write grant cannot perform a management operation (R22); a management
-    grant is required for audit read and consumer enumeration.
-- **Verification:** `cargo test --test identity` green.
+    next request without waiting for TTL; a token issued under a broad scope
+    does not retain it after reduction — proves grants are not baked into the
+    token (R28).
+  - read-current does not grant `?version=N` history reads; write does not
+    grant destroy (R22).
+  - A read/write grant cannot perform a management operation; audit read and
+    consumer enumeration each require their own capability; an audit-only
+    identity cannot issue credentials (R22).
+  - Deny decisions discriminate prefix-boundary miss from missing capability
+    (KTD10).
+- **Verification:** `cargo test --test identity` green, property tests
+  included.
 
 ### U4. Vault-compatible auth surface
 
-- **Goal:** An operator bootstraps the first identity, and unmodified Vault
-  clients thereafter obtain and present tokens via token auth and AppRole login,
-  behind request-rate limits.
-- **Requirements:** R31, R30, R27, R9, R24, KTD5; Key Flows F1, F3.
+- **Goal:** Unmodified Vault clients obtain and present tokens via token auth,
+  AppRole login, and lookup-self, behind request-rate limits — with no
+  bootstrap route anywhere on the network (F1 is U1's local `init`).
+- **Requirements:** R31, R27, R9, R24, KTD5; Key Flow F3.
 - **Dependencies:** U3.
-- **Files:** `src/auth/token.rs`, `src/auth/approle.rs`,
-  `src/auth/bootstrap.rs`, `src/api/router.rs`, `tests/auth.rs`.
-- **Approach:** `X-Vault-Token` extraction as `tower-http` middleware.
+- **Files:** `src/auth/token.rs`, `src/auth/approle.rs`, `src/api/router.rs`,
+  `tests/auth.rs`.
+- **Approach:** `X-Vault-Token` extraction as `tower-http` middleware; the
+  accessor selects one credential record and the keyed MAC verifies in
+  constant time, with a dummy verifier run for unknown accessors (KTD5).
   `POST /v1/auth/approle/login` accepts `{role_id, secret_id}` and returns
-  `{"auth":{"client_token","lease_duration","token_policies",...}}` matching the
-  Vault wire shape. secret_ids and tokens are stored only as `argon2` verifiers
-  and disclosed once (R24). **Bootstrap exchange (R30, F1):** on an
-  uninitialized store, the one-time bootstrap credential creates the first
-  management identity, then is irreversibly disabled and cannot be re-enabled on
-  an initialized store. Request-size and attempt-rate limits (R27) are
-  `tower-http` middleware on the router, since this is where the unauthenticated
-  login and token surfaces live.
+  `{"auth":{"client_token","lease_duration","renewable":false,...}}` matching
+  the Vault wire shape; `GET /v1/auth/token/lookup-self` returns identity,
+  TTL remaining, and creation time; `renew-self` returns R3's explicit
+  unsupported error. secret_ids carry TTL and bounded use counts, decremented
+  atomically with token issuance and audit. Raw secrets are disclosed once
+  (R24). Request-size and attempt-rate limits (R27) are `tower-http`
+  middleware on the router, since this is where the unauthenticated login
+  surface lives; limiter state is bounded.
 - **Execution note:** Start from a failing test asserting the AppRole login
-  response envelope byte-shape; test the bootstrap disable path before the happy
-  path.
+  response envelope byte-shape against U0's captured fixtures.
 - **Test scenarios:**
-  - Covers F1. On a fresh store, the bootstrap credential creates the first
-    management identity; the credential is then disabled.
-  - Covers R30. Any use of the bootstrap credential after the first identity
-    exists → rejected and audited; it cannot be re-enabled on an initialized
-    store.
   - Covers F3. Valid role_id + secret_id → TTL-bound token in the Vault
     `auth.client_token` envelope; token then reads a scoped path.
   - Invalid secret_id → 400-class error in `{"errors":[...]}` shape; attempt
     audited.
-  - Expired/revoked token on a KV request → rejected (feeds AE2).
+  - Token lookup touches exactly one credential record (accessor index);
+    unknown and known-but-wrong accessors run the same verifier work; no code
+    path invokes a password KDF (KTD5).
+  - A one-use secret_id succeeds exactly once under concurrent login; the
+    decrement, token issuance, and audit entry commit atomically.
+  - Expired/revoked token on a KV request → rejected (feeds AE2);
+    lookup-self on a valid token reports TTL remaining; renew-self →
+    explicit unsupported (R31).
   - Raw secret_id is never returned after creation and never appears in the
-    store as plaintext (argon2 verifier only).
-  - Covers R27. Flood of failed auth attempts → rate limit engages; oversized
-    request body → rejected before handler.
+    store as plaintext (keyed verifier only); the database alone cannot
+    verify a guessed credential (R24 — MAC key lives in the keyring).
+  - Covers R27. Flood of failed auth attempts → rate limit engages with
+    bounded limiter state and aggregate audit entries (R13); oversized
+    request body → rejected before the handler.
 - **Verification:** `cargo test --test auth` green; envelope shape asserted
   against captured Vault responses.
 
-### U5. Vault KV v2 API surface
+### U5. Vault KV v2 API surface and the vertical-slice milestone
 
-- **Goal:** Serve the KV v2 read, write, list, delete, versioned-read, mount
-  preflight, and seal-status endpoints so an unmodified `vault` CLI uses the
-  server as a backend.
-- **Requirements:** R1, R3, R11, R29; Key Flow F2.
-- **Dependencies:** U2, U4.
+- **Goal:** Serve the KV v2 endpoint matrix — read, write with CAS, list,
+  soft-delete/undelete/destroy, versioned read, metadata with
+  `custom_metadata`/`max_versions`/`cas_required`, mount preflight,
+  seal-status, health — so an unmodified `vault` CLI uses the server as a
+  backend; close with the first product milestone, a real fnox read.
+- **Requirements:** R1, R3, R11, R29, size bounds via R27; Key Flow F2.
+- **Dependencies:** U2, U4, U6 (every handler commits through the
+  coordinator).
 - **Files:** `src/api/kv.rs`, `src/api/sys.rs`, `src/api/errors.rs`,
-  `tests/api_kv.rs`.
+  `tests/api_kv.rs`, `tests/vertical_slice.rs`.
 - **Approach:** Implement `GET/POST /v1/:mount/data/:path`
-  (`data.data`/`data.metadata` envelope), LIST on `metadata/`, versioned read
-  via `?version=N`, soft-delete/undelete/destroy,
-  `GET /v1/:mount/metadata/:path` version history.
+  (`data.data`/`data.metadata` envelope) honoring `options.cas` — `cas=0`
+  create-only, positive `cas` must match current, `cas_required` rejects
+  unconditional writes (R11); LIST on `metadata/`; versioned read via
+  `?version=N` (read-history capability); soft-delete/undelete/destroy;
+  `GET/POST /v1/:mount/metadata/:path` with version history,
+  `custom_metadata`, `max_versions`, `cas_required` (KTD11).
   `sys/internal/ui/mounts/<path>` returns `options.version:"2"` exactly (the
-  historically fragile preflight joint). `sys/seal-status` always reports
-  unsealed. Unimplemented endpoints return an explicit unsupported error naming
-  the endpoint (R3), never an empty success. Errors use `{"errors":[...]}` with
-  Vault status conventions (404 overloaded for missing/forbidden/empty-list).
-- **Execution note:** Build against captured real `vault` CLI request traces;
-  the preflight shape is the known compat break point.
+  historically fragile preflight joint, asserted against U0 fixtures).
+  `sys/seal-status` always reports unsealed; `sys/health` reports
+  initialized/unsealed/active with readiness semantics from R36. PATCH and
+  unimplemented endpoints return an explicit unsupported error naming the
+  endpoint (R3) — never an empty success, never a silent approximation.
+  Errors use `{"errors":[...]}` with Vault status conventions (404 overloaded
+  for missing/forbidden/empty-list). **Vertical slice exit:** `init` → `serve`
+  over TLS → the pinned fnox binary resolves a secret end-to-end through
+  current-state authorization and atomic audit.
+- **Execution note:** Build against U0's captured client traces; the
+  preflight shape is the known compat break point.
 - **Test scenarios:**
-  - Covers AE1. Unimplemented endpoint → explicit unsupported error naming the
-    endpoint, not empty success.
+  - Covers AE1. Unimplemented endpoint → explicit unsupported error naming
+    the endpoint, not empty success.
   - `vault kv get -field=X <path>` issues the preflight then the data read →
     both succeed against the server (feeds F2).
-  - Versioned read returns the requested version; unversioned returns latest
-    (R11).
+  - Versioned read returns the requested version under read-history;
+    unversioned returns latest under read-current (R11, R22).
+  - Stale `cas` → write rejected, no version created, no success audit
+    (feeds AE3); `cas=0` on an existing path → rejected; `cas_required`
+    metadata flag → unconditional write rejected.
+  - `max_versions` bounds retained history; the prior version of an
+    incomplete rotation is never retired by the bound (R29).
   - soft-delete then undelete restores; destroy removes a specific version
     irrecoverably (R29).
   - Read of a nonexistent path → 404 in `{"errors":[]}` shape.
-- **Verification:** `cargo test --test api_kv` green; U11 exercises the real
-  CLI.
+  - Secret-bearing responses carry `Cache-Control: no-store` and no
+    compression (KTD6).
+  - Vertical slice: fnox end-to-end read passes (feeds AE8).
+- **Verification:** `cargo test --test api_kv --test vertical_slice` green;
+  U11 exercises the real CLIs.
 
-### U6. Tamper-evident audit log
+### U6. Transaction coordinator and tamper-evident audit log
 
-- **Goal:** An append-only, hash-chained audit log with off-host signed
-  checkpoints that never records secret material and fails closed on write
-  failure.
-- **Requirements:** R13, R14, R23, R25, R26, R27, KTD4.
-- **Dependencies:** U1.
-- **Files:** `src/audit/mod.rs`, `src/audit/chain.rs`,
-  `src/audit/checkpoint.rs`, `src/cli.rs`, `tests/audit.rs`.
-- **Approach:** Each entry records identity, path, operation, timestamp, outcome
-  — never values or credential material (R25 extends this ban to all server
-  output: logs, traces, errors, panics). Each entry's `blake3` hash chains to
-  its predecessor; periodic `ed25519-dalek`-signed checkpoints publish the chain
-  head off-host, signed with a boot-supplied key held only in a
-  `secrecy::SecretBox` (KTD4). A request's outcome is appended before its
-  response returns; if the append fails, the operation fails (R26). Audit-log
-  capacity is monitored with a fail-closed response before disk exhaustion (R27
-  — request-size and attempt-rate limits on the unauthenticated HTTP surface
-  live in U4). An `audit verify` CLI subcommand (`src/cli.rs`) checks the chain
-  against the last off-host checkpoint.
-- **Execution note:** Test-first on the tamper-detection and fail-closed paths —
-  this log is the sole record a rotation trusts.
+- **Goal:** The single commit boundary through which every state change and
+  audit entry flows atomically, plus a hash-chained, confidential audit log
+  with exported signed checkpoints that never records secret material and
+  fails closed on write failure.
+- **Requirements:** R13, R14, R23, R25, R26, R27 (capacity), R28
+  (linearization), KTD4, KTD8.
+- **Dependencies:** U2.
+- **Files:** `src/txn.rs`, `src/audit/mod.rs`, `src/audit/chain.rs`,
+  `src/audit/checkpoint.rs`, `src/cli.rs`, `tests/audit.rs`,
+  `tests/fault/txn_crash.rs`.
+- **Approach:** The coordinator (KTD8) is built first: mutations commit state
+  plus audit entry in one multi-table transaction; reads revalidate, decrypt,
+  prepare the response, append the audit entry, commit, then transmit. No
+  handler gets a raw database handle — module visibility enforces the
+  boundary. Each entry records identity, path, operation, timestamp, outcome,
+  and served/written version (R13) — never values or credential material (R25
+  extends this ban to all server output: logs, traces, errors, panics); entry
+  payloads are encrypted under the keyring's audit key with a plaintext
+  envelope of sequence, timestamp, previous hash, and ciphertext digest, so
+  the `blake3` chain verifies without decryption (KTD4). Rate-limiter-dropped
+  requests aggregate into bounded entries (R13). Periodic
+  `ed25519-dalek`-signed checkpoints export to the configured directory;
+  `audit checkpoint` forces one; `audit verify [--checkpoint <path>]` checks
+  the chain and reports anchored prefix vs unanchored tail (R14). Audit-log
+  capacity is monitored with warning and stop-admitting thresholds and a
+  reserved recovery allowance (R27 — request-size and attempt-rate limits on
+  the unauthenticated HTTP surface live in U4).
+- **Execution note:** Test-first on the crash-atomicity, tamper-detection, and
+  fail-closed paths — this log is the sole record a rotation trusts, and the
+  coordinator is the invariant everything else leans on.
 - **Test scenarios:**
+  - Covers AE9. Kill the process at injected points around a secret write and
+    around a token revocation → after restart, state and audit entry exist
+    together or not at all.
   - Covers AE5. Edit or remove an entry on disk → verification fails and
     identifies where the chain breaks.
   - Re-chaining attack: rewrite an entry and recompute all subsequent hashes →
-    verification against the off-host checkpoint still fails (R14 trust anchor).
-  - Audit append fails (simulated I/O error) → the triggering operation returns
-    an error and does not complete (R26).
+    verification against the exported checkpoint still fails; truncation
+    before the checkpoint is detected; truncation after it is reported as
+    unanchored-tail loss, not silently passed (R14).
+  - Covers AE10. Audit commit fails (fault injection) → the triggering read
+    returns an error with no secret bytes; the mutation does not commit (R26).
   - A secret value passed through a request never appears in any audit entry,
-    error response, or panic output (R25).
-  - Covers R27. Audit store approaches capacity → fail-closed response before
-    exhaustion (request/rate limits are covered in U4).
-- **Verification:** `cargo test --test audit` green; `<binary> audit verify`
-  detects a hand-tampered log.
+    error response, or panic output (R25); audit payloads in the database file
+    are ciphertext (canary-string byte scan).
+  - A failed-auth flood produces bounded aggregate audit volume, not one row
+    per packet (R13).
+  - Covers R27. Audit store approaches capacity → warning then fail-closed
+    before exhaustion, with checkpoint export and shutdown still possible from
+    the reserved allowance.
+- **Verification:** `cargo test --test audit --test txn_crash` green;
+  `<binary> audit verify` detects a hand-tampered log.
 
 ### U7. Rotation surfaces
 
 - **Goal:** Enumerate a secret's consumers, surface its age against a rotation
-  interval, and mark rotations complete.
-- **Requirements:** R10, R12, R23, R29; Key Flow F4.
+  interval, run the minimal rotation record from start to completion, and show
+  post-write version adoption.
+- **Requirements:** R10, R12, R23, R29, R33; Key Flow F4.
 - **Dependencies:** U5, U6.
 - **Files:** `src/rotation.rs`, `src/api/kv.rs`, `tests/rotation.rs`.
-- **Approach:** Consumer enumeration is every identity whose scope grants read
-  on the path, annotated with last-read recency from the audit log over R23's
-  window — recency annotates, never filters (R10). Secret age is time since last
-  completed rotation, else creation; "no interval set" when none configured
-  (R12). Marking a rotation complete retires the prior version. Enumeration and
-  audit read require the management grant (R22).
+- **Approach:** Consumer enumeration reports the authorized set (every
+  identity whose current grants read the path) annotated with observed reads —
+  last-read time and version — from the audit log over R23's window; recency
+  annotates, never filters (R10). `rotation start` snapshots the consumer set,
+  prior version, actor, and time, and writes the target version atomically
+  (R11); a minimal persisted record — started → completed | aborted — no
+  campaign state machine. `rotation status <path>` classifies each snapshotted
+  consumer as `on-current` / `on-prior` / `silent-since-write` from R13's
+  versioned read events (R33). `rotation complete` succeeds only while the
+  target is still the current version, records upstream revocation as an
+  operator assertion (never a server action), and retires the prior version;
+  writes outside a rotation set `changed_since_last_completed_rotation` (R12).
+  Rollback is a copy-forward write to a new version. Secret age is time since
+  last completed rotation, else creation; interval from `custom_metadata`
+  (KTD11); "no interval set" when none configured (R12). Enumeration, status,
+  and audit read each require their capability (R22), and all mutations flow
+  through the coordinator (KTD8).
 - **Test scenarios:**
   - Covers AE3. Three identities have read a key within the window → all three
-    enumerated; write a replacement → consumers read new on next read; previous
-    version stays readable until complete.
+    enumerated; start rotation and write a replacement → consumers read new on
+    next read; previous version stays readable until complete; stale-CAS
+    concurrent write fails; completion after a superseding write fails.
+  - Covers AE11. After the write, one snapshotted consumer reads → status
+    shows it `on-current`, the silent one `silent-since-write`; a versioned
+    read of the prior version shows `on-prior`.
   - An identity with read scope but no read inside the window still appears,
     annotated stale (R10 — recency annotates, not filters).
-  - Secret with no configured interval → age view shows "no interval set" (R12).
-  - Enumeration without the management grant → denied and audited.
+  - A grant added after `rotation start` does not alter the snapshot; the
+    live authorized view shows the drift (R10/R11).
+  - Rollback produces a new higher version equal to the prior value; the
+    current pointer never moves backward (R11).
+  - Secret with no configured interval → age view shows "no interval set";
+    a post-rotation unrotated write → flagged
+    `changed_since_last_completed_rotation` (R12).
+  - Enumeration or status without the rotation/consumer capability → denied
+    and audited.
 - **Verification:** `cargo test --test rotation` green.
 
-### U8. Server-identity rotation (re-encrypt)
+### U8. Key rotation: recipient rewrap and record re-encrypt
 
-- **Goal:** An operator can rotate the server's `age` identity by re-encrypting
-  the whole store, crash-recoverably.
-- **Requirements:** R21, KTD3; the accepted cost of the single-recipient
-  topology.
+- **Goal:** An operator can rotate the server's `age` recipient cheaply, and
+  rotate the record-encryption key by an offline whole-store pass, without a
+  reachable mixed or half-rotated state.
+- **Requirements:** R21, R35 (lifecycle), KTD3.
 - **Dependencies:** U2.
 - **Files:** `src/store/reencrypt.rs`, `src/cli.rs`, `tests/reencrypt.rs`.
-- **Approach:** A CLI subcommand decrypts every blob under the old identity and
-  re-encrypts under the new recipient in a crash-recoverable pass
-  (write-new-then-swap, resumable if interrupted), preserving readable secrets
-  and audit history. `age` has no rotation primitive, so this is an explicit
-  application-level job (mirrors fnox's `fnox reencrypt`).
-- **Execution note:** Test the interrupt-and-resume path explicitly — a
-  half-rotated store must not lose secrets.
+- **Approach:** Two distinct offline CLI operations (`age` has no rotation
+  primitive; both are explicit application-level jobs). **Recipient
+  rotation** — the routine case — decrypts the keyring under the old identity
+  and atomically rewraps it to the new recipient (and optional recovery
+  recipient): no record is touched, cost is one small file. **Record-key
+  rotation** — the rare case (key-compromise response, crypto hygiene) — runs
+  offline only: the CLI sets `lifecycle=reencrypting` (U1's `serve` refuses to
+  start), streams every record into a new store file re-encrypted under a new
+  record key with fresh associated data, fsyncs, atomically renames over the
+  old file, and restores `lifecycle=ready`. An interrupted pass leaves the
+  original store untouched and functional — delete the partial `.new` file and
+  rerun; no resumable-cursor machinery, no mixed-encryption state to reason
+  about. Audit history survives both operations.
+- **Execution note:** Test the interruption path explicitly — the original
+  store must remain intact and no mixed-key state may ever be servable.
 - **Test scenarios:**
-  - Rotate identity → every secret readable under the new identity, none
-    readable under the old.
-  - Interrupt mid-rotation, then resume → no secret lost, no blob left under the
-    old identity.
-  - Audit history survives the rotation and still verifies.
+  - Rotate recipient → keyring opens under the new identity, not the old;
+    no record bytes changed.
+  - Recover the keyring with the offline recovery identity and rewrap to a
+    fresh recipient (R21/R32 recovery path).
+  - Rotate record key → every secret readable, all records carry the new key
+    id; old-key records gone.
+  - Kill the process mid record-key rotation → original store intact and
+    servable after cleanup; `serve` during the pass refuses to start
+    (lifecycle, R35).
+  - Audit history survives both rotations and still verifies.
 - **Verification:** `cargo test --test reencrypt` green.
 
-### U9. TLS transport and plaintext refusal
+### U9. TLS transport, limits, and plaintext refusal
 
-- **Goal:** Serve over rustls TLS and refuse plaintext remote connections.
-- **Requirements:** R20, R18, KTD6.
+- **Goal:** Serve over rustls TLS with reloadable certificates, bounded
+  requests and timeouts, and refuse plaintext remote connections.
+- **Requirements:** R20, R18, R27 (transport bounds), R36 (reload, shutdown),
+  KTD6.
 - **Dependencies:** U1.
 - **Files:** `src/transport.rs`, `src/startup.rs`, `tests/transport.rs`.
-- **Approach:** `axum-server` `bind_rustls` with PEM cert/key from config. A
-  non-loopback bind without TLS fails startup (R18 seam already in U1; U9
-  supplies the TLS path and the runtime refusal). Loopback-only may run
-  plaintext.
+- **Approach:** `axum-server` `bind_rustls` with PEM cert/key from config,
+  reloadable on a control-plane command or signal without restart (R36 — a
+  restart costs an attended key ceremony). A non-loopback bind without TLS
+  fails startup (R18 seam already in U1; U9 supplies the TLS path and the
+  runtime refusal); loopback-only (`127.0.0.0/8`, `::1`) may run plaintext.
+  `tower-http` layers supply body/header limits, concurrency cap, and
+  handshake/request/drain timeouts (R27); secret-bearing responses set
+  `Cache-Control: no-store` and skip compression (KTD6). Graceful shutdown
+  wires here: stop admission, drain, flush, final checkpoint, zeroize (R36).
 - **Test scenarios:**
-  - Non-loopback listener without TLS → refused at startup.
-  - TLS configured → HTTPS request with `X-Vault-Token` succeeds; plaintext HTTP
-    to the TLS port is rejected.
+  - Non-loopback listener without TLS → refused at startup; `::1` counts as
+    loopback for the plaintext allowance.
+  - TLS configured → HTTPS request with `X-Vault-Token` succeeds; plaintext
+    HTTP to the TLS port is rejected.
+  - Certificate reload swaps the served cert with no restart and no dropped
+    in-flight request (R36).
+  - Oversized body / too many headers / slow handshake → rejected within
+    documented bounds (R27).
   - Loopback plaintext listener → allowed.
 - **Verification:** `cargo test --test transport` green.
 
 ### U10. Backup and restore
 
-- **Goal:** A single operator backs up and restores the store and audit log by a
-  documented, tested sequence.
-- **Requirements:** R32, R14.
+- **Goal:** A single operator backs up the running server and restores onto a
+  fresh host by a documented, tested sequence that cannot resurrect revoked
+  credentials or activate a corrupt store.
+- **Requirements:** R32, R14, R35 (lifecycle).
 - **Dependencies:** U2, U6.
 - **Files:** `src/backup.rs`, `src/cli.rs`, `docs/operating.md`,
   `tests/backup.rs`.
-- **Approach:** `backup` produces an encrypted, crash-consistent snapshot of the
-  redb store and audit log while the server runs; `restore` reconstructs onto a
-  fresh host. The audit chain verifies against the last off-host checkpoint
-  after restore.
+- **Approach:** `backup` opens a consistent snapshot of the single redb file
+  (KTD2's proven snapshot mechanism — never a raw `cp` of a live B-tree),
+  packages it with the encrypted keyring and a signed manifest (store id,
+  schema version, keyring version, chain head, latest included checkpoint,
+  checksums), and encrypts the archive to one or more configured backup
+  recipients — which may differ from the live server recipient. Private keys
+  never enter the archive (R32); the documented recovery package adds the
+  offline `age` identity and checkpoint-key copies. `restore` targets an empty
+  directory, sets `lifecycle=restoring`, verifies archive checksums, manifest,
+  database integrity, audit chain, and checkpoint relationship before the
+  store becomes startable, opens a new credential epoch invalidating all
+  pre-restore tokens and secret_ids, and records the restore as a recovery
+  event in the first new audit entry. `backup verify` checks an archive
+  without restoring it.
 - **Test scenarios:**
   - Covers AE7. Backup a running server, restore onto a fresh data directory →
-    every secret readable, every identity authenticates, audit chain verifies.
-  - Backup taken during concurrent writes → restores to a crash-consistent
-    point, no torn record.
+    every secret readable, identities and grants intact, audit chain verifies
+    against the last off-host checkpoint, pre-restore bearer credentials
+    rejected, fresh credential works.
+  - Backup taken during concurrent writes → restores to a transactionally
+    consistent point, no torn record.
+  - Restore a backup predating a token revocation → that token stays invalid
+    (credential epoch, not luck).
+  - Tamper with one archive member → verification fails before activation;
+    the target directory stays inert.
+  - Restore whose chain head predates the supplied checkpoint → ordinary
+    restore refuses; an explicit disaster-recovery flag records the rollback
+    and proceeds with the credential epoch.
+  - Restore without a usable `age` identity → fails with no partial
+    initialization.
 - **Verification:** `cargo test --test backup` green; documented sequence
   exercised end-to-end.
 
-### U11. Compatibility harness and acceptance tests
+### U11. Compatibility harness, acceptance, fault, and fuzz suites
 
-- **Goal:** Every acceptance example runs as an automated test, and KV reads are
-  proven against the real pinned `vault` and `bao` CLIs.
-- **Requirements:** R2, R3; AE1–AE8; the pinned-CLI assumption.
+- **Goal:** Every acceptance example runs as an automated test; KV reads are
+  proven against the real pinned `fnox`, `vault`, and `bao` binaries; and the
+  invariants the design leans on — crash atomicity, parser safety, no secret
+  leakage — are attacked continuously, not assumed.
+- **Requirements:** R2, R3, R25, R26; AE1–AE12; KTD14's pinned matrix.
 - **Dependencies:** U5, U6, U7.
 - **Files:** `tests/compat/mod.rs`, `tests/acceptance/mod.rs`,
-  `.github/workflows/ci.yml`.
+  `tests/fault/`, `fuzz/`, `benches/`, `.github/workflows/ci.yml`.
 - **Approach:** The harness starts a server instance and drives it with the
-  actual `vault` CLI at pinned versions (and `bao` as a non-BUSL client path),
-  asserting `vault kv get/put/list` and the preflight succeed configuration-only
-  (R2). Acceptance tests AE1–AE8 assert product-level outcomes. CLI versions are
-  pinned in CI so a client upgrade cannot silently break R2.
+  actual pinned binaries — `fnox` (the named primary client, first-class gate,
+  U0 fixtures), `vault` CLI, and `bao` as the non-BUSL path — asserting reads,
+  writes, lists, and the preflight succeed configuration-only (R2). Acceptance
+  tests AE1–AE12 assert product-level outcomes. Around them, four standing
+  suites: **fault** — child-process kill points around write/revoke/backup/
+  re-encrypt, disk-full and short-write injection (feeds AE9); **property** —
+  canonical path/grant equivalence models (U3); **fuzz** — token strings,
+  request paths, JSON bodies, encrypted record and checkpoint decoders;
+  **canary scan** — seeded secret values must appear in no log, trace, panic,
+  audit ciphertext-adjacent index, or test artifact (R25). A benchmark records
+  the audited-read/write baseline on a named reference host (Performance and
+  Capacity). Client versions are pinned in CI so an upgrade cannot silently
+  break R2.
 - **Execution note:** This is the compat gate — API-shape unit tests are
-  necessary but the CLI drives the fragile preflight joint.
+  necessary but the real clients drive the fragile preflight joint.
 - **Test scenarios:**
+  - Pinned `fnox` resolves a secret end-to-end against the server,
+    configuration-only (R2, AE8).
   - `vault kv put/get/list` against the server at each pinned CLI version →
-    succeed configuration-only (R2, AE8-adjacent).
-  - `bao` CLI reads a secret the `vault` CLI wrote → succeeds (OpenBao non-BUSL
-    path).
-  - AE1–AE8 each run green as integration tests.
-  - A deliberately mismatched preflight `options.version` → the harness catches
-    the break (guards the known fragile joint).
-- **Verification:** `cargo test --test compat --test acceptance` green in CI
-  against pinned CLIs.
+    succeed configuration-only (R2).
+  - `bao` CLI reads a secret the `vault` CLI wrote → succeeds (OpenBao
+    non-BUSL path).
+  - AE1–AE12 each run green as integration tests.
+  - A deliberately mismatched preflight `options.version` → the harness
+    catches the break (guards the known fragile joint).
+  - Fuzz targets run in CI on a schedule; kill-point and disk-full suites run
+    per PR; the canary scan runs over every captured artifact.
+- **Verification:** `cargo test --test compat --test acceptance` plus fault
+  suite green in CI against pinned clients; fuzz corpus checked in.
 
-### U12. Operator documentation and licensing
+### U12. Operator experience: doctor, documentation, and licensing
 
-- **Goal:** A first-time operator reaches a first successful secret read by one
-  documented sequence, and the project ships OSI-licensed with everything in the
+- **Goal:** A first-time operator reaches a first successful secret read by
+  one documented sequence, recurring operations have coherent CLI workflows
+  and a `doctor`, and the project ships OSI-licensed with everything in the
   open tree.
-- **Requirements:** R16, R17, R19, R21; Key Flow F1; dev-token and
-  workload-secret-zero postures.
+- **Requirements:** R16, R17, R19, R21, R37; Key Flow F1; dev-token and
+  workload-secret-zero postures; KTD13.
 - **Dependencies:** U1–U11.
-- **Files:** `README.md`, `docs/operating.md`, `LICENSE`, `CONTRIBUTING.md`,
-  `deny.toml`.
-- **Approach:** `docs/operating.md` documents F1 end to end (key material
-  handling per R21, bootstrap credential per R17, first identity, first read),
-  the developer-token posture (accept-and-mitigate; optional keychain helper),
-  the workload secret_id delivery posture, backup/restore (U10), and identity
-  rotation (U8). An OSI license (e.g. MPL-2.0 or Apache-2.0) at the tree root
-  with no `ee/` carve-out (R19). `deny.toml` configures `cargo-deny` for both
-  licenses and advisories so the Verification Contract's `cargo deny check` gate
-  has an owner.
+- **Files:** `README.md`, `docs/operating.md`, `docs/compatibility.md`,
+  `src/cli.rs` (doctor), `LICENSE`, `CONTRIBUTING.md`, `deny.toml`.
+- **Approach:** The CLI's command families are documented as a coherent
+  surface — `init`, `serve`, `doctor`, `identity`, `grant`, `token`,
+  `approle`, `secret`, `rotation`, `authz explain`, `audit`, `key`, `backup`,
+  `restore` — each with human-readable and stable JSON output (R16), secret
+  input never via argv (R37), and destructive commands requiring exact
+  identifiers plus an audited reason. `doctor` checks what an operator would
+  otherwise learn at 2am: data-dir ownership and lock, keyring decryptability
+  and store-id match, schema and lifecycle state, chain and checkpoint
+  freshness, disk capacity vs thresholds, last verified backup age, TLS cert
+  expiry, and clock sanity — without touching secret values.
+  `docs/operating.md` documents F1 end to end (key-material channels per
+  R21/R37, first identity, first read), the developer-token posture
+  (accept-and-mitigate; optional keychain helper), the workload secret_id
+  delivery posture, checkpoint mirroring (KTD4), backup/restore and the
+  recovery package (U10), key rotation (U8), and hardened systemd unit
+  settings. MPL-2.0 at the tree root with no `ee/` carve-out (R19, KTD13).
+  `deny.toml` configures `cargo-deny` for licenses and advisories so the
+  Verification Contract's `cargo deny check` gate has an owner.
 - **Test scenarios:**
-  - Covers AE8. A fresh consumer host following the documented sequence reaches
-    a first secret read with no fnox change beyond configuration.
-  - Test expectation: none for prose — verified by the AE8 harness test in U11
-    exercising the documented steps.
+  - Covers AE8. A fresh consumer host following the documented sequence
+    reaches a first fnox secret read with no fnox change beyond configuration.
+  - `doctor` on a healthy install reports all green; on a store with a stale
+    checkpoint, near-full disk, or expiring cert, it names each finding.
+  - CLI JSON output is asserted schema-stable across the release.
+  - Secret-accepting commands reject argv-supplied values (R37).
 - **Verification:** AE8 green; `cargo deny check` passes (licenses +
   advisories); a second reader can follow F1 unaided (Success Criteria).
 
@@ -984,16 +1697,22 @@ passes. See the Unit Index for the dependency graph.
 
 ## Verification Contract
 
-| Gate                     | Command                                                                  | Applies to    |
-| ------------------------ | ------------------------------------------------------------------------ | ------------- |
-| Unit + integration tests | `cargo test`                                                             | all units     |
-| Compatibility harness    | `cargo test --test compat --test acceptance` (pinned `vault`/`bao` CLIs) | U11; gates R2 |
-| Lint                     | `cargo clippy -- -D warnings`                                            | all           |
-| Format                   | `cargo fmt --check`                                                      | all           |
-| License + advisories     | `cargo deny check`                                                       | R19           |
-| Audit tamper check       | `<binary> audit verify` against a hand-tampered log                      | U6; gates R14 |
+| Gate                     | Command                                                                          | Applies to     |
+| ------------------------ | -------------------------------------------------------------------------------- | -------------- |
+| Unit + integration tests | `cargo test --locked --all-targets`                                              | all units      |
+| Compatibility harness    | `cargo test --test compat --test acceptance` (pinned `fnox`/`vault`/`bao`)       | U11; gates R2  |
+| Lint                     | `cargo clippy --locked --all-targets -- -D warnings`                             | all            |
+| Format                   | `cargo fmt --check`                                                              | all            |
+| License + advisories     | `cargo deny check`                                                               | R19            |
+| Audit tamper check       | `<binary> audit verify` against a hand-tampered log                              | U6; gates R14  |
+| Crash/fault suite        | kill-point, disk-full, and short-write injection (`tests/fault/`)                | U6, U8, U10; gates R26 |
+| Property/model suite     | canonical path + grant equivalence models                                        | U3; gates R8   |
+| Fuzz suite               | scheduled fuzzing of token, path, JSON, record, and checkpoint decoders          | U11            |
+| Secret-output canary scan| seeded values absent from logs, traces, panics, artifacts                        | U11; gates R25 |
+| Performance baseline     | audited read/write benchmark on a named reference host                           | U11            |
+| Release smoke            | `init` → `serve` → fnox read → rotate → backup → restore → verify, release binary | U12           |
 
-Behavioral proof: AE1–AE8 each pass as automated tests (U11). The falsifiable
+Behavioral proof: AE1–AE12 each pass as automated tests (U11). The falsifiable
 ops-light claim (Success Criteria) — one operator cycle of provision,
 issue/revoke, rotate, verify — runs through the documented workflow with no
 external service, no restart, no policy language.
@@ -1004,14 +1723,22 @@ external service, no restart, no policy language.
 
 **Global**
 
-- Every requirement R1–R32 is advanced by at least one unit and its cited tests.
-- AE1–AE8 pass in CI against the pinned CLI matrix.
+- Every requirement R1–R37 is advanced by at least one unit and its cited tests.
+- AE1–AE12 pass in CI against the pinned client matrix — the fnox binary
+  included, not only the Vault CLI.
 - The full Verification Contract passes.
-- `age` identity, bootstrap credential, and workload secret_ids never touch disk
-  as plaintext, shell history, or argv (R21, R17, R24) — asserted by tests and
-  reviewed in the diff.
+- `age` identity, first management credential, and workload secret_ids never
+  touch disk as plaintext, shell history, or argv (R21, R17, R24, R37) —
+  asserted by tests and reviewed in the diff.
 - Fail-closed postures hold: unsafe-config startup refusal (R18),
-  plaintext-remote refusal (R20), audit-write-failure operation failure (R26).
+  plaintext-remote refusal (R20), audit-atomicity and
+  audit-failure-means-operation-failure (R26), restore credential epoch (R32).
+- No handler commits state or audit outside the transaction coordinator —
+  module visibility enforces it, and the crash suite proves the atomicity
+  (KTD8, AE9).
+- The parser/decoder fuzz targets exist and run; the canary scan is wired into
+  CI (R25).
+- The benchmark baseline is recorded with durability settings named.
 - Abandoned-attempt code from approaches that did not pan out is removed from
   the diff.
 
@@ -1033,7 +1760,7 @@ landed in the Product Contract or Planning Contract above.
 | R14 tamper-evidence names no threat actor or trust anchor | Resolved — KTD4: per-entry `blake3` chain + off-host `ed25519` signed checkpoints. AE5, U6.                             |
 | Vault-compatible authentication surface undefined         | Resolved — R31: token auth + AppRole login. U4.                                                                         |
 | Workload bootstrap has no secret-zero mechanism           | Resolved as accepted posture — secret_id delivered by the deployment mechanism (Assumptions, Dependencies). U12.        |
-| Bootstrap sequence conflicts with startup validation      | Resolved — R18/F1 reworded to one-time bootstrap credential; R30. U1 (startup presence check), U4 (bootstrap exchange). |
+| Bootstrap sequence conflicts with startup validation      | Resolved — superseded by local `init` (2026-07-15 second revision): R17/R30/R34 recast, no remote bootstrap route exists. U1.  |
 | Developer credential storage an unchosen posture          | Resolved — accept-and-mitigate (scope + TTL + revocation), optional keychain helper (Dependencies). U12.                |
 | Ops-light stops before backup/restore                     | Resolved (backup/restore) — R32, AE7, U10. Upgrade-with-rollback deferred below.                                        |
 | `age` identity rotation has no acceptance invariant       | Resolved — U8 crash-recoverable re-encrypt; KTD3.                                                                       |
@@ -1043,13 +1770,23 @@ landed in the Product Contract or Planning Contract above.
 **Deferred to Follow-Up Work**
 
 - **Pre-migration consumer inventory** (review finding, confidence 100). The
-  user chose not to add a migration-inventory requirement to v0.1. R10's list is
-  trustworthy for rotation only once every known consumer has been migrated onto
-  the server (Dependencies / Assumptions already states this). Mechanizing the
-  pre-server inventory and reconciliation remains post-v0.1, gated with the real
-  Canvas/Populi rotation.
-- **Upgrade-with-rollback.** Backup/restore ships in v0.1 (U10); a supported
-  in-place version-upgrade path with rollback, and explicit RPO/RTO targets, are
-  deferred.
+  user chose not to add a migration-inventory requirement to v0.1, and the
+  competitive review's declared-consumer-registry proposal is held to the same
+  ruling. R10's list is trustworthy for rotation only once every known
+  consumer has been migrated onto the server (Dependencies / Assumptions
+  already states this). The reserved seams — KTD11's schema-versioned metadata
+  record and R10's labeled authorized/observed views — let a registry land
+  post-v0.1 without a format break. Mechanizing the pre-server inventory and
+  reconciliation remains post-v0.1, gated with the real Canvas/Populi
+  rotation.
+- **Upgrade-with-rollback.** Schema versioning, newer-schema refusal,
+  forward-only migrations with a verified pre-migration backup, and migration
+  fixtures ship in v0.1 (R35); backup/restore ships in v0.1 (U10). What stays
+  deferred: binary rollback after a completed schema migration, and explicit
+  RPO/RTO targets.
+- **Rotation campaigns.** R33's status view is deliberately thin. Multi-step
+  campaign state machines, per-consumer acknowledgements with reasons, signed
+  closeouts, drift detectors, canaries, and webhooks build on R13's
+  version-on-audit seam post-v0.1.
 
 ### From 2026-07-15 planning
