@@ -5,7 +5,7 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 list=$(./scripts/verify.sh --list)
-for check in lock-msrv fmt clippy test doc msrv-build msrv-test harness-clippy harness-test harness-msrv-test canary-gate; do
+for check in compat-pins lock-msrv fmt clippy test doc msrv-build msrv-test harness-clippy harness-test harness-msrv-test canary-gate; do
     printf '%s\n' "$list" | grep -Fqx "$check"
 done
 jq -e '

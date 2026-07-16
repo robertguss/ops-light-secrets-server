@@ -26,3 +26,18 @@ At startup, an existing socket is probed before removal. An active listener,
 symlink, non-socket, wrong owner, unsafe mode, or inode race fails closed. A
 confirmed stale owner-only socket may be replaced. Shutdown removes the socket
 only when its device and inode still match the one created by this process.
+
+## Compatibility client pins
+
+Compatibility evidence applies only to the exact client archives in
+`research/compat/client-matrix.json`: Vault OSS 2.0.3, OpenBao 2.6.0, and fnox
+1.30.0 plus 1.29.0 on Linux amd64. Fetch and verify them before a capture run:
+
+```text
+./scripts/fetch-compat-clients.sh /private/output/directory
+```
+
+The fetcher checks every SHA-256 digest before the archive can be extracted or
+executed. A client upgrade requires updating the pin, provenance, checksum, and
+captured compatibility evidence together. No legacy Vault line is claimed
+without a documented deployed consumer or a proven distinct request contract.

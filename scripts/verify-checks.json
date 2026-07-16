@@ -2,6 +2,12 @@
   "schema": 1,
   "checks": [
     {
+      "id": "compat-pins",
+      "program": "./scripts/check-compat-pins.sh",
+      "args": [],
+      "toolchain": "default"
+    },
+    {
       "id": "lock-msrv",
       "toolchain": "default",
       "program": "./scripts/check-lock-msrv.sh",
