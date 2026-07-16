@@ -95,6 +95,11 @@
       "contract": "shutdown.executor_barrier",
       "owner": "olss-charter-qul.8.4",
       "verification": "Wire signals, admission barrier, queued cancellation, begun-transaction drain, deadline/second-signal exits, listener shutdown and key zeroization to the live executor."
+    },
+    {
+      "contract": "transport.reload_audit_and_final_adapter_verdict",
+      "owner": "olss-charter-qul.8.4",
+      "verification": "Back U9.1's fingerprint commit hook with reauthorization plus atomic audit/expected-fingerprint persistence, bind the authenticated control trigger to the same primitive, exercise crash reconciliation, and record the final axum-server adopt/fallback verdict after drain/barrier tests."
     }
   ]
 }

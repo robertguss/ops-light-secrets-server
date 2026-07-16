@@ -185,7 +185,14 @@ pub struct Config {
     pub data_directory: PathBuf,
     pub age_identity: Option<SecretSource>,
     pub tls_key_passphrase: Option<SecretSource>,
+    pub tls: TlsFiles,
     pub mount: SecretMount,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TlsFiles {
+    pub certificate: Option<PathBuf>,
+    pub private_key: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,6 +233,8 @@ impl Config {
                 "OLSS_TLS_KEY_PASSPHRASE_SOURCE" => {
                     self.tls_key_passphrase = Some(parse_source(&key, &value)?)
                 }
+                "OLSS_TLS_CERTIFICATE" => self.tls.certificate = Some(PathBuf::from(value)),
+                "OLSS_TLS_PRIVATE_KEY" => self.tls.private_key = Some(PathBuf::from(value)),
                 "OLSS_MOUNTS_SECRET_CAS_REQUIRED" => {
                     self.mount.cas_required = parse_bool(&key, &value)?
                 }
@@ -256,6 +265,18 @@ impl Config {
                 if !unsafe_environment {
                     return Err(ConfigError::invalid(setting, source.kind()));
                 }
+            }
+        }
+
+        match (&self.tls.certificate, &self.tls.private_key) {
+            (Some(cert), Some(key))
+                if !cert.as_os_str().is_empty() && !key.as_os_str().is_empty() => {}
+            (None, None) => {}
+            _ => {
+                return Err(ConfigError::invalid(
+                    "tls",
+                    "certificate and private_key must be paired",
+                ));
             }
         }
 
@@ -325,6 +346,7 @@ fn duplicate_key<'a>(contents: &'a str, error: &toml::de::Error) -> Option<&'a s
 struct RawConfig {
     data: RawData,
     secrets: RawSecrets,
+    tls: RawTls,
     mounts: RawMounts,
 }
 
@@ -347,6 +369,13 @@ impl Default for RawData {
 struct RawSecrets {
     age_identity: Option<String>,
     tls_key_passphrase: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawTls {
+    certificate: Option<PathBuf>,
+    private_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -387,6 +416,10 @@ impl TryFrom<RawConfig> for Config {
                 .tls_key_passphrase
                 .map(|source| parse_source("secrets.tls_key_passphrase", &source))
                 .transpose()?,
+            tls: TlsFiles {
+                certificate: raw.tls.certificate,
+                private_key: raw.tls.private_key,
+            },
             mount: SecretMount {
                 cas_required: raw.mounts.secret.cas_required,
                 max_versions: raw.mounts.secret.max_versions,
@@ -542,6 +575,47 @@ mod tests {
 
         assert!(config.mount.cas_required);
         assert_eq!(config.mount.max_versions, 21);
+    }
+
+    #[test]
+    fn tls_certificate_and_private_key_are_a_strict_pair() {
+        let mut configured = Config::try_from(
+            deserialize(
+                "[tls]\ncertificate = '/run/tls/cert.pem'\nprivate_key = '/run/tls/key.pem'\n",
+            )
+            .expect("valid TLS config"),
+        )
+        .unwrap();
+        configured.validate(false).unwrap();
+        assert_eq!(
+            configured.tls.certificate.as_deref(),
+            Some(Path::new("/run/tls/cert.pem"))
+        );
+
+        for declaration in [
+            "[tls]\ncertificate = '/run/tls/cert.pem'\n",
+            "[tls]\nprivate_key = '/run/tls/key.pem'\n",
+            "[tls]\ncertificate = ''\nprivate_key = '/run/tls/key.pem'\n",
+        ] {
+            let mut config = Config::try_from(deserialize(declaration).unwrap()).unwrap();
+            assert!(config.validate(false).is_err());
+        }
+
+        let mut environment = Config::try_from(deserialize("").unwrap()).unwrap();
+        environment
+            .apply_environment([
+                (
+                    "OLSS_TLS_CERTIFICATE".into(),
+                    "/run/tls/env-cert.pem".into(),
+                ),
+                ("OLSS_TLS_PRIVATE_KEY".into(), "/run/tls/env-key.pem".into()),
+            ])
+            .unwrap();
+        environment.validate(false).unwrap();
+        assert_eq!(
+            environment.tls.private_key.as_deref(),
+            Some(Path::new("/run/tls/env-key.pem"))
+        );
     }
 
     #[test]

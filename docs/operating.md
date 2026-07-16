@@ -56,6 +56,31 @@ symlink, non-socket, wrong owner, unsafe mode, or inode race fails closed. A
 confirmed stale owner-only socket may be replaced. Shutdown removes the socket
 only when its device and inode still match the one created by this process.
 
+## TLS files and live reload
+
+Configure the certificate and private key as a pair with `[tls].certificate`
+and `[tls].private_key`, or `OLSS_TLS_CERTIFICATE` and
+`OLSS_TLS_PRIVATE_KEY`. The service opens both with no-follow semantics, bounds
+their size, parses the complete captured bytes, verifies the key/certificate
+pair, and closes the descriptors before activation. The private-key file must
+be owned by the service user with no group or other permission bits. Symlinks,
+hard links, multiple keys, malformed or half-written files, and metadata
+changes during a read are refused without exposing paths or parser text.
+
+SIGHUP invokes the same serialized reload primitive reserved for the later
+authenticated `tls reload` control command. A candidate is fully validated and
+its public certificate fingerprint is committed through the audit/storage hook
+before an infallible Arc swap. Failure leaves the old configuration serving.
+On restart, the configured pair must match the committed expected fingerprint;
+a mismatch fails closed and instructs the operator to restore the files or
+perform an audited live reload.
+
+`axum-server` 0.8.0 with its provider-neutral rustls feature is provisionally
+adopted: HTTPS, plaintext refusal, SIGHUP, repeated/concurrent reload, and an
+in-flight request across a certificate swap are locally proven on the MSRV.
+U9.4 owns the final adopt-or-fallback verdict after the complete executor drain
+and shutdown-barrier suite; this provisional result does not pre-judge it.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in
