@@ -81,6 +81,25 @@ in-flight request across a certificate swap are locally proven on the MSRV.
 U9.4 owns the final adopt-or-fallback verdict after the complete executor drain
 and shutdown-barrier suite; this provisional result does not pre-judge it.
 
+## Reverse-proxy listener
+
+Reverse proxying is a distinct listener type, never a switch that makes the
+direct listener trust forwarding headers. Its backend is either the owner-only
+Unix data socket or a loopback-only TCP address. A TCP proxy peer must be the
+exact configured loopback address. The Unix form uses the same no-follow,
+owner/mode, stale-inode, umask, `SO_PEERCRED`, and cleanup checks as the control
+socket. Any local process can spoof the source of a loopback TCP connection, so
+use the Unix form when the proxy can run as a dedicated service UID boundary.
+
+The trusted proxy must replace, not append, `X-Forwarded-For` with exactly one
+canonical IPv4 or IPv6 address. Comma lists, ports, brackets, whitespace,
+non-canonical spellings, duplicate fields, and missing fields are rejected
+before the handler. `Forwarded`, `X-Real-IP`, PROXY protocol, and other address
+grammars are never interpreted. Direct mode and TCP connections from any peer
+other than the configured proxy ignore all forwarding headers. Only the source
+derived under these rules becomes the request's rate-limit bucket; it is
+request-local and is not retained on a pooled connection.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in

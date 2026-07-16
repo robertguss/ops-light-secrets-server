@@ -110,11 +110,35 @@ impl std::error::Error for ControlSocketError {}
 
 /// Bound socket whose inode is removed only if it is still the one we created.
 pub struct ControlSocket {
-    listener: Option<OwnerListener>,
-    cleanup: SocketInode,
+    listener: Option<OwnerUnixListener>,
 }
 
 impl ControlSocket {
+    pub fn bind(
+        path: impl AsRef<Path>,
+        expected_uid: u32,
+        audit: Arc<dyn PeerAudit>,
+    ) -> Result<Self, ControlSocketError> {
+        Ok(Self {
+            listener: Some(OwnerUnixListener::bind(path, expected_uid, audit)?),
+        })
+    }
+
+    pub async fn serve(mut self) -> io::Result<()> {
+        let listener = self.listener.take().expect("listener consumed once");
+        axum::serve(listener, control_router()).await
+    }
+}
+
+/// Owner-only Unix listener shared by control and reverse-proxy data sockets.
+pub struct OwnerUnixListener {
+    inner: UnixListener,
+    expected_uid: u32,
+    audit: Arc<dyn PeerAudit>,
+    _cleanup: SocketInode,
+}
+
+impl OwnerUnixListener {
     pub fn bind(
         path: impl AsRef<Path>,
         expected_uid: u32,
@@ -142,20 +166,11 @@ impl ControlSocket {
         }
 
         Ok(Self {
-            listener: Some(OwnerListener {
-                inner: listener,
-                expected_uid,
-                audit,
-            }),
-            cleanup: SocketInode::new(path.to_owned(), &metadata),
+            inner: listener,
+            expected_uid,
+            audit,
+            _cleanup: SocketInode::new(path.to_owned(), &metadata),
         })
-    }
-
-    pub async fn serve(mut self) -> io::Result<()> {
-        let listener = self.listener.take().expect("listener consumed once");
-        let result = axum::serve(listener, control_router()).await;
-        drop(self.cleanup);
-        result
     }
 }
 
@@ -209,13 +224,7 @@ fn reconcile_existing(path: &Path, expected_uid: u32) -> Result<(), ControlSocke
     fs::remove_file(path).map_err(|_| ControlSocketError::PathChanged)
 }
 
-struct OwnerListener {
-    inner: UnixListener,
-    expected_uid: u32,
-    audit: Arc<dyn PeerAudit>,
-}
-
-impl Listener for OwnerListener {
+impl Listener for OwnerUnixListener {
     type Io = UnixStream;
     type Addr = tokio::net::unix::SocketAddr;
 

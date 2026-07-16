@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 
 use crate::config::Config;
+use crate::proxy::is_loopback;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub const DRAIN_DEADLINE: Duration = Duration::from_secs(30);
@@ -354,7 +355,7 @@ pub fn validate_startup(snapshot: &StartupSnapshot) -> Result<StartupAdmission, 
             Detail::None,
         ));
     }
-    if !snapshot.listener.ip().is_loopback() && snapshot.transport == TransportState::Plaintext {
+    if !is_loopback(snapshot.listener.ip()) && snapshot.transport == TransportState::Plaintext {
         return Err(StartupRefusal::new(
             StartupCode::RemotePlaintextListener,
             "listener.transport",

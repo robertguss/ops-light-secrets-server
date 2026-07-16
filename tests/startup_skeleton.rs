@@ -110,6 +110,13 @@ fn refusal_matrix_is_closed_stable_and_safe() {
 }
 
 #[test]
+fn ipv4_mapped_loopback_is_allowed_for_plaintext_startup() {
+    let mut snapshot = valid();
+    snapshot.listener = "[::ffff:127.0.0.1]:8200".parse().unwrap();
+    assert!(validate_startup(&snapshot).is_ok());
+}
+
+#[test]
 fn lifecycle_marker_agreement_and_pending_anchor_policy_are_explicit() {
     let mut snapshot = valid();
     snapshot.lifecycle = LifecycleState::Reencrypting;
