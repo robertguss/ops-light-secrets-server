@@ -60,6 +60,12 @@
       "toolchain": "1.85.0",
       "program": "cargo",
       "args": ["+1.85.0", "test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets"]
+    },
+    {
+      "id": "canary-gate",
+      "toolchain": "default",
+      "program": "cargo",
+      "args": ["test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "full_scanner", "--", "--test-threads=1"]
     }
   ]
 }

@@ -39,6 +39,7 @@ jobs:
           - harness-clippy
           - harness-test
           - harness-msrv-test
+          - canary-gate
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

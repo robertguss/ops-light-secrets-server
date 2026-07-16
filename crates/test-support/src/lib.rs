@@ -5,8 +5,8 @@
 //! privately and never teed. [`Scenario::finish_failure`] freezes and scans the
 //! run tree before it can render a bounded tail. Arbitrary `Debug`, argv,
 //! environment, headers, bodies, secret values, and raw paths have no logging
-//! API. U11.6 replaces the bootstrap raw-literal scanner through the scanner
-//! interface without changing the event schema.
+//! API. [`FullScanner`] is the default same-process gate; the bootstrap scanner
+//! remains available only for its compatibility self-tests.
 
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -23,12 +24,16 @@ use std::time::Instant;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
+mod full_scan;
+pub use full_scan::FullScanner;
+
 const SCHEMA: u8 = 1;
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCAN_FILES: usize = 256;
 const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TAIL_BYTES: usize = 16 * 1024;
 const MAX_TAIL_LINES: usize = 40;
+const MAX_CANARY_BYTES: u64 = 4096;
 
 #[derive(Debug)]
 pub enum HarnessError {
@@ -221,6 +226,13 @@ pub enum ArtifactKind {
     ClientStderr,
     Panic,
     Crash,
+    Trace,
+    TestStdout,
+    TestStderr,
+    Fixture,
+    BackupArchive,
+    AuditExport,
+    DoctorOutput,
     Data,
 }
 
@@ -233,6 +245,13 @@ impl ArtifactKind {
             Self::ClientStderr => "client-stderr",
             Self::Panic => "panic",
             Self::Crash => "crash",
+            Self::Trace => "trace",
+            Self::TestStdout => "test-stdout",
+            Self::TestStderr => "test-stderr",
+            Self::Fixture => "fixture",
+            Self::BackupArchive => "backup-archive",
+            Self::AuditExport => "audit-export",
+            Self::DoctorOutput => "doctor-output",
             Self::Data => "data",
         }
     }
@@ -362,6 +381,23 @@ impl HarnessBuilder {
         self
     }
 
+    pub fn register_canary_fd(mut self, fd: OwnedFd) -> Result<Self, HarnessError> {
+        let mut file = File::from(fd);
+        let mut canary = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_CANARY_BYTES + 1)
+            .read_to_end(&mut canary)?;
+        if canary.is_empty()
+            || u64::try_from(canary.len())
+                .map_err(|_| HarnessError::InvalidSafeValue("canary registry"))?
+                > MAX_CANARY_BYTES
+        {
+            return Err(HarnessError::InvalidSafeValue("canary registry"));
+        }
+        self.canaries.push(Zeroizing::new(canary));
+        Ok(self)
+    }
+
     pub fn scanner(mut self, scanner: Arc<dyn ArtifactScanner>) -> Self {
         self.scanner = scanner;
         self
@@ -437,7 +473,7 @@ impl Harness {
             suite,
             canaries: Vec::new(),
             clients: Vec::new(),
-            scanner: Arc::new(BootstrapScanner),
+            scanner: Arc::new(FullScanner),
             lifecycle: Arc::new(DefaultArtifactLifecycle),
             global_timeout: std::time::Duration::from_secs(300),
         }
@@ -1048,38 +1084,53 @@ pub struct DefaultArtifactLifecycle;
 
 impl ArtifactLifecycle for DefaultArtifactLifecycle {
     fn freeze(&self, root: &Path) -> Result<(), HarnessError> {
-        let root_mode = std::fs::metadata(root)?.permissions().mode() & 0o777;
-        if root_mode != 0o700 {
-            return Err(HarnessError::Scanner);
-        }
-        for entry in std::fs::read_dir(root)? {
-            let entry = entry?;
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_file() {
-                if metadata.permissions().mode() & 0o777 != 0o600 {
-                    return Err(HarnessError::Scanner);
-                }
-                File::open(entry.path())?.sync_all()?;
-            }
-        }
-        Ok(())
+        freeze_tree(root)
     }
 
     fn teardown_raw(&self, root: &Path) -> Result<(), HarnessError> {
-        for entry in std::fs::read_dir(root)? {
-            let entry = entry?;
-            if entry.file_name() == "events.jsonl" {
-                continue;
-            }
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_file() || metadata.file_type().is_symlink() {
-                std::fs::remove_file(entry.path())?;
-            } else {
+        teardown_tree(root, true)
+    }
+}
+
+fn freeze_tree(directory: &Path) -> Result<(), HarnessError> {
+    if std::fs::metadata(directory)?.permissions().mode() & 0o777 != 0o700 {
+        return Err(HarnessError::Scanner);
+    }
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(HarnessError::Scanner);
+        }
+        if metadata.is_dir() {
+            freeze_tree(&entry.path())?;
+        } else if metadata.is_file() {
+            if metadata.permissions().mode() & 0o777 != 0o600 {
                 return Err(HarnessError::Scanner);
             }
+            File::open(entry.path())?.sync_all()?;
+        } else {
+            return Err(HarnessError::Scanner);
         }
-        Ok(())
     }
+    Ok(())
+}
+
+fn teardown_tree(directory: &Path, keep_events: bool) -> Result<(), HarnessError> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if keep_events && entry.file_name() == "events.jsonl" {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            teardown_tree(&entry.path(), false)?;
+            std::fs::remove_dir(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1456,8 +1507,8 @@ fn collect_paths(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), Harn
 }
 
 fn inventory(root: &Path, key: &[u8; 32]) -> Result<Vec<InventoryEntry>, HarnessError> {
-    let mut paths = Vec::new();
-    collect_paths(root, &mut paths)?;
+    let mut paths = vec![root.to_path_buf()];
+    collect_inventory_paths(root, &mut paths)?;
     paths.sort();
     paths
         .into_iter()
@@ -1466,12 +1517,34 @@ fn inventory(root: &Path, key: &[u8; 32]) -> Result<Vec<InventoryEntry>, Harness
             let relative = path.strip_prefix(root).map_err(|_| HarnessError::Scanner)?;
             Ok(InventoryEntry {
                 opaque_entry_id: keyed_id(key, &path_bytes(relative)),
-                kind: "file",
+                kind: if metadata.is_dir() {
+                    "directory"
+                } else {
+                    "file"
+                },
                 size: metadata.len(),
                 mode: metadata.permissions().mode() & 0o777,
             })
         })
         .collect()
+}
+
+fn collect_inventory_paths(
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), HarnessError> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(HarnessError::Scanner);
+        }
+        output.push(entry.path());
+        if metadata.is_dir() {
+            collect_inventory_paths(&entry.path(), output)?;
+        }
+    }
+    Ok(())
 }
 
 fn safe_tail(path: &Path) -> Result<String, HarnessError> {
@@ -1574,9 +1647,15 @@ fn random_key() -> Result<[u8; 32], HarnessError> {
 }
 
 fn random_hex(bytes: usize) -> Result<String, HarnessError> {
+    use std::fmt::Write as _;
+
     let mut value = vec![0_u8; bytes];
     File::open("/dev/urandom")?.read_exact(&mut value)?;
-    Ok(value.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut encoded = String::with_capacity(bytes * 2);
+    for byte in value {
+        write!(&mut encoded, "{byte:02x}").map_err(|_| HarnessError::Serialization)?;
+    }
+    Ok(encoded)
 }
 
 fn keyed_id(key: &[u8; 32], bytes: &[u8]) -> String {
@@ -1661,6 +1740,7 @@ fn valid_placeholder(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -1669,6 +1749,336 @@ mod tests {
             .register_canary(canary)
             .build()
             .expect("harness")
+    }
+
+    fn full_harness(canaries: &[&[u8]]) -> Harness {
+        let mut builder = Harness::builder("full-scanner").scanner(Arc::new(FullScanner));
+        for canary in canaries {
+            builder = builder.register_canary(canary);
+        }
+        builder.build().expect("full scanner harness")
+    }
+
+    #[test]
+    fn canary_registry_accepts_anonymous_fd_without_path_env_or_argv() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"fd-custody-canary").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let fd: OwnedFd = reader.into();
+        let harness = Harness::builder("fd-registry")
+            .register_canary_fd(fd)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut scenario = harness.scenario("fd-registry", 1).unwrap();
+        scenario
+            .capture(ArtifactKind::Data, b"fd-custody-canary")
+            .unwrap();
+        assert!(matches!(
+            finish(scenario),
+            Err(HarnessError::Quarantined(_))
+        ));
+    }
+
+    #[test]
+    fn full_scanner_detects_independent_encoding_vectors() {
+        let vectors: &[(&[u8], &[u8], &str)] = &[
+            (b"raw\0bytes", b"prefix raw\0bytes suffix", "raw_literal"),
+            (b"ab\"c", br#"prefix ab\"c suffix"#, "json_escape"),
+            (b"ab'c", br#"prefix ab'\''c suffix"#, "shell_escape"),
+            (b"Ab ?", b"prefix Ab%20%3F suffix", "percent_upper"),
+            (b"Ab ?", b"prefix Ab%20%3f suffix", "percent_lower"),
+            (
+                b"secre",
+                b"prefix c2VjcmU suffix",
+                "base64_standard_unpadded",
+            ),
+            (
+                b"secre",
+                b"prefix c2VjcmU= suffix",
+                "base64_standard_padded",
+            ),
+            (&[0xfb, 0xff], b"prefix -_8 suffix", "base64_url_unpadded"),
+            (&[0xfb, 0xff], b"prefix -_8= suffix", "base64_url_padded"),
+            (b"secretz", b"prefix 7365637265747a suffix", "hex_lower"),
+            (b"secretz", b"prefix 7365637265747A suffix", "hex_upper"),
+        ];
+        for (canary, artifact, check_id) in vectors {
+            let harness = full_harness(&[canary]);
+            let mut scenario = harness.scenario("encoding", 1).unwrap();
+            scenario.capture(ArtifactKind::Data, artifact).unwrap();
+            let error = finish(scenario).expect_err("encoded leak must fail");
+            let HarnessError::Quarantined(manifest) = error else {
+                panic!("unexpected safe error variant")
+            };
+            assert_eq!(manifest.check_id, *check_id);
+        }
+    }
+
+    #[test]
+    fn full_scanner_handles_overlap_multiple_and_low_entropy_canaries() {
+        let harness = full_harness(&[b"aaa", b"xy"]);
+        let mut scenario = harness.scenario("overlap", 1).unwrap();
+        scenario.capture(ArtifactKind::Data, b"aaaa").unwrap();
+        assert!(matches!(
+            finish(scenario),
+            Err(HarnessError::Quarantined(_))
+        ));
+    }
+
+    #[test]
+    fn finding_ids_are_run_keyed_even_for_low_entropy_canary() {
+        let mut match_ids = BTreeSet::new();
+        for _ in 0..2 {
+            let mut scenario = full_harness(&[b"xy"]).scenario("keyed-id", 1).unwrap();
+            scenario.capture(ArtifactKind::Data, b"xy").unwrap();
+            let HarnessError::Quarantined(manifest) = finish(scenario).unwrap_err() else {
+                panic!("expected quarantine")
+            };
+            assert!(!manifest.match_id.contains("xy"));
+            match_ids.insert(manifest.match_id.clone());
+        }
+        assert_eq!(match_ids.len(), 2);
+    }
+
+    #[test]
+    fn full_scanner_detects_encoded_filename_without_rendering_name() {
+        let harness = full_harness(&[b"Ab ?"]);
+        let scenario = harness.scenario("encoded-filename", 1).unwrap();
+        private_file(&harness.inner.root.join("Ab%20%3F.raw")).unwrap();
+        let HarnessError::Quarantined(manifest) = finish(scenario).unwrap_err() else {
+            panic!("expected quarantine")
+        };
+        assert_eq!(manifest.check_id, "filename_percent_upper");
+        assert!(!manifest_to_json(&manifest).contains("Ab%20%3F"));
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = tar::Builder::new(Vec::new());
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(u64::try_from(bytes.len()).unwrap());
+            header.set_cksum();
+            writer.append_data(&mut header, *name, *bytes).unwrap();
+        }
+        writer.into_inner().unwrap()
+    }
+
+    fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn full_scanner_finds_leak_in_nested_gzip_tar_zip() {
+        let zip = zip_bytes(&[("payload.bin", b"nested-archive-canary")]);
+        let tar = tar_bytes(&[("inner.zip", &zip)]);
+        let gzip = gzip_bytes(&tar);
+        let mut scenario = full_harness(&[b"nested-archive-canary"])
+            .scenario("nested-archive", 1)
+            .unwrap();
+        scenario.capture(ArtifactKind::Data, &gzip).unwrap();
+        let error = finish(scenario).expect_err("nested leak must fail");
+        let HarnessError::Quarantined(manifest) = error else {
+            panic!("unexpected safe error variant")
+        };
+        assert_eq!(manifest.structural_parent, "archive");
+        assert_eq!(manifest.artifact_kind, "archive_member");
+        assert!(!manifest_to_json(&manifest).contains("payload.bin"));
+        assert!(!manifest_to_json(&manifest).contains("nested-archive-canary"));
+    }
+
+    #[test]
+    fn full_scanner_refuses_archive_duplicates_traversal_and_links() {
+        let duplicate_tar = tar_bytes(&[("same", b"one"), ("same", b"two")]);
+        let traversal_zip = zip_bytes(&[("../escape", b"safe")]);
+
+        let mut symlink_writer = tar::Builder::new(Vec::new());
+        let mut symlink_header = tar::Header::new_gnu();
+        symlink_header.set_entry_type(tar::EntryType::Symlink);
+        symlink_header.set_mode(0o777);
+        symlink_header.set_size(0);
+        symlink_header.set_link_name("target").unwrap();
+        symlink_header.set_cksum();
+        symlink_writer
+            .append_data(&mut symlink_header, "symbolic-link", std::io::empty())
+            .unwrap();
+        let symlink_tar = symlink_writer.into_inner().unwrap();
+
+        let mut tar_writer = tar::Builder::new(Vec::new());
+        let mut link_header = tar::Header::new_gnu();
+        link_header.set_entry_type(tar::EntryType::Link);
+        link_header.set_mode(0o600);
+        link_header.set_size(0);
+        link_header.set_link_name("target").unwrap();
+        link_header.set_cksum();
+        tar_writer
+            .append_data(&mut link_header, "hard-link", std::io::empty())
+            .unwrap();
+        let hardlink_tar = tar_writer.into_inner().unwrap();
+
+        for (index, archive) in [duplicate_tar, traversal_zip, symlink_tar, hardlink_tar]
+            .into_iter()
+            .enumerate()
+        {
+            let mut scenario = full_harness(&[b"archive-policy-canary"])
+                .scenario("archive-policy", 1)
+                .unwrap();
+            scenario.capture(ArtifactKind::Data, &archive).unwrap();
+            assert!(
+                matches!(finish(scenario), Err(HarnessError::Scanner)),
+                "archive policy case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_scanner_refuses_depth_bomb_and_corrupt_archive() {
+        let mut nested = b"safe".to_vec();
+        for _ in 0..=5 {
+            nested = gzip_bytes(&nested);
+        }
+        let bomb = gzip_bytes(&vec![0_u8; 8 * 1024 * 1024 + 1]);
+        let corrupt = b"PK\x03\x04not-a-zip".to_vec();
+        for archive in [nested, bomb, corrupt] {
+            let mut scenario = full_harness(&[b"archive-limit-canary"])
+                .scenario("archive-limit", 1)
+                .unwrap();
+            scenario.capture(ArtifactKind::Data, &archive).unwrap();
+            assert!(matches!(finish(scenario), Err(HarnessError::Scanner)));
+        }
+    }
+
+    #[test]
+    fn full_scanner_refuses_member_count_and_total_expansion_limits() {
+        let mut tar_writer = tar::Builder::new(Vec::new());
+        for index in 0..1025 {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(0);
+            header.set_cksum();
+            tar_writer
+                .append_data(&mut header, format!("member-{index}"), std::io::empty())
+                .unwrap();
+        }
+        let too_many = tar_writer.into_inner().unwrap();
+
+        let zeros = vec![0_u8; 7 * 1024 * 1024];
+        let too_large = zip_bytes(&[
+            ("one", &zeros),
+            ("two", &zeros),
+            ("three", &zeros),
+            ("four", &zeros),
+            ("five", &zeros),
+        ]);
+        for archive in [too_many, too_large] {
+            let mut scenario = full_harness(&[b"aggregate-limit-canary"])
+                .scenario("aggregate-limit", 1)
+                .unwrap();
+            scenario.capture(ArtifactKind::Data, &archive).unwrap();
+            assert!(matches!(finish(scenario), Err(HarnessError::Scanner)));
+        }
+    }
+
+    #[test]
+    fn full_scanner_does_not_decrypt_ciphertext_and_rescans_diagnostics() {
+        let canary = b"long-encrypted-canary-value";
+        let ciphertext: Vec<u8> = canary.iter().map(|byte| byte ^ 0xa5).collect();
+        let mut clean = full_harness(&[canary]).scenario("ciphertext", 1).unwrap();
+        clean.capture(ArtifactKind::Data, &ciphertext).unwrap();
+        assert!(finish(clean).unwrap().scan_attestation.clean);
+
+        let mut leaking = full_harness(&[canary])
+            .scenario("diagnostic-source", 1)
+            .unwrap();
+        leaking.capture(ArtifactKind::Data, canary).unwrap();
+        let HarnessError::Quarantined(manifest) = finish(leaking).unwrap_err() else {
+            panic!("expected quarantine")
+        };
+        let diagnostic = manifest_to_json(&manifest);
+        let mut rescan = full_harness(&[canary])
+            .scenario("diagnostic-rescan", 1)
+            .unwrap();
+        rescan
+            .capture(ArtifactKind::Data, diagnostic.as_bytes())
+            .unwrap();
+        assert!(finish(rescan).unwrap().scan_attestation.clean);
+    }
+
+    #[test]
+    fn full_scanner_detects_match_across_common_chunk_boundary() {
+        let canary = b"boundary-canary";
+        let mut artifact = vec![b'x'; 8192 - 5];
+        artifact.extend_from_slice(canary);
+        let mut scenario = full_harness(&[canary]).scenario("boundary", 1).unwrap();
+        scenario.capture(ArtifactKind::Data, &artifact).unwrap();
+        assert!(matches!(
+            finish(scenario),
+            Err(HarnessError::Quarantined(_))
+        ));
+    }
+
+    #[test]
+    fn full_scanner_refuses_hardlinked_unreadable_or_mutating_root_files() {
+        let hardlink_harness = full_harness(&[b"hardlink-canary"]);
+        let hardlink_scenario = hardlink_harness.scenario("hardlink-root", 1).unwrap();
+        let original = hardlink_harness.inner.root.join("original.raw");
+        let alias = hardlink_harness.inner.root.join("alias.raw");
+        private_file(&original).unwrap();
+        std::fs::hard_link(&original, &alias).unwrap();
+        assert!(matches!(
+            finish(hardlink_scenario),
+            Err(HarnessError::Scanner)
+        ));
+
+        let unreadable_harness = full_harness(&[b"unreadable-canary"]);
+        let unreadable_scenario = unreadable_harness.scenario("unreadable-root", 1).unwrap();
+        let unreadable = unreadable_harness.inner.root.join("unreadable.raw");
+        private_file(&unreadable).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(matches!(
+            finish(unreadable_scenario),
+            Err(HarnessError::Scanner)
+        ));
+
+        let mutation_harness = full_harness(&[b"mutation-canary-long"]);
+        let mutation_scenario = mutation_harness.scenario("mutation-root", 1).unwrap();
+        let mutation = mutation_harness.inner.root.join("mutation.raw");
+        let mut file = private_file(&mutation).unwrap();
+        file.write_all(&vec![0_u8; 4 * 1024 * 1024]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread_path = mutation.clone();
+        let mutator = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                if let Ok(file) = OpenOptions::new().append(true).open(&thread_path) {
+                    let _ = file.set_len(4 * 1024 * 1024 + 1);
+                    let _ = file.set_len(4 * 1024 * 1024);
+                }
+            }
+        });
+        let result = finish(mutation_scenario);
+        stop.store(true, Ordering::SeqCst);
+        mutator.join().unwrap();
+        assert!(matches!(result, Err(HarnessError::Scanner)));
     }
 
     fn reproduction() -> RedactedCommand {
@@ -1762,7 +2172,7 @@ mod tests {
         let HarnessError::Quarantined(manifest) = error else {
             panic!("unexpected safe error variant")
         };
-        assert_eq!(manifest.check_id, "filename");
+        assert_eq!(manifest.check_id, "filename_raw_literal");
         assert!(!manifest_to_json(&manifest).contains("filename-canary"));
     }
 
@@ -1775,6 +2185,13 @@ mod tests {
             ArtifactKind::ClientStderr,
             ArtifactKind::Panic,
             ArtifactKind::Crash,
+            ArtifactKind::Trace,
+            ArtifactKind::TestStdout,
+            ArtifactKind::TestStderr,
+            ArtifactKind::Fixture,
+            ArtifactKind::BackupArchive,
+            ArtifactKind::AuditExport,
+            ArtifactKind::DoctorOutput,
             ArtifactKind::Data,
         ] {
             let mut scenario = harness(b"class-canary").scenario("class-leak", 1).unwrap();
@@ -1876,6 +2293,21 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn panic_full_scan_withholds_encoded_leak_and_destroys_raw() {
+        let harness = full_harness(&[b"panic-secret"]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut scenario = harness.scenario("panic-full-scan", 1).unwrap();
+            scenario
+                .capture(ArtifactKind::Panic, b"cGFuaWMtc2VjcmV0")
+                .unwrap();
+            scenario.set_reproduction(reproduction()).unwrap();
+            panic!("seeded safe panic");
+        }));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(&harness.inner.root).unwrap().count(), 1);
     }
 
     struct FailingScanner;
@@ -2054,7 +2486,32 @@ mod tests {
         let report = finish(scenario).unwrap();
         let serialized = serde_json::to_string(&report.inventory).unwrap();
         assert!(!serialized.contains("server-stderr"));
-        assert!(report.inventory.iter().all(|entry| entry.mode == 0o600));
+        assert!(report.inventory.iter().all(|entry| match entry.kind {
+            "directory" => entry.mode == 0o700,
+            "file" => entry.mode == 0o600,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn nested_private_artifact_tree_is_scanned_inventoried_and_destroyed() {
+        let harness = full_harness(&[b"nested-tree-canary"]);
+        let scenario = harness.scenario("nested-tree", 1).unwrap();
+        let directory = harness.inner.root.join("nested");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut file = private_file(&directory.join("artifact.bin")).unwrap();
+        file.write_all(b"safe nested bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let report = finish(scenario).unwrap();
+        assert!(
+            report
+                .inventory
+                .iter()
+                .any(|entry| entry.kind == "directory" && entry.mode == 0o700)
+        );
+        assert!(!directory.exists());
     }
 
     #[test]
