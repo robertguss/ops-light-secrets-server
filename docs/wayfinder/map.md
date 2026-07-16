@@ -47,6 +47,14 @@ to decide before implementation starts.
     building itself.
   - **One ticket per session.** The plan document itself is edited only by
     T14; earlier verdicts accumulate on their tickets and this map.
+    (Robert has overridden this within-session when he chooses — his call.)
+  - **Ask-only-when-it-matters (2026-07-16, T09 session, Robert's call).**
+    Analysis-determined decisions — where threat model + complexity budget
+    force the answer — are resolved without asking; verdict recorded as
+    "agent-recommended, unopposed." Only genuine judgment calls reach
+    Robert: risk appetite, operational facts, maintenance appetite, taste
+    (T13 is entirely his). Robert holds final sign-off at T14 over
+    everything.
 
 ## Decisions so far
 
@@ -114,6 +122,14 @@ to decide before implementation starts.
   override (evaluates primary events post-index-defer), R11 CAS state
   machine + R12 age/interval. Nothing new joins the campaign list.
   Rationale agent-drafted.
+
+- [Recovery: backup format, restore epochs, key rotation, clock model](tickets/T10-recovery.md)
+  — all kept (agent-recommended, unopposed; first ticket under
+  ask-only-when-it-matters): KTD17 logical format, both restore semantics
+  incl. rollback fork, verify --full rehearsal, U8's forced per-key rotation
+  shapes (index-key semantic leaves v0.1 with T08's defer; key minted
+  dormant), clock model whole. Epoch-on-restore rationale recorded on
+  ticket.
 
 ## Not yet specified
 
