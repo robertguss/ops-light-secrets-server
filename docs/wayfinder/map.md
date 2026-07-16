@@ -79,8 +79,8 @@ to decide before implementation starts.
   — keep all four pieces unamended: KTD3 keyring (five purpose keys, age
   envelope, boot-supplied identity as the whole seal), XChaCha AEAD with
   binary AAD + random nonces, clear-metadata boundary (MAC + state digest —
-  digest **conditional on T08** keeping external checkpoints), zeroization
-  with honest limits. Explain-back agent-supplied at Robert's request;
+  digest condition resolved 2026-07-16: T08 kept checkpoints, digest stands),
+  zeroization with honest limits. Explain-back agent-supplied at Robert's request;
   own-words version pending — redo at T14 or before U2.
 
 - [AuthN: tokens, AppRole, audiences, keyed verifiers, credential epochs](tickets/T06-authn.md)
@@ -99,11 +99,20 @@ to decide before implementation starts.
   anyway), R28 per-request grant reload (less machinery than any cache),
   R29 ladder with destroy-all local-only. Rationale agent-drafted.
 
+- [Audit: atomic commit, hash chain, external checkpoints, blind index](tickets/T08-audit.md)
+  — first ticket to cut: R26 atomicity + blake3 chain + external checkpoints
+  + R25/R27 floors all KEPT (checkpoints carry T05's digest, R32 stale-
+  restore detection, backup signing); KTD16 blind index and audit
+  segmentation/archive/prune both DEFERRED post-v0.1 — status queries scan
+  primary events in R23's window, R33's index-health coupling leaves v0.1.
+  T09/T10 unblocked; rationale agent-drafted.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
   edges) lists need re-cutting once v0.1 verdicts land — what got deferred
-  joins them, what got cut leaves them.
+  joins them, what got cut leaves them. Now holds T08's two defers: KTD16
+  blind query index and audit segmentation/archive/prune.
 - Whether the plan's unit structure (U0–U12), freeze gates (G0–G3), and
   milestones (M0–M3) survive the re-scope or get redrawn — sharpens at T14.
 

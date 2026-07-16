@@ -47,6 +47,8 @@ Resolved 2026-07-15, grilling session. All four pieces walked; verdict on each.
    grant-editing, digest closes rollback/deletion of formerly-valid records.
    **Conditional on T08:** the digest anchors to KTD4's external checkpoints —
    if T08 cuts or defers checkpoint machinery, this digest verdict re-opens.
+   *(Resolved 2026-07-16: T08 kept external checkpoints — this verdict
+   stands unconditionally.)*
 4. **Zeroization (R5/KTD7): keep.** Near-zero cost; the bigger win is type
    discipline (`SecretString` has no Debug/Display — closes accidental
    logging disclosure), memory scrubbing second. R5's honest-limits wording
