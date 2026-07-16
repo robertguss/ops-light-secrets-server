@@ -107,6 +107,14 @@ to decide before implementation starts.
   primary events in R23's window, R33's index-health coupling leaves v0.1.
   T09/T10 unblocked; rationale agent-drafted.
 
+- [Rotation & consumers: registry, three views, status granularity, closeout](tickets/T09-rotation-consumers.md)
+  — v0.1 rotation surface kept in full: R40 registry (only view that sees
+  off-system consumers), R10 trio never collapsed, R33 instance granularity
+  (plumbing already paid at T06/T08) + guarded closeout with audited
+  override (evaluates primary events post-index-defer), R11 CAS state
+  machine + R12 age/interval. Nothing new joins the campaign list.
+  Rationale agent-drafted.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
