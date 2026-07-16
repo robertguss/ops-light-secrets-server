@@ -282,7 +282,8 @@ flowchart TB
   `cas` (check-and-set) semantics and metadata read/write carrying
   `custom_metadata`, `max_versions`, and `cas_required`, plus the
   mount-discovery preflight (`sys/internal/ui/mounts/<path>`, reporting KV
-  version 2), `sys/seal-status` (always reporting unsealed), and `sys/health`,
+  version 2), `sys/seal-status` (always reporting unsealed), `sys/leader` (the
+  second request made by the pinned CLIs' status command), and `sys/health`,
   so an unmodified Vault client can use it as a backend. The exact
   method/path/status matrix is published in `docs/compatibility.md` and
   generated from contract tests; that generated method/path/status/body matrix
@@ -804,9 +805,10 @@ flowchart TB
   - **Covers R2, R16.**
   - **Given:** A fresh consumer host with no Vault tooling installed.
   - **When:** A developer follows the documented sequence — install the pinned
-    fnox binary plus whatever prerequisite U0 proved that version requires,
-    configure the Vault provider, authenticate — and runs `fnox` commands that
-    resolve a secret from the server.
+    fnox binary plus pinned OpenBao exposed under executable name `vault` on
+    `PATH`, configure the Vault provider, supply `VAULT_TOKEN` and
+    `VAULT_CACERT` — and runs `fnox` commands that resolve a secret from the
+    server.
   - **Then:** The fnox-driven read succeeds with no fnox change beyond
     configuration — the fnox binary itself, not a stand-in CLI, is the subject.
 
@@ -2056,7 +2058,7 @@ Milestones:
 - **Goal:** Serve the KV v2 endpoint matrix — read, write with CAS, list,
   soft-delete/undelete/destroy, versioned read, metadata with
   `custom_metadata`/`max_versions`/`cas_required`, mount preflight, seal-status,
-  health — so an unmodified `vault` CLI uses the server as a backend; close with
+  leader, health — so an unmodified `vault` CLI uses the server as a backend; close with
   the first product milestone, a real fnox read.
 - **Requirements:** R1, R3, R11, R29, size bounds via R27; Key Flow F2.
 - **Dependencies:** U0 (captured contract), U2, U4, U6 (every handler commits
@@ -2072,7 +2074,8 @@ Milestones:
   `max_versions`, `cas_required` (KTD11). `sys/internal/ui/mounts/<path>`
   returns `options.version:"2"` exactly (the historically fragile preflight
   joint, asserted against U0 fixtures). `sys/seal-status` always reports
-  unsealed; `sys/health` reports initialized/unsealed/active with readiness
+  unsealed; `sys/leader` returns the stable active-leader compatibility shape
+  required by the pinned CLIs' status command; `sys/health` reports initialized/unsealed/active with readiness
   semantics from R36. PATCH and unimplemented endpoints return an explicit
   unsupported error naming the endpoint (R3) — never an empty success, never a
   silent approximation; `DELETE /v1/:mount/metadata/:path` is in that

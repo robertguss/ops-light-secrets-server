@@ -9,3 +9,4 @@ python3 "$root/research/compat/capture/replay.py" \
 "$root/scripts/normalize-client-traces.sh" check
 python3 "$root/research/compat/capture/replay_fixtures.py" \
     "$root/tests/fixtures/client-traces"
+"$root/scripts/generate-compatibility-doc.sh" check
