@@ -46,3 +46,11 @@ The frozen run completed with a `redb_pass` verdict. See
 [`results.json`](results.json) for the raw samples and execution-host
 observation. Reproduce it locally with the `redacted_command` frozen in the
 protocol. No automatic CI job runs this host-sensitive benchmark.
+
+On 2026-07-16 the user explicitly waived the still-pending native aarch64
+XChaCha performance observation so Gate G1 could proceed. This waiver does not
+convert the x86_64 number into ARM evidence and makes no ARM performance claim.
+Native aarch64 remains in the intended runtime matrix, with its software-cipher
+capacity an explicit residual risk until the command above is run on native
+hardware. All storage correctness, recovery, snapshot, compaction, durability,
+and x86_64 performance gates remain measured and passed without waiver.

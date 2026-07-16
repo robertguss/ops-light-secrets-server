@@ -10,6 +10,10 @@ Overall Gate G1 verdict: **redb_pass**.
 - Native x86_64 XChaCha20-Poly1305: measured
 - Native aarch64 XChaCha20-Poly1305: pending external native host; emulation rejected
 
+The user explicitly waived the pending native aarch64 performance observation
+on 2026-07-16 to allow Gate G1 to proceed. No ARM performance result is claimed;
+this remains a documented residual capacity risk.
+
 ## Single-writer lock constraint
 
 redb 2.6.3 uses nonblocking `flock` on Unix and `LockFile` on Windows, but its WASI and fallback file backends silently omit the process lock. This service therefore supports only the certified Linux targets on filesystems with working `flock`, and a startup lock probe must fail closed. The reference ext4 host rejected a second open as expected.
