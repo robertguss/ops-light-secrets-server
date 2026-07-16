@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "tails": [
+    {
+      "contract": "startup.init_exclusion_audit",
+      "owner": "olss-charter-qul.2.2",
+      "verification": "Wire initialized-store and concurrent-init refusal through the shared lock; assert the unlocked initialized attempt is audited while pre-store/contended attempts remain stderr-only."
+    },
+    {
+      "contract": "startup.store_schema_lifecycle_marker",
+      "owner": "olss-charter-qul.3.2",
+      "verification": "Wire redb meta schema/lifecycle/operation-marker reads into StartupSnapshot; run old/new/no-path, marker agreement, pending-anchor and no-write pre-bind cases against real bytes."
+    },
+    {
+      "contract": "startup.keyring_store_id",
+      "owner": "olss-charter-qul.3.3",
+      "verification": "Decrypt keyring once, compare embedded and clear store ids, and prove mismatch refuses before listener bind."
+    },
+    {
+      "contract": "startup.clock_high_water",
+      "owner": "olss-charter-qul.2.5",
+      "verification": "Feed persisted high-water/tolerance decisions into ClockState and prove behind/ahead refusal before bind."
+    },
+    {
+      "contract": "shutdown.audit_event",
+      "owner": "olss-charter-qul.4.3",
+      "verification": "Implement flush plus final unsigned shutdown chain-head commit hook and clean/unclean marker assertions."
+    },
+    {
+      "contract": "startup.reserve_recovery",
+      "owner": "olss-charter-qul.4.5",
+      "verification": "Reconcile authenticated reserve DB/file generations into ReserveState and exercise status/recreate remediation with the real allocated file."
+    },
+    {
+      "contract": "startup.record_reencrypt_marker",
+      "owner": "olss-charter-qul.10.2",
+      "verification": "Map record-key rewrite progress to reencrypting marker and pending-anchor completion policy."
+    },
+    {
+      "contract": "startup.metadata_remac_marker",
+      "owner": "olss-charter-qul.10.5",
+      "verification": "Map metadata re-MAC progress to reencrypting marker and pending-anchor completion policy."
+    },
+    {
+      "contract": "startup.restore_marker",
+      "owner": "olss-charter-qul.11.3",
+      "verification": "Exercise authenticated restore marker orphan/pre/post-rename states and pending-anchor admission."
+    },
+    {
+      "contract": "startup.migration_marker",
+      "owner": "olss-charter-qul.11.7",
+      "verification": "Exercise real supported migration/no-path state, atomic activation boundaries and exact completion command."
+    },
+    {
+      "contract": "startup.compaction_marker",
+      "owner": "olss-charter-qul.11.8",
+      "verification": "Exercise real compaction marker orphan/pre/post-rename state and pending-anchor admission."
+    },
+    {
+      "contract": "shutdown.executor_barrier",
+      "owner": "olss-charter-qul.8.4",
+      "verification": "Wire signals, admission barrier, queued cancellation, begun-transaction drain, deadline/second-signal exits, listener shutdown and key zeroization to the live executor."
+    }
+  ]
+}

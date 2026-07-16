@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ops_light_secrets_server::config::Config;
+use ops_light_secrets_server::startup::validate_serve_shell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -35,9 +36,12 @@ pub fn run() -> Result<(), String> {
     reject_secret_argv(&args)?;
     let cli = Cli::parse_from(args);
 
-    if cli.command.is_some() {
-        Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
+    if let Some(command) = &cli.command {
+        let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
             .map_err(|error| error.to_string())?;
+        if matches!(command, Command::Serve) {
+            validate_serve_shell(&config).map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }

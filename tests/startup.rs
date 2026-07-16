@@ -70,7 +70,10 @@ fn command_line_config_path_overrides_environment_path() {
         .output()
         .expect("run binary");
 
-    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    assert!(!output.status.success());
+    assert!(stderr.contains("missing_key_material"));
+    assert!(!stderr.contains("unknown setting"));
 }
 
 #[test]
@@ -101,5 +104,8 @@ fn environment_secret_descriptor_needs_explicit_unsafe_flag() {
         .args(["--unsafe-dev-secret-env", "serve"])
         .output()
         .expect("run binary");
-    assert!(allowed.status.success());
+    let stderr = String::from_utf8(allowed.stderr).expect("stderr is UTF-8");
+    assert!(!allowed.status.success());
+    assert!(stderr.contains("uninitialized_store"));
+    assert!(!stderr.contains("DEVELOPMENT_IDENTITY"));
 }
