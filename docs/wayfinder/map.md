@@ -131,6 +131,12 @@ to decide before implementation starts.
   dormant), clock model whole. Epoch-on-restore rationale recorded on
   ticket.
 
+- [Transport & deployment: TLS, key delivery, proxy mode, runtime matrix](tickets/T11-transport-deployment.md)
+  — all five kept; one question asked (deploy reality: **systemd VM**), so
+  the certified matrix (Linux/ext4/host-service) matches actual usage,
+  LoadCredentialEncrypted covers unattended restarts, no KMS/unseal
+  ceremony. Refuse-vs-warn rationale recorded on ticket.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
