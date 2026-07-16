@@ -91,6 +91,14 @@ to decide before implementation starts.
   disclosure-before-commit. Rationale agent-drafted — explain-back retired
   this session (see Notes).
 
+- [AuthZ: canonical resource, raw-target guard, grants, capability set](tickets/T07-authz.md)
+  — keep all five, zero amendments: KTD9 guard + reject-not-normalize
+  (validation before framework decode is load-bearing), R8 allow-only
+  grants (no globs/deny/DSL), R22 full closed capability set (two-role cut
+  fails the rotation threat model; endpoint surface forces the code paths
+  anyway), R28 per-request grant reload (less machinery than any cache),
+  R29 ladder with destroy-all local-only. Rationale agent-drafted.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
