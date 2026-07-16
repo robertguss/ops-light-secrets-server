@@ -18,6 +18,17 @@ as performance evidence. The spike records x86_64 XChaCha20-Poly1305
 performance and leaves the native aarch64 measurement explicitly pending until
 an authorized host exists.
 
+On an authorized native aarch64 Linux host, produce the remaining evidence with:
+
+```text
+cargo run --release --locked --manifest-path research/ktd2/spike/Cargo.toml -- measure-aarch64-xchacha --protocol research/ktd2/protocol.json --output aarch64-xchacha-results.json
+```
+
+The command refuses every non-aarch64 runtime, including this x86_64 host. It
+records the frozen protocol digest, native host fingerprint, aggregate rates,
+percentiles, and raw samples. Return that JSON artifact for review and committed
+integration; do not replace the reference-host `results.json` with it.
+
 The frozen run completed with a `redb_pass` verdict. See
 [`RESULTS.md`](RESULTS.md) for the threshold summary and
 [`results.json`](results.json) for the raw samples and execution-host

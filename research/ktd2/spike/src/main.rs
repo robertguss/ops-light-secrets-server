@@ -45,10 +45,42 @@ fn real_main() -> AnyResult<()> {
         Some("run") if args.len() == 6 && args[2] == "--protocol" && args[4] == "--output" => {
             run(Path::new(&args[3]), Path::new(&args[5]))
         }
+        Some("measure-aarch64-xchacha")
+            if args.len() == 6 && args[2] == "--protocol" && args[4] == "--output" =>
+        {
+            measure_aarch64_xchacha(Path::new(&args[3]), Path::new(&args[5]))
+        }
         Some("crash-child") if args.len() == 5 => {
             crash_child(Path::new(&args[2]), &args[3], args[4].parse()?)
         }
-        _ => Err("usage: ktd2-spike run --protocol PATH --output PATH".into()),
+        _ => Err(
+            "usage: ktd2-spike (run|measure-aarch64-xchacha) --protocol PATH --output PATH".into(),
+        ),
+    }
+}
+
+fn measure_aarch64_xchacha(protocol_path: &Path, output_path: &Path) -> AnyResult<()> {
+    require_aarch64(env::consts::ARCH)?;
+    let protocol_bytes = fs::read(protocol_path)?;
+    let protocol: Value = serde_json::from_slice(&protocol_bytes)?;
+    validate_protocol(&protocol)?;
+    let result = json!({
+        "schema": 1,
+        "evidence_kind": "native_aarch64_xchacha20poly1305",
+        "measured_at_unix_seconds": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        "protocol_digest_blake3": blake3::hash(&protocol_bytes).to_hex().to_string(),
+        "execution_host_observation": execution_host_observation()?,
+        "xchacha": xchacha_test()?,
+    });
+    fs::write(output_path, serde_json::to_vec_pretty(&result)?)?;
+    Ok(())
+}
+
+fn require_aarch64(architecture: &str) -> AnyResult<()> {
+    if architecture == "aarch64" {
+        Ok(())
+    } else {
+        Err("native aarch64 execution required; cross-builds and emulation are not evidence".into())
     }
 }
 
@@ -739,6 +771,15 @@ fn write_summary(path: PathBuf, result: &Value) -> AnyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn architecture_evidence_gate_refuses_non_native_targets() {
+        assert!(require_aarch64("aarch64").is_ok());
+        assert_eq!(
+            require_aarch64("x86_64").unwrap_err().to_string(),
+            "native aarch64 execution required; cross-builds and emulation are not evidence"
+        );
+    }
 
     #[test]
     fn nearest_rank_percentile_is_stable() {
