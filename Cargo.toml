@@ -12,6 +12,7 @@ resolver = "3"
 
 [dependencies]
 axum = "0.8.9"
+blake3 = "1.8.5"
 clap = { version = "4.6.2", features = ["derive", "env"] }
 libc = "0.2.183"
 rpassword = "7.4.0"

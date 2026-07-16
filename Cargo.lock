@@ -756,6 +756,7 @@ name = "ops-light-secrets-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blake3",
  "clap",
  "libc",
  "rpassword",

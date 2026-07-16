@@ -2,4 +2,5 @@
 
 pub mod config;
 pub mod control;
+pub mod raw_target;
 pub mod startup;
