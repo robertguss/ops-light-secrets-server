@@ -5,13 +5,14 @@
 //! escapes. Escaped unreserved bytes, separators, backslashes, percent signs,
 //! lowercase escapes, raw non-ASCII, and Unicode normalization are forbidden.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+
+use crate::input_hygiene::{QueryShapeReason, validate_sensitive_query};
 
 pub const MAX_RAW_TARGET_BYTES: usize = 8192;
 
@@ -236,28 +237,24 @@ struct Query {
 fn parse_query(raw: Option<&str>, offset: usize, target: &str) -> Result<Query, ParseError> {
     let mut version = None;
     let mut list = false;
-    let mut names = BTreeSet::new();
     let Some(raw) = raw else {
         return Ok(Query { version, list });
     };
-    if raw.is_empty() {
-        return Err(error(ParseReason::InvalidQuery, offset, target));
-    }
+    validate_sensitive_query(Some(raw)).map_err(|shape| {
+        let reason = match shape.reason {
+            QueryShapeReason::Duplicate => ParseReason::DuplicateQuery,
+            QueryShapeReason::NoncanonicalName => ParseReason::NoncanonicalQuery,
+            QueryShapeReason::UnknownName
+            | QueryShapeReason::TooMany
+            | QueryShapeReason::Invalid => ParseReason::InvalidQuery,
+        };
+        error(reason, offset + shape.offset, target)
+    })?;
     let mut parameter_offset = offset;
     for parameter in raw.split('&') {
         let Some((name, value)) = parameter.split_once('=') else {
             return Err(error(ParseReason::InvalidQuery, parameter_offset, target));
         };
-        if name.contains('%') || name != name.to_ascii_lowercase() {
-            return Err(error(
-                ParseReason::NoncanonicalQuery,
-                parameter_offset,
-                target,
-            ));
-        }
-        if !names.insert(name) {
-            return Err(error(ParseReason::DuplicateQuery, parameter_offset, target));
-        }
         match name {
             "version" => {
                 if value.is_empty()
