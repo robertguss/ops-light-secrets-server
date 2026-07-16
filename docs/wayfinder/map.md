@@ -39,9 +39,12 @@ to decide before implementation starts.
   - **Ruthless complexity budget.** Close call → simplify or defer unless it
     closes a named failure mode in the threat model. The fail-closed security
     floor is never cut.
-  - **Explain-back required.** Every resolution ends with a short paragraph in
-    Robert's own words stating the decision and why — feeds the plan's primary
-    success criterion.
+  - **Explain-back retired (2026-07-16, T06 session, Robert's call — typing
+    answers back slowed sessions too much).** Applies to this and all future
+    sessions. Resolutions record agent-drafted rationale, always labeled
+    agent-drafted — never presented as Robert's own words. Verdicts remain
+    Robert's. The learn-by-explaining check moves to T14 review and to
+    building itself.
   - **One ticket per session.** The plan document itself is edited only by
     T14; earlier verdicts accumulate on their tickets and this map.
 
@@ -79,6 +82,14 @@ to decide before implementation starts.
   digest **conditional on T08** keeping external checkpoints), zeroization
   with honest limits. Explain-back agent-supplied at Robert's request;
   own-words version pending — redo at T14 or before U2.
+
+- [AuthN: tokens, AppRole, audiences, keyed verifiers, credential epochs](tickets/T06-authn.md)
+  — keep all five as written, zero amendments: R31 surface (no remote
+  revoke-self), KTD5 whole (timing defense is negative-cost), R24/R34
+  audience + local-only management split, R41 epochs in v0.1 (R32 forces the
+  primitive anyway; doubles as bootstrap-lockout recovery), R17
+  disclosure-before-commit. Rationale agent-drafted — explain-back retired
+  this session (see Notes).
 
 ## Not yet specified
 
