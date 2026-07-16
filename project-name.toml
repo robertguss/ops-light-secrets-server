@@ -1,0 +1,8 @@
+# Authoritative OQ3 naming tuple. Public artifacts must use these exact values.
+decision = "retain"
+display_name = "ops-light-secrets-server"
+cargo_package = "ops-light-secrets-server"
+binary = "ops-light-secrets-server"
+repository_slug = "ops-light-secrets-server"
+artifact_prefix = "ops-light-secrets-server"
+systemd_unit = "ops-light-secrets-server.service"
