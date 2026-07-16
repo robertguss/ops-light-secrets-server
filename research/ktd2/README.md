@@ -14,8 +14,12 @@ resolution is recorded on bead `olss-charter-qul.3.1` for user review.
 
 The certified runtime matrix also includes native aarch64 Linux. This host is
 x86_64 and has no native aarch64 execution facility. Emulation is not accepted
-as performance evidence. The spike will record x86_64 XChaCha20-Poly1305
-performance here and leave the native aarch64 measurement explicitly pending
-until an authorized host exists.
+as performance evidence. The spike records x86_64 XChaCha20-Poly1305
+performance and leaves the native aarch64 measurement explicitly pending until
+an authorized host exists.
 
-No measurements exist at preregistration time.
+The frozen run completed with a `redb_pass` verdict. See
+[`RESULTS.md`](RESULTS.md) for the threshold summary and
+[`results.json`](results.json) for the raw samples and execution-host
+observation. Reproduce it locally with the `redacted_command` frozen in the
+protocol. No automatic CI job runs this host-sensitive benchmark.
