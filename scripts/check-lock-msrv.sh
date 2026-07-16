@@ -10,10 +10,13 @@ grep -Fqx 'channel = "1.85.0"' rust-toolchain.toml
 grep -Fqx 'msrv = "1.85.0"' clippy.toml
 
 cargo metadata --locked --no-deps --format-version 1 | jq -e '
-    .packages | length == 1 and
-    .[0].name == "ops-light-secrets-server" and
-    .[0].rust_version == "1.85" and
-    any(.[0].targets[]; .name == "ops-light-secrets-server" and .kind == ["bin"])
+    .packages | length == 2 and
+    any(.[];
+        .name == "ops-light-secrets-server" and
+        .rust_version == "1.85" and
+        any(.targets[]; .name == "ops-light-secrets-server" and .kind == ["bin"])
+    ) and
+    any(.[]; .name == "test-support" and .rust_version == "1.85")
 ' >/dev/null
 
 printf 'Cargo.lock and MSRV: ok\n'

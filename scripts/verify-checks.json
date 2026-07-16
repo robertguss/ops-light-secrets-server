@@ -42,6 +42,24 @@
       "toolchain": "1.85.0",
       "program": "cargo",
       "args": ["+1.85.0", "test", "--locked", "--all-targets"]
+    },
+    {
+      "id": "harness-clippy",
+      "toolchain": "default",
+      "program": "cargo",
+      "args": ["clippy", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets", "--", "-D", "warnings"]
+    },
+    {
+      "id": "harness-test",
+      "toolchain": "default",
+      "program": "cargo",
+      "args": ["test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets"]
+    },
+    {
+      "id": "harness-msrv-test",
+      "toolchain": "1.85.0",
+      "program": "cargo",
+      "args": ["+1.85.0", "test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets"]
     }
   ]
 }

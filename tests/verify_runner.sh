@@ -5,12 +5,12 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 list=$(./scripts/verify.sh --list)
-for check in lock-msrv fmt clippy test doc msrv-build msrv-test; do
+for check in lock-msrv fmt clippy test doc msrv-build msrv-test harness-clippy harness-test harness-msrv-test; do
     printf '%s\n' "$list" | grep -Fqx "$check"
 done
 jq -e '
     all(.checks[]; (.toolchain == "default" or .toolchain == "1.85.0")) and
-    ([.checks[] | select(.id | startswith("msrv-")) | .toolchain] | all(. == "1.85.0"))
+    ([.checks[] | select(.id | . != "lock-msrv" and contains("msrv")) | .toolchain] | all(. == "1.85.0"))
 ' scripts/verify-checks.json >/dev/null
 
 self_test=$(./scripts/verify.sh --self-test)
