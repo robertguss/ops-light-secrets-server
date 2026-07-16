@@ -30,6 +30,7 @@ jobs:
       matrix:
         check:
           - compat-pins
+          - compat-capture
           - lock-msrv
           - fmt
           - clippy

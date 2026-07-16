@@ -8,6 +8,12 @@
       "toolchain": "default"
     },
     {
+      "id": "compat-capture",
+      "program": "./scripts/check-compat-capture.sh",
+      "args": [],
+      "toolchain": "default"
+    },
+    {
       "id": "lock-msrv",
       "toolchain": "default",
       "program": "./scripts/check-lock-msrv.sh",

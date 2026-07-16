@@ -3,3 +3,7 @@
 
 # Rust build output
 /target/
+
+# Python compatibility-harness bytecode
+__pycache__/
+*.py[cod]
