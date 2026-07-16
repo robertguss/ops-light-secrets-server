@@ -1,6 +1,7 @@
 //! Versioned canonical codecs and the single-file redb schema.
 
 mod codec;
+pub mod keyring;
 
 pub use codec::{Canonical, CodecError};
 
@@ -27,6 +28,7 @@ const SECRET_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secret_
 const SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secrets");
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
+const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoreId(pub [u8; 16]);
@@ -1059,6 +1061,51 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn create_with_keyring(
+        path: impl AsRef<Path>,
+        meta: &MetaRecord,
+        prepared: &keyring::PreparedKeyring,
+    ) -> Result<Self, StoreError> {
+        if meta.format_version != FORMAT_VERSION {
+            return Err(StoreError::UnsupportedFormat(meta.format_version));
+        }
+        let database = Database::create(path).map_err(|_| StoreError::Database)?;
+        let write = database.begin_write().map_err(|_| StoreError::Database)?;
+        {
+            let mut meta_table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            if meta_table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::AlreadyInitialized);
+            }
+            let encoded_meta = meta.encode()?;
+            let encoded_keyring_metadata = prepared.metadata.encode()?;
+            meta_table
+                .insert(META_KEY, encoded_meta.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            meta_table
+                .insert(KEYRING_METADATA_KEY, encoded_keyring_metadata.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            let mut keyring_table = write
+                .open_table(SYSTEM_KEYRING)
+                .map_err(|_| StoreError::Database)?;
+            let envelope = prepared.envelope.encode()?;
+            keyring_table
+                .insert(KEYRING_KEY, envelope.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(SECRET_META)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(SECRETS)
+                .map_err(|_| StoreError::Database)?;
+        }
+        write.commit().map_err(|_| StoreError::Database)?;
+        Ok(Self { database })
+    }
+
     pub fn create(path: impl AsRef<Path>, meta: &MetaRecord) -> Result<Self, StoreError> {
         if meta.format_version != FORMAT_VERSION {
             return Err(StoreError::UnsupportedFormat(meta.format_version));
@@ -1155,6 +1202,12 @@ impl Store {
     pub fn keyring(&self) -> Result<Option<KeyringEnvelope>, StoreError> {
         self.get(SYSTEM_KEYRING, KEYRING_KEY)?
             .map(|bytes| KeyringEnvelope::decode(&bytes).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn keyring_metadata(&self) -> Result<Option<Sealed<keyring::KeyringMetadata>>, StoreError> {
+        self.get(META, KEYRING_METADATA_KEY)?
+            .map(|bytes| Sealed::decode(&bytes).map_err(StoreError::from))
             .transpose()
     }
 
