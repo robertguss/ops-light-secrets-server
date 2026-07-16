@@ -1,7 +1,4 @@
 mod cli;
-pub mod config;
-mod control;
-mod startup;
 
 fn main() {
     if let Err(error) = cli::run() {

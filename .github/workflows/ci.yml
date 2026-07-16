@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runner-self-test:
+    name: required / runner-self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Prove private capture and sentinel withholding
+        run: ./scripts/verify.sh --self-test
+
+  foundation:
+    name: required / ${{ matrix.check }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        check:
+          - lock-msrv
+          - fmt
+          - clippy
+          - test
+          - doc
+          - msrv-build
+          - msrv-test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Run required check through shared runner
+        run: ./scripts/verify.sh "${{ matrix.check }}"

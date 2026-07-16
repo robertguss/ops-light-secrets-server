@@ -1,5 +1,5 @@
-use crate::config::Config;
 use clap::{Parser, Subcommand};
+use ops_light_secrets_server::config::Config;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
