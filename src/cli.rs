@@ -26,7 +26,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize a new local store
-    Init,
+    Init {
+        /// Short-lived first control credential lifetime (5m minimum, 7d maximum)
+        #[arg(long, default_value = "24h")]
+        bootstrap_ttl: String,
+
+        /// Pre-opened TTY, pipe, socket, or anonymous memory FD for credential custody
+        #[arg(long)]
+        credential_output_fd: Option<i32>,
+    },
     /// Validate configuration and serve requests
     Serve,
 }
@@ -39,8 +47,23 @@ pub fn run() -> Result<(), String> {
     if let Some(command) = &cli.command {
         let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
             .map_err(|error| error.to_string())?;
-        if matches!(command, Command::Serve) {
-            validate_serve_shell(&config).map_err(|error| error.to_string())?;
+        match command {
+            Command::Serve => {
+                validate_serve_shell(&config).map_err(|error| error.to_string())?;
+            }
+            Command::Init {
+                bootstrap_ttl,
+                credential_output_fd,
+            } => {
+                ops_light_secrets_server::init::parse_bootstrap_ttl(bootstrap_ttl)
+                    .map_err(|error| error.to_string())?;
+                if credential_output_fd.is_none() {
+                    return Err("init_refused code=credential_sink_required setting=credential_output_fd remediation='pass a pre-opened TTY, pipe, socket, or anonymous memory FD'".into());
+                }
+                return Err(
+                    "init_refused code=integration_pending setting=store.transaction".into(),
+                );
+            }
         }
     }
     Ok(())

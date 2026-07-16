@@ -1,5 +1,34 @@
 # Operating ops-light-secrets-server
 
+## One-time initialization and credential custody
+
+`init` takes an exclusive owner-only data-directory lock. It refuses foreign
+entries and an already initialized store. A retry may reconcile only the
+validated lockfile, an uncommitted store, and reserve-provisioning artifacts
+owned by the initialization protocol.
+
+Choose a bootstrap lifetime from 5 minutes through 7 days; the default is 24
+hours. Pass a pre-opened credential sink with `--credential-output-fd`. The sink
+must be a TTY, pipe, Unix socket, or anonymous memory-backed FD. Persistent
+regular files and block devices are refused. This supports piping the one-time
+value directly into encryption or password-manager tooling without placing it
+in argv, environment variables, ordinary stdout metadata, logs, or persistent
+plaintext.
+
+Initialization validates the sink, creates and self-tests the keyring envelope,
+writes and flushes the credential, and only then commits its verifier with the
+store. Failure before commit leaves a retryable uninitialized store. After
+commit, use the bootstrap over the local control socket to issue a labeled,
+bounded, non-renewable control token; verify the new token on an authenticated
+control command; then revoke the bootstrap accessor. Repeat that
+issue/verify/revoke-predecessor sequence before each normal control credential
+expires.
+
+If the bootstrap expires or is lost, use the offline emergency control-
+credential operation owned by U8.3. It accepts the store-unwrapping identity,
+bumps the credential epoch, and uses the same disclosure-before-commit sink
+protocol. There is no network bootstrap route.
+
 ## Local control socket
 
 The management plane is a Unix socket owned by the service UID. Its parent

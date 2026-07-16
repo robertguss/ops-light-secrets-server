@@ -18,6 +18,38 @@ fn help_documents_config_and_secret_source_rules() {
 }
 
 #[test]
+fn init_help_freezes_ttl_and_approved_sink_flags() {
+    let output = binary()
+        .args(["init", "--help"])
+        .output()
+        .expect("run binary");
+    let stdout = String::from_utf8(output.stdout).expect("help is UTF-8");
+
+    assert!(output.status.success());
+    assert!(stdout.contains("--bootstrap-ttl"));
+    assert!(stdout.contains("--credential-output-fd"));
+    assert!(stdout.contains("5m minimum, 7d maximum"));
+    assert!(stdout.contains("TTY, pipe, socket, or anonymous memory FD"));
+}
+
+#[test]
+fn init_refuses_invalid_ttl_and_missing_sink_without_secret_output() {
+    let invalid = binary()
+        .args(["init", "--bootstrap-ttl", "0"])
+        .output()
+        .expect("run binary");
+    let invalid_stderr = String::from_utf8(invalid.stderr).unwrap();
+    assert!(!invalid.status.success());
+    assert!(invalid_stderr.contains("invalid_bootstrap_ttl"));
+
+    let missing = binary().arg("init").output().expect("run binary");
+    let missing_stderr = String::from_utf8(missing.stderr).unwrap();
+    assert!(!missing.status.success());
+    assert!(missing_stderr.contains("credential_sink_required"));
+    assert!(!missing_stderr.contains("disclosed-once"));
+}
+
+#[test]
 fn serve_refuses_unknown_config_key_without_echoing_value() {
     use std::io::Write;
 

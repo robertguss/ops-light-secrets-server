@@ -3,8 +3,43 @@
   "tails": [
     {
       "contract": "startup.init_exclusion_audit",
-      "owner": "olss-charter-qul.2.2",
-      "verification": "Wire initialized-store and concurrent-init refusal through the shared lock; assert the unlocked initialized attempt is audited while pre-store/contended attempts remain stderr-only."
+      "owner": "olss-charter-qul.4.3",
+      "verification": "Back the U1.2 initialized-store refusal callback with the canonical audit chain; assert the unlocked initialized attempt is audited while pre-store/contended attempts remain stderr-only."
+    },
+    {
+      "contract": "startup.init_store_transaction",
+      "owner": "olss-charter-qul.3.2",
+      "verification": "Implement U1.2's staged transaction with store id, schema, lifecycle stamp and one atomic authoritative commit; distinguish uncommitted from initialized store.redb during retry."
+    },
+    {
+      "contract": "startup.init_keyring_self_test",
+      "owner": "olss-charter-qul.3.3",
+      "verification": "Derive the supplied active identity recipient, validate an optional distinct recovery recipient, encrypt and decrypt-self-test the fixed-purpose keyring before returning U1.2's PreparedInit."
+    },
+    {
+      "contract": "startup.init_first_identity_grant",
+      "owner": "olss-charter-qul.5.2",
+      "verification": "Stage the first management identity plus finite admin-bundle grant in U1.2's single transaction and activate the init CLI only after the complete backend is assembled."
+    },
+    {
+      "contract": "startup.init_bootstrap_verifier",
+      "owner": "olss-charter-qul.6.1",
+      "verification": "Generate the control-audience bootstrap credential, stage only its keyed verifier/accessor/expiry, and authenticate the post-commit disclosed credential."
+    },
+    {
+      "contract": "startup.init_audit_genesis",
+      "owner": "olss-charter-qul.4.3",
+      "verification": "Stage audit genesis in the same U1.2 transaction and implement the initialized-store re-init refusal event."
+    },
+    {
+      "contract": "startup.init_recovery_reserve",
+      "owner": "olss-charter-qul.4.5",
+      "verification": "Provision/reconcile the allocated reserve before commit, validate reserve artifacts through U1.2's inspector, and record matching identity/allocation metadata in the transaction."
+    },
+    {
+      "contract": "startup.online_disclosure_handshake",
+      "owner": "olss-charter-qul.6.5",
+      "verification": "Reuse U1.2's sink validation and disclosure-before-commit ordering with the owner-socket nonce/digest ACK handshake for later control-token issuance."
     },
     {
       "contract": "startup.store_schema_lifecycle_marker",
