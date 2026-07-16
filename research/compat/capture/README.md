@@ -13,6 +13,22 @@ python3 replay.py observations.json
 python3 -m unittest discover -s . -p 'test_*.py' -v
 ```
 
+Retained fixtures are produced only through the fail-closed gate:
+
+```sh
+./scripts/normalize-client-traces.sh promote
+./scripts/normalize-client-traces.sh check
+python3 research/compat/capture/replay_fixtures.py tests/fixtures/client-traces
+```
+
+The normalizer rejects unknown fields and unsafe string classes, removes
+nondeterministic durations, canonicalizes header names, and writes candidates
+only to a private temporary directory. The Rust gate registers every capture
+canary, records typed provenance through the shared test harness, applies the
+full binary/encoding-aware scanner to filenames and contents, and only then
+promotes the exact scanned bytes. The manifest fixes the normalizer version,
+scanner, provenance schema, file inventory, and SHA-256 digest of each fixture.
+
 The driver creates one mode-0700 temporary tree. Raw request records, generated
 TLS private key, configs, wrapper logs, and client stdout/stderr stay there and
 are removed by `TemporaryDirectory` on success or failure. Signal handlers stop

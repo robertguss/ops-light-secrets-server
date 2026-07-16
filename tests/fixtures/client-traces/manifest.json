@@ -1,0 +1,36 @@
+{
+  "files": [
+    {
+      "path": "vault-2.0.3-direct.json",
+      "sha256": "574bd757a8304ab3cad7e258ca008e5b484d5fa2f70f1770265af73247427a10"
+    },
+    {
+      "path": "bao-2.6.0-direct.json",
+      "sha256": "7cdcac83154d47ba022d1cfde521be435779c62679e066cbc86b6a25cb034966"
+    },
+    {
+      "path": "fnox-1.30.0-vault.json",
+      "sha256": "79b95069b64ed1a52f96103722e2024d42f750b1e0f1983835f4039a694f4807"
+    },
+    {
+      "path": "fnox-1.30.0-bao.json",
+      "sha256": "8744da0ae2b57566db368dc4df8183662a8b22a19dc770772d1a06dc31b48e64"
+    },
+    {
+      "path": "fnox-1.29.0-vault.json",
+      "sha256": "27c7837914e564bf9762e76a5f0cfa83b5be84ed2d7732a5a6385af373d6e1cd"
+    },
+    {
+      "path": "fnox-1.29.0-bao.json",
+      "sha256": "af1173a95fddc1447b2985707266d063beb9272f634de08c6ff5894642c94d5e"
+    }
+  ],
+  "provenance": {
+    "capture_platform": "linux-amd64",
+    "harness_schema": 1,
+    "scanner": "full-artifact-v1"
+  },
+  "schema": 1,
+  "source_schema": 1,
+  "tool_version": "client-trace-normalizer-v1"
+}

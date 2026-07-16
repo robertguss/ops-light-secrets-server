@@ -1,0 +1,878 @@
+{
+  "backend": "vault",
+  "client": "fnox-1.30.0",
+  "faults": [
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 1,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 403,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight"
+      ],
+      "scenario": "fault-403",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight"
+        ],
+        "out_of_order": [],
+        "request_count": 1,
+        "scenario": "fault-403"
+      }
+    },
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 2,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 404,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f63617074757265",
+          "route": "unknown",
+          "scripted_action": "reply",
+          "scripted_status": 404,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight",
+        "unknown"
+      ],
+      "scenario": "fault-404",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "unknown"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "fault-404"
+      }
+    },
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 2,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 500,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 500,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight",
+        "mount-preflight"
+      ],
+      "scenario": "fault-500",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "mount-preflight"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "fault-500"
+      }
+    },
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 2,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 503,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 503,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight",
+        "mount-preflight"
+      ],
+      "scenario": "sealed-503",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "mount-preflight"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "sealed-503"
+      }
+    },
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 2,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reset",
+          "scripted_status": null,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "reset",
+          "scripted_status": null,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight",
+        "mount-preflight"
+      ],
+      "scenario": "reset",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "mount-preflight"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "reset"
+      }
+    },
+    {
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "request_count": 1,
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f63617074757265",
+          "route": "mount-preflight",
+          "scripted_action": "timeout",
+          "scripted_status": null,
+          "token_header_present": true
+        }
+      ],
+      "routes": [
+        "mount-preflight"
+      ],
+      "scenario": "timeout",
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight"
+        ],
+        "out_of_order": [],
+        "request_count": 1,
+        "scenario": "timeout"
+      }
+    }
+  ],
+  "paths": [
+    {
+      "case": "space",
+      "input_utf8_hex": "7370616365206e616d65",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f73706163652532306e616d65",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f73706163652532306e616d65",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f73706163652532306e616d65",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f73706163652532306e616d65",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "utf8",
+      "input_utf8_hex": "636166c3a9",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f636166254333254139",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f636166254333254139",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f636166254333254139",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f636166254333254139",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "percent-slash",
+      "input_utf8_hex": "656e636f646564253246736c617368",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f656e636f6465642532353246736c617368",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f656e636f6465642532353246736c617368",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f656e636f6465642532353246736c617368",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f656e636f6465642532353246736c617368",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "percent-percent",
+      "input_utf8_hex": "70657263656e7425323576616c7565",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f70657263656e74253235323576616c7565",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f70657263656e74253235323576616c7565",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f70657263656e74253235323576616c7565",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f70657263656e74253235323576616c7565",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "dot",
+      "input_utf8_hex": "2e",
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f736563726574",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f736563726574",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f64617461",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f64617461",
+          "route": "unknown",
+          "scripted_action": "reply",
+          "scripted_status": 404,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "unknown"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "dotdot",
+      "input_utf8_hex": "2e2e",
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e7473",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e7473",
+          "route": "unknown",
+          "scripted_action": "reply",
+          "scripted_status": 404,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f7631",
+          "query_keys": [],
+          "raw_target_hex": "2f7631",
+          "route": "unknown",
+          "scripted_action": "reply",
+          "scripted_status": 404,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "unknown",
+          "unknown"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "leading-slash",
+      "input_utf8_hex": "2f6c656164696e67",
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "requests": [],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [],
+        "out_of_order": [],
+        "request_count": 0,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "trailing-slash",
+      "input_utf8_hex": "747261696c696e672f",
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "requests": [],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [],
+        "out_of_order": [],
+        "request_count": 0,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "double-slash",
+      "input_utf8_hex": "646f75626c652f2f736c617368",
+      "process": {
+        "exit_status": 1,
+        "outcome": "exit"
+      },
+      "requests": [],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [],
+        "out_of_order": [],
+        "request_count": 0,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "plus",
+      "input_utf8_hex": "706c75732b7369676e",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f706c75732b7369676e",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f706c75732b7369676e",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f706c75732b7369676e",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f706c75732b7369676e",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    },
+    {
+      "case": "overlong",
+      "input_utf8_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "process": {
+        "exit_status": 0,
+        "outcome": "exit"
+      },
+      "requests": [
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7379732f696e7465726e616c2f75692f6d6f756e74732f7365637265742f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+          "route": "mount-preflight",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        },
+        {
+          "body_shape": "null",
+          "header_names": [
+            "user-agent",
+            "x-vault-request",
+            "x-vault-token"
+          ],
+          "method": "GET",
+          "path_hex": "2f76312f7365637265742f646174612f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+          "query_keys": [],
+          "raw_target_hex": "2f76312f7365637265742f646174612f6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+          "route": "kv-read",
+          "scripted_action": "reply",
+          "scripted_status": 200,
+          "token_header_present": true
+        }
+      ],
+      "stub": {
+        "complete": true,
+        "missing": [],
+        "observed": [
+          "mount-preflight",
+          "kv-read"
+        ],
+        "out_of_order": [],
+        "request_count": 2,
+        "scenario": "happy"
+      }
+    }
+  ],
+  "schema": 1,
+  "subprocess_argv": [
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/space name"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/café"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/encoded%2Fslash"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/percent%25value"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/."
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/.."
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/plus+sign"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ],
+    [
+      "kv",
+      "get",
+      "-field=value",
+      "secret/capture"
+    ]
+  ],
+  "tls_root": "VAULT_CACERT",
+  "token_supply": "VAULT_TOKEN"
+}

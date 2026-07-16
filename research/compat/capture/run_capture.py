@@ -261,7 +261,7 @@ def capture_direct(
         result = invoke(direct_command(binary, client, "capture"), safe_env(cert, stub.port), private, f"{client}-{fault}")
         records, summary = stub.stop()
         emit_step(client, fault, result, len(records))
-        evidence["faults"].append({"scenario": fault, "process": result, "request_count": len(records), "routes": [record["route"] for record in records], "stub": summary})
+        evidence["faults"].append({"scenario": fault, "process": result, "request_count": len(records), "routes": [record["route"] for record in records], "requests": summarized_records(records), "stub": summary})
     sequence[0] += 1
     stub = Stub(private, cert, key, "happy", sequence[0])
     command = [str(binary), "write", "-format=json", "auth/approle/login", f"role_id={ROLE_ID}", f"secret_id={SECRET_ID}"]
@@ -313,7 +313,7 @@ def capture_fnox(
         result = invoke(command, safe_env(cert, stub.port, wrapper_dir), private, f"{client}-{backend}-{fault}")
         records, summary = stub.stop()
         emit_step(f"{client}-{backend}", fault, result, len(records))
-        evidence["faults"].append({"scenario": fault, "process": result, "request_count": len(records), "routes": [record["route"] for record in records], "stub": summary})
+        evidence["faults"].append({"scenario": fault, "process": result, "request_count": len(records), "routes": [record["route"] for record in records], "requests": summarized_records(records), "stub": summary})
     argv_lines = argv_log.read_text(encoding="utf-8").splitlines() if argv_log.exists() else []
     commands: list[list[str]] = []
     index = 0
