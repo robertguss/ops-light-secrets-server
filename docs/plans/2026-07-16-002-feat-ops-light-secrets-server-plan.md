@@ -1,19 +1,24 @@
 ---
 title: Ops-Light Secrets Server - Plan
 type: feat
-date: 2026-07-15
+date: 2026-07-16
 topic: ops-light-secrets-server
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: gated-implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
-superseded_by: 2026-07-16-002-feat-ops-light-secrets-server-plan.md
+supersedes: 2026-07-15-001-feat-ops-light-secrets-server-plan.md
 ---
 
-> **SUPERSEDED (2026-07-16).** The canonical plan is now
-> [`2026-07-16-002-feat-ops-light-secrets-server-plan.md`](2026-07-16-002-feat-ops-light-secrets-server-plan.md),
-> produced by the wayfinder walk (docs/wayfinder/map.md, T01–T14). This file is
-> retained as history only.
+<!--
+Fifth revision (2026-07-16): the wayfinder walk
+(docs/wayfinder/map.md, tickets T01-T13) re-derived every load-bearing
+decision. Verdicts: nearly everything kept as written; KTD16 blind query
+index and segmented audit retention/archive/prune deferred post-v0.1
+(T08); the BUSL Vault-CLI shim demoted to post-v0.1 evidence-gated
+(T03); KTD2's spike gate narrowed to store-facts (T04); license changed
+to MIT (T13). Detail in docs/plan-history.md and the ticket files.
+-->
 
 # Ops-Light Secrets Server - Plan
 
@@ -26,16 +31,22 @@ superseded_by: 2026-07-16-002-feat-ops-light-secrets-server-plan.md
 - **Product authority:** The Product Contract below is canonical. It supersedes
   the framing in the originating conversation.
 - **Blocking design gates:** Rotation semantics, auth surface, storage,
-  transport, and audit-chain design are settled in the Planning Contract; the
-  two remaining open questions (fnox-native protocol, project name) gate phase 2
-  and cosmetics, not v0.1. Four design gates must close before the persistent
-  format and the final data-plane router are frozen — they affect persistent
-  formats and security boundaries, not ordinary implementation detail:
+  transport, and audit-chain design are settled in the Planning Contract; OQ1
+  (fnox-native protocol) is answered — phase 2 gates on a use-case-first design
+  discussion with jdx — and the project name is parked with a
+  before-any-public-artifact deadline (OQ3). Neither touches v0.1. Four design
+  gates must close before the persistent format and the final data-plane router
+  are frozen — they affect persistent formats and security boundaries, not
+  ordinary implementation detail:
   - G0 — U0 freezes the versioned client contract and client prerequisites.
-  - G1 — U2 proves the storage executor, atomic multi-table commit, crash
-    recovery, logical snapshot, and measured durability envelope.
+  - G1 — U2 proves atomic multi-table commit, crash recovery, logical snapshot,
+    and the measured durability envelope via the store spike; executor
+    backpressure is proven by U2/U6 executor tests (moved out of the spike —
+    wayfinder T04).
   - G2 — U2/U6 freeze the authenticated clear-record format, canonical crypto
-    encoding, audit event schema, and audit query-index format.
+    encoding, and audit event schema. (The audit query-index format left this
+    gate when KTD16 was deferred post-v0.1; the index is rebuildable from
+    primary events, so its format is never load-bearing.)
   - G3 — U10 freezes the logical backup format and restore/audit-epoch rules. U1
     configuration, CLI scaffolding, and transport work may proceed before these
     gates; storage-format fixtures, the final API router, and public
@@ -439,10 +450,13 @@ flowchart TB
   `changed_since_last_completed_rotation`; the age display never implies the
   current value was covered by an older completed rotation.
 - R23. R10's observed view is computed over a documented lookback window — the
-  authorized view does not expire — and R13's audit retention is at least as
-  long as that window. Events and query-index rows inside the
-  consumer-observation window are never eligible for archival pruning (R13), and
-  increasing the lookback first verifies that sufficient active or queryable
+  authorized view does not expire — by scanning primary audit events in the
+  active store (KTD16's query index is deferred post-v0.1), and R13's audit
+  retention is at least as long as that window. In v0.1 that retention bound
+  holds trivially: all events are retained (segmentation and pruning deferred —
+  Deferred / Open Questions). When segmented retention arrives, events inside
+  the consumer-observation window are never eligible for archival pruning (R13),
+  and increasing the lookback first verifies that sufficient active or queryable
   history exists.
 - R29. Deleting a secret version is reversible and distinct from destruction; a
   destroy-capability-gated operation removes a version's ciphertext from the
@@ -467,30 +481,32 @@ flowchart TB
 - R33. After a replacement write, a management-gated rotation status view
   reports, for each consumer in the rotation's snapshot, whether its latest
   audited read fetched the current version (`on-current`), a prior version
-  (`on-prior`), or nothing since the write (`silent-since-write`) — computed
-  through KTD16's blind index and verified against the underlying authenticated
-  R13 events, at declared-consumer, identity, and stable consumer-instance
-  granularity (KTD5), because one identity's replicas can disagree and an
-  identity-level rollup alone would overstate adoption. Credential accessors
-  remain a diagnostic drill-down, not the durable identity of a replica: tokens
-  issued through AppRole inherit the `consumer_instance_id` of the secret_id
-  that created them, and workload secret_ids require an instance id unless the
-  operator explicitly accepts identity-only tracking. Status language is
-  "fetched version N", never "using version N" — only an application-level
-  acknowledgement could prove use, and that is out of v0.1. Completion is
-  guarded: `rotation complete` succeeds only when every consumer in the snapshot
-  — evaluated over the snapshot's declared consumers (R40) and active consumer
-  instances — is `on-current`, or with an explicit `--acknowledge-unverified`
-  flag plus an audited reason; expired or revoked instances are labeled
-  `retired-without-proof` and require a recorded retirement reason or that same
-  override — they never silently disappear. Index health is part of the closeout
-  guard: an incomplete or unverifiable index can block completion but can never
-  satisfy it. Either completion path emits a redacted closeout report (path,
-  prior and target versions, snapshot with adoption states, write and completion
-  audit sequence numbers, upstream-revocation attestation, any override reason,
-  latest checkpoint reference) whose integrity rides the existing audit chain —
-  no separate closeout signature scheme. Beyond that one guard, observation
-  only: no automatic revocation, no campaign state machine in v0.1.
+  (`on-prior`), or nothing since the write (`silent-since-write`) — computed by
+  scanning the authenticated R13 events in the active store over R23's lookback
+  window (KTD16's blind index is deferred post-v0.1; the primary events are
+  always authoritative), at declared-consumer, identity, and stable
+  consumer-instance granularity (KTD5), because one identity's replicas can
+  disagree and an identity-level rollup alone would overstate adoption.
+  Credential accessors remain a diagnostic drill-down, not the durable identity
+  of a replica: tokens issued through AppRole inherit the `consumer_instance_id`
+  of the secret_id that created them, and workload secret_ids require an
+  instance id unless the operator explicitly accepts identity-only tracking.
+  Status language is "fetched version N", never "using version N" — only an
+  application-level acknowledgement could prove use, and that is out of v0.1.
+  Completion is guarded: `rotation complete` succeeds only when every consumer
+  in the snapshot — evaluated over the snapshot's declared consumers (R40) and
+  active consumer instances — is `on-current`, or with an explicit
+  `--acknowledge-unverified` flag plus an audited reason; expired or revoked
+  instances are labeled `retired-without-proof` and require a recorded
+  retirement reason or that same override — they never silently disappear. (The
+  former index-health closeout clause left v0.1 with KTD16's deferral: the guard
+  evaluates primary events directly, which are always authoritative.) Either
+  completion path emits a redacted closeout report (path, prior and target
+  versions, snapshot with adoption states, write and completion audit sequence
+  numbers, upstream-revocation attestation, any override reason, latest
+  checkpoint reference) whose integrity rides the existing audit chain — no
+  separate closeout signature scheme. Beyond that one guard, observation only:
+  no automatic revocation, no campaign state machine in v0.1.
 - R40. The local control plane maintains a minimal declared-consumer registry. A
   record contains a stable consumer id, canonical secret resource, owner,
   environment, source, optional identity id, optional consumer-instance id,
@@ -519,26 +535,31 @@ flowchart TB
   method, canonical resource, requested capability, operation, outcome, reason
   code, effective time, the wall-clock observation, and — for successful secret
   reads and writes — the version served or written; never secret values or
-  credential material. Recent events live in the active database; older closed
-  segments may be replaced only by an authenticated archive manifest after the
-  encrypted segment has been exported, verified, independently checkpointed, and
-  passed the retention guard (R23, KTD4) — no event is silently discarded.
-  Requests dropped by the pre-verifier rate limiter are accounted for in bounded
-  aggregate entries (source bucket, count, window) rather than one durable row
-  per flood packet, so an unauthenticated attacker cannot fill the disk one
-  audit entry at a time.
+  credential material. In v0.1 every event lives in the active database — no
+  segmentation, archival, or pruning ships (deferred post-v0.1; growth at
+  small-team rates is a few hundred MB/year, and R27's capacity thresholds fail
+  closed long before exhaustion) — so no event is ever discarded, silently or
+  otherwise. When segmented retention arrives (Deferred / Open Questions), older
+  closed segments may be replaced only by an authenticated archive manifest
+  after the encrypted segment has been exported, verified, independently
+  checkpointed, and passed the retention guard (R23, KTD4) — no event is
+  silently discarded. Requests dropped by the pre-verifier rate limiter are
+  accounted for in bounded aggregate entries (source bucket, count, window)
+  rather than one durable row per flood packet, so an unauthenticated attacker
+  cannot fill the disk one audit entry at a time.
 - R14. The audit log is tamper-evident at two documented assurance levels: local
   chain verification detects any edited, removed, inserted, or reordered entry;
   verification against an independently retained signed checkpoint additionally
-  detects wholesale re-chaining and truncation through the anchored sequence. A
-  closed-segment manifest (R13) contains its audit epoch, sequence range,
+  detects wholesale re-chaining and truncation through the anchored sequence. In
+  v0.1 — all events active, no closed segments — verification reports two tiers:
+  fully inspected events anchored by a retained checkpoint, and the unanchored
+  active tail. The closed-segment manifest (audit epoch, sequence range,
   predecessor hash, final hash, event count, encrypted archive digest, state
-  digest where applicable, checkpoint digest, and archive format version, and
-  verification distinguishes three tiers, each reported separately: fully
-  inspected active or supplied-archive events; segments whose integrity is
-  anchored but whose archive was not supplied; and the unanchored active tail.
-  The claim excludes an attacker controlling the running process before entries
-  are anchored — the daemon holds no checkpoint private key (KTD4), but a live
+  digest where applicable, checkpoint digest, archive format version) and its
+  third tier — segments whose integrity is anchored but whose archive was not
+  supplied — arrive with segmented retention (Deferred / Open Questions). The
+  claim excludes an attacker controlling the running process before entries are
+  anchored — the daemon holds no checkpoint private key (KTD4), but a live
   compromise can fabricate events and misreport chain heads until an external
   checkpoint anchors them: detection of offline and post-checkpoint tampering,
   not prevention of live forgery.
@@ -570,10 +591,10 @@ flowchart TB
   allowance so checkpoint export, backup, and orderly shutdown remain possible
   after the data plane has failed closed. The allowance is concrete: `init`
   preallocates a same-filesystem `recovery.reserve` file sized above the
-  documented worst-case checkpoint, archive-registration, diagnostic, and
-  orderly-shutdown transaction; the data plane stops admitting before consuming
-  it, and releasing or recreating the reserve is a local, audited recovery
-  operation — ordinary request handling cannot spend it.
+  documented worst-case checkpoint, diagnostic, and orderly-shutdown
+  transaction; the data plane stops admitting before consuming it, and releasing
+  or recreating the reserve is a local, audited recovery operation — ordinary
+  request handling cannot spend it.
 
 **Operations**
 
@@ -623,18 +644,19 @@ flowchart TB
   application-level logical archive (KTD17) generated from one consistent read
   transaction — never a copy of the live redb file as its normative format —
   containing versioned canonical frames for each table, encrypted record bytes
-  unchanged, authenticated clear-record bytes, the current keyring envelope,
-  audit events or archived-segment manifests, per-table counts and digests, and
-  a signed manifest (store id, schema version, keyring generation, chain head,
-  latest included checkpoint, checksums). Backup creation rewraps a recovery
-  copy of the keyring to the configured backup recipients and records their
-  non-secret recipient fingerprints in the manifest, so a fresh-host restore
-  needs the archive recipient identity and can rewrap the recovered keyring to a
-  new live server recipient before activation — it does not require the failed
-  host's active identity. The archive never contains a private `age` identity or
-  the checkpoint signing key; the documented recovery package pairs the archive
-  with offline copies of those keys, and the docs state plainly that a store
-  backup without them is not a recovery. Restore constructs a new database in a
+  unchanged, authenticated clear-record bytes, the current keyring envelope, all
+  audit events (archived-segment manifests join this list if segmented retention
+  ever ships — Deferred), per-table counts and digests, and a signed manifest
+  (store id, schema version, keyring generation, chain head, latest included
+  checkpoint, checksums). Backup creation rewraps a recovery copy of the keyring
+  to the configured backup recipients and records their non-secret recipient
+  fingerprints in the manifest, so a fresh-host restore needs the archive
+  recipient identity and can rewrap the recovered keyring to a new live server
+  recipient before activation — it does not require the failed host's active
+  identity. The archive never contains a private `age` identity or the
+  checkpoint signing key; the documented recovery package pairs the archive with
+  offline copies of those keys, and the docs state plainly that a store backup
+  without them is not a recovery. Restore constructs a new database in a
   temporary sibling of the empty target directory, verifies every frame, record
   MAC, ciphertext, audit relationship, schema, and count, fsyncs the database
   and directory, and atomically installs it only after all verification succeeds
@@ -863,7 +885,9 @@ flowchart TB
 
 **Deferred for later**
 
-- The fnox-native protocol (phase 2), pending OQ1.
+- The fnox-native protocol (phase 2). OQ1 is answered (fnox discussion #615):
+  jdx is open but uncommitted and wants a use-case-first design discussion —
+  phase 2 now gates on that discussion, not on whether to ask.
 - AI agent support (phase 3).
 - Team and production adoption — explicitly not a v0.1 gate.
 - The real Canvas or Populi rotation, with live consumers cut over to this
@@ -917,11 +941,33 @@ flowchart TB
   delegated handoffs (ephemeral identity, exact-path grant, short-TTL token,
   optional use count minted atomically in one command — never a second
   authorization model or a special one-time secret type).
-- An embedded Vault-CLI shim for BUSL avoidance, conditional on U0/U11 evidence:
-  prefer contributing a direct-HTTP/OpenBao provider upstream to fnox; if pinned
-  fnox versions must keep shelling out to a `vault` binary, ship a tiny separate
-  shim binary covering only the captured command subset — CLI emulation never
-  lands inside the server daemon.
+- Audit scale machinery (deferred 2026-07-16, wayfinder T08 — the walk's first
+  real cut): KTD16's blind query index (keyed tags, verify-against-primary,
+  fail-closed health, `audit index rebuild`) and segmented audit
+  retention/archive/prune (R13/R14/R23's closed-segment manifests and guards).
+  v0.1 rotation-status queries scan primary audit events inside R23's lookback
+  window, and every audit event stays in the active database. Both are
+  performance machinery closing zero threat-model failure modes at small-team
+  scale, and both have clean upgrade paths over append-only data: the index
+  rebuilds from primary events via `audit index rebuild` when a measured status
+  scan actually hurts; segmentation arrives as an R35 forward-only schema
+  migration when `doctor` shows real capacity pressure.
+- The Vault-CLI shim for BUSL avoidance — demoted to post-v0.1, evidence-gated
+  (wayfinder T03). The v0.1 exit ladder, cheapest first: (1) point fnox at the
+  `bao` CLI (OpenBao's CLI is a vault-CLI fork; zero code — U0 proves or kills
+  this rung), (2) contribute a direct-HTTP provider upstream to fnox — confirmed
+  welcome by jdx
+  ([fnox discussion #615](https://github.com/jdx/fnox/discussions/615)): replace
+  the existing `vault` provider's CLI-backed internals in place, preserving
+  current configuration, auth, and TLS behavior, with compatibility tests
+  against both Vault and OpenBao, (3) document `vault` CLI installation with an
+  honest licensing note — never claiming a fully-OSI toolchain while it is the
+  only path. The shim is built only if all three rungs fail AND someone is
+  actually blocked: it is a second product (argument parsing, output emulation,
+  releases, tests), permanent once setup docs depend on it, and closes zero
+  threat-model failure modes. If ever built: a tiny separate shim binary
+  covering only the captured command subset — CLI emulation never lands inside
+  the server daemon.
 
 **Outside this product's identity**
 
@@ -990,7 +1036,10 @@ flowchart TB
   than the KV v2 API alone (which is why R1 declares the mount preflight and
   seal-status), and every consumer host needs HashiCorp's BUSL-1.1-licensed
   `vault` binary installed. R15's single-binary claim covers the server, not its
-  clients.
+  clients. The BUSL exit ladder (Scope Boundaries, U0) plans to retire that
+  install requirement: `bao` CLI first, upstream direct-HTTP fnox provider
+  second (jdx confirmed the PR is welcome — fnox discussion #615), documented
+  `vault` install with an honest licensing note as the floor.
 - **The shared-key problem is upstream and no server fixes it.** Teammates and
   integrations sharing one Populi or Canvas key can only be ended by minting
   separate credentials inside each SaaS product. R10 makes the sharing visible;
@@ -1046,16 +1095,22 @@ flowchart TB
 
 ### Outstanding Questions
 
-Both remaining questions are deferred, not blocking.
+Both are settled or parked; nothing blocks v0.1.
 
-- OQ1. Does jdx want a fnox-native protocol at all? This gates phase 2, not v0.1
-  — Vault compatibility is what makes v0.1 need no upstream buy-in. Still the
-  highest-leverage cheap move available: a fnox Discussions post costs about 20
-  minutes. Context: fnox has issues disabled and 119 discussions; #525 ("openbao
-  provider") sits at 0 comments; #568 establishes third-party-provider
-  precedent; no server proposal exists.
-- OQ3. Project name and repository home. Cosmetic; the working directory name
-  serves until it is settled.
+- OQ1. **Answered 2026-07-15** (wayfinder T02 —
+  [fnox discussion #615](https://github.com/jdx/fnox/discussions/615)). jdx's
+  reply: a direct-HTTP rewrite of the existing `vault` provider is welcome —
+  replace the CLI-backed internals in place, preserve current configuration,
+  auth, and TLS behavior, include compatibility tests against both Vault and
+  OpenBao. A fnox-native protocol: interest without commitment; he wants a
+  use-case-first design discussion before any decision. Phase 2 stays
+  design-discussion-gated, exactly as planned; the provider rung of the BUSL
+  exit ladder (Scope Boundaries) is confirmed viable.
+- OQ3. Project name — **parked with a deadline** (wayfinder T13, Robert's call).
+  The working name `ops-light-secrets-server` serves through the build; a real
+  name must be chosen before any public artifact (announcement, crates.io
+  publish, or README positioning aimed at outside readers). Renames are cheap
+  while there are no users.
 
 Crate selection, audit-chain shape, transport mechanism, `age` recipient
 topology, and the no-interval display — formerly OQ2 and OQ4–OQ7 — are resolved
@@ -1167,12 +1222,12 @@ wins.
 - Disclosure of structural metadata to whoever holds the data directory or a
   backup: record counts, logical paths, identity names, grants, version numbers
   and timestamps, and rotation state are authenticated (R39) but not encrypted
-  in v0.1 (R4, KTD11), and the blind audit query index additionally reveals
-  equality and bucket cardinality among its opaque tags to whoever holds the
-  file (KTD16). Values, credential material, and audit payloads — which reveal
-  access patterns, not merely topology — stay encrypted. If path and identity
-  topology is itself regulated data, this boundary is disqualifying until a
-  post-v0.1 opaque-identifier option exists.
+  in v0.1 (R4, KTD11). Values, credential material, and audit payloads — which
+  reveal access patterns, not merely topology — stay encrypted. If path and
+  identity topology is itself regulated data, this boundary is disqualifying
+  until a post-v0.1 opaque-identifier option exists. (KTD16's blind-index
+  tag-cardinality leak left this list with the index's post-v0.1 deferral; it
+  returns as a consideration if the index does.)
 - Recovery of a destroyed version's ciphertext from historical backups,
   copy-on-write pages, or unreclaimed filesystem blocks — destruction is
   logical, not per-version cryptographic erasure (R29).
@@ -1222,20 +1277,23 @@ wins.
   identities, grants, credentials, rotation records, audit chain, and a `meta`
   table (format version, lifecycle state, store id) — because KTD8's atomicity
   demands one durability domain. **Proof gate:** U2 opens with a spike proving,
-  on redb, the load-bearing operations everything above depends on: multi-table
-  atomic state-plus-audit commit, crash recovery at injected kill points,
-  bounded executor backpressure and queue-saturation behavior (KTD8), a logical
-  consistent snapshot for backup (KTD17), rotation/audit index query latency
-  (KTD16), file growth and compaction behavior, and durable commit latency on
-  the named low-cost reference host — with quantitative pass/fail thresholds
-  recorded before higher units begin. If the spike fails, the SQLite fallback
-  triggers and the swap is recorded here — before higher units are shaped around
-  the store. **Load-bearing caveat:** redb's single-writer lock is silently
-  skipped on filesystems without file-lock support, permitting multi-process
-  corruption — so startup takes its own explicit OS-level exclusive lock
-  (`fd-lock` on a lockfile in the data directory) and refuses to start when it
-  cannot be acquired, rather than trusting library-internal locking (folds into
-  R18); a second instance pointed at the same directory exits non-zero.
+  on redb, the store-facts everything above depends on: multi-table atomic
+  state-plus-audit commit, crash recovery at injected kill points, a logical
+  consistent snapshot for backup (KTD17), file growth and compaction behavior,
+  and durable commit latency on the named low-cost reference host — with
+  quantitative pass/fail thresholds recorded before higher units begin. If the
+  spike fails, the SQLite fallback triggers and the swap is recorded here —
+  before higher units are shaped around the store. (Narrowed 2026-07-16,
+  wayfinder T04: bounded-executor backpressure and queue-saturation behavior are
+  executor properties, identical over any store, and moved to U2/U6 executor
+  tests; rotation-status query latency left the gate with KTD16's deferral —
+  v0.1 status scans are covered by U6/U7 tests instead.) **Load-bearing
+  caveat:** redb's single-writer lock is silently skipped on filesystems without
+  file-lock support, permitting multi-process corruption — so startup takes its
+  own explicit OS-level exclusive lock (`fd-lock` on a lockfile in the data
+  directory) and refuses to start when it cannot be acquired, rather than
+  trusting library-internal locking (folds into R18); a second instance pointed
+  at the same directory exits non-zero.
 
 - KTD3. **Encryption at rest: an `age`-wrapped fixed-purpose keyring plus
   record-level AEAD.** Instantiates the settled `age` decision as revised in the
@@ -1243,16 +1301,19 @@ wins.
   symmetric keys — record-encryption key (with decrypt-only predecessors after
   rotation), credential-verifier MAC key, metadata-integrity MAC key (R39,
   KTD15), audit-payload key, and audit-index key (KTD16) — each with a key id.
-  The keyring plaintext contains the store id, keyring format version, keyring
-  generation, purpose-key records, and recipient metadata; its `age`
-  v0.12-encrypted envelope (to the boot-supplied server recipient, and
-  optionally one documented offline recovery recipient) is stored as one opaque
-  value in the redb `system_keyring` table — not a sidecar file — so keyring
-  changes commit atomically with their audit events (KTD8). At boot the database
-  is opened, the envelope is read and decrypted exactly once into `secrecy`
-  types, and its embedded store id is compared with the clear store id before
-  any other record is accepted — a transplanted envelope is rejected before
-  readiness. Stored records use XChaCha20-Poly1305 (RustCrypto
+  The audit-index key is minted at `init` like the others (32 random bytes;
+  keeps the keyring format stable) but stays **dormant in v0.1** — KTD16's index
+  is deferred, so the key exists unused until the index arrives, which then
+  needs no keyring migration (wayfinder T10). The keyring plaintext contains the
+  store id, keyring format version, keyring generation, purpose-key records, and
+  recipient metadata; its `age` v0.12-encrypted envelope (to the boot-supplied
+  server recipient, and optionally one documented offline recovery recipient) is
+  stored as one opaque value in the redb `system_keyring` table — not a sidecar
+  file — so keyring changes commit atomically with their audit events (KTD8). At
+  boot the database is opened, the envelope is read and decrypted exactly once
+  into `secrecy` types, and its embedded store id is compared with the clear
+  store id before any other record is accepted — a transplanted envelope is
+  rejected before readiness. Stored records use XChaCha20-Poly1305 (RustCrypto
   `chacha20poly1305`, NCC-audited) with associated data binding each ciphertext
   to store id, record type, mount, canonical path, secret version, and key id —
   transplanted ciphertext fails authentication. The cipher is identified by a
@@ -1315,14 +1376,18 @@ wins.
   `audit verify [--checkpoint <path>] [--state]` verifies against the last
   registered checkpoint and reports R14's verification tiers. This keeps
   encryption recovery and audit-signing authority distinct trust roles while
-  removing the signing key from the long-running process. **Segmented
-  retention:** audit storage is segmented by bounded event count or encoded byte
-  size while preserving one global hash sequence per audit epoch;
-  `audit archive` exports a closed encrypted segment, `audit archive register`
-  records its verified digest, and `audit prune` may replace event and index
-  rows with the authenticated segment manifest only after the signed-checkpoint
-  and retention (R23) predicates hold. redb compaction is an offline operation
-  after pruning (lifecycle `compacting`, R35).
+  removing the signing key from the long-running process. **Segmented retention
+  — deferred post-v0.1 (wayfinder T08):** v0.1 keeps every audit event in the
+  active database; R27's capacity thresholds are the guard, and the audit table
+  is schema-versioned so segmentation arrives later as an R35 forward-only
+  migration. The deferred design, recorded so it lands intact: audit storage
+  segmented by bounded event count or encoded byte size while preserving one
+  global hash sequence per audit epoch; `audit archive` exports a closed
+  encrypted segment, `audit archive register` records its verified digest, and
+  `audit prune` may replace event rows with the authenticated segment manifest
+  only after the signed-checkpoint and retention (R23) predicates hold; redb
+  compaction is an offline operation after pruning (lifecycle `compacting`,
+  R35).
 
 - KTD5. **Credentials: structured opaque strings with indexed accessors and
   keyed verifiers; no password KDF anywhere.** Tokens and AppRole secret_ids are
@@ -1458,8 +1523,12 @@ wins.
   example. One configured mount in v0.1; requests naming another mount or a
   nonempty Vault namespace fail explicitly (R3).
 
-- KTD13. **License: MPL-2.0**, entire tree, no `ee/` carve-out (R19) — matching
-  the OpenBao research note's rotation-in-core ethos.
+- KTD13. **License: MIT**, entire tree, no `ee/` carve-out, nothing held back
+  (R19). (Revised 2026-07-16, wayfinder T13 — Robert's call, the walk's first
+  plan-decision override; formerly MPL-2.0. The repo's LICENSE file — MIT, ©
+  2026 Robert Guss — stands. Consequence accepted knowingly: closed forks are
+  permitted; the anti-BUSL posture is expressed by the product's own openness,
+  not by copyleft.)
 
 - KTD14. **Compatibility matrix:** U0 regenerates the initial matrix at
   characterization time from the latest stable Vault CLI, the latest stable
@@ -1484,23 +1553,32 @@ wins.
   `doctor --full`, backup verification, restore, migration, and checkpoint
   preparation (R39).
 
-- KTD16. **The encrypted audit log has a rebuildable blind query index.**
-  Primary audit events remain the authority and retain KTD4's encrypted payload.
-  In the same transaction, the coordinator writes index rows under keyed,
-  domain-separated tags (audit-index key, KTD3) derived from canonical path,
-  identity id, consumer-instance id, accessor, event type, and time bucket;
-  index values contain only an encrypted event locator and the minimum bounded
-  query projection — without an index, every rotation-status request would scan
-  and decrypt the full history inside the single writer's shadow. Every query
-  candidate is checked against its primary event — decrypt, authenticate,
-  confirm path/version/actor, recompute the expected tags — so an index row can
-  never prove adoption by itself. Missing or corrupt index data may under-report
-  observation but can never produce a positive adoption result;
-  `rotation complete` fails closed while the index is unhealthy (R33), and
-  `audit index rebuild` recreates the index into a temporary table and
-  atomically swaps it after full verification. The index necessarily reveals
+- KTD16. **Blind audit query index — deferred post-v0.1 (wayfinder T08).**
+  Performance machinery, not security machinery: every hard part of this design
+  (verify-against-primary, fail-closed health, rebuild) exists to make the
+  optimization safe, so deferring the optimization removes the scaffolding too.
+  In v0.1, rotation-status queries scan and decrypt primary audit events inside
+  R23's bounded lookback window — redb reads run beside the single writer,
+  decrypts are microsecond-scale, and the caller is an operator command with
+  human latency tolerance. The primary events are always authoritative, so R33's
+  former index-health closeout clause is gone and status can never be wrong for
+  index reasons. Upgrade trigger: a measured status scan that actually hurts;
+  append-only data means the index arrives via `audit index rebuild` with no
+  migration crisis (the audit-index purpose key is already minted, dormant —
+  KTD3). The deferred design, recorded so it lands intact: in the same
+  transaction the coordinator writes index rows under keyed, domain-separated
+  tags (audit-index key, KTD3) derived from canonical path, identity id,
+  consumer-instance id, accessor, event type, and time bucket; index values
+  contain only an encrypted event locator and the minimum bounded query
+  projection. Every query candidate is checked against its primary event —
+  decrypt, authenticate, confirm path/version/actor, recompute the expected tags
+  — so an index row can never prove adoption by itself; missing or corrupt index
+  data may under-report observation but can never produce a positive adoption
+  result, and `audit index rebuild` recreates the index into a temporary table
+  and atomically swaps it after full verification. The index necessarily reveals
   equality and bucket cardinality among opaque tags to an offline database
-  holder — recorded in the Threat Model's metadata boundary.
+  holder — that leak re-enters the Threat Model's metadata boundary if and when
+  the index ships.
 
 - KTD17. **Logical backup format and explicit recovery epochs.** The backup
   format is owned by the application and versioned independently from redb: one
@@ -1634,9 +1712,10 @@ See the Unit Index for the dependency graph.
 
 Milestones:
 
-- **M0 — Contract freeze:** U0 complete; U2's storage/executor spike passes; the
-  authenticated clear-record, crypto-header, audit-event/index, and
-  logical-backup formats are reviewed and frozen (G0–G3).
+- **M0 — Contract freeze:** U0 complete; U2's storage spike passes; the
+  authenticated clear-record, crypto-header, audit-event, and logical-backup
+  formats are reviewed and frozen (G0–G3; the audit query-index format left G2
+  with KTD16's deferral).
 - **M1 — Security kernel vertical slice:** `init → serve → fnox read/write` over
   TLS through audience-bound credentials, canonical authorization, authenticated
   state, atomic audit, and bounded storage admission — a real fnox read
@@ -1697,13 +1776,18 @@ Milestones:
   fnox without the BUSL `vault` binary.
 - **Exit gate:** R1's endpoint matrix, AE8's documented sequence, and U5/U11's
   fixtures are updated from captured behavior — evidence, not prose memory —
-  before U5's router is implemented. Clean-host onboarding carries an additional
-  release gate: preferred, an upstream fnox release speaks direct HTTP or
-  accepts an OpenBao-compatible CLI; fallback, this project ships a tiny
-  separate `vault` shim implementing only the captured `status` and
-  `kv get -field` behavior. The project may document installing the HashiCorp
-  Vault CLI, but must not describe the client stack as fully OSI-licensed while
-  that is the only supported path.
+  before U5's router is implemented. Clean-host onboarding follows the BUSL exit
+  ladder (Scope Boundaries; revised 2026-07-16, wayfinder T03), cheapest rung
+  first: (1) point fnox at the `bao` CLI — U0's capture proves or kills this
+  rung; (2) an upstream direct-HTTP fnox provider (confirmed welcome, fnox
+  discussion #615); (3) document installing the HashiCorp Vault CLI with an
+  honest licensing note — never describing the client stack as fully
+  OSI-licensed while that is the only supported path. No shim is a v0.1 release
+  gate; it is post-v0.1 and evidence-gated (Scope Boundaries). **Done-when:** U0
+  is done when its named questions are answered with committed evidence — which
+  endpoints each pinned client hits, how tokens and TLS roots are supplied,
+  whether a fresh host runs fnox without the BUSL `vault` binary — not when the
+  harness is beautiful.
 - **Test scenarios:**
   - Each pinned client's capture replays cleanly against the fixture set (the
     recording is deterministic enough to assert against).
@@ -1793,31 +1877,33 @@ Milestones:
 - **Dependencies:** U1.
 - **Files:** `src/store/mod.rs`, `src/store/crypto.rs`, `src/store/keyring.rs`,
   `tests/store.rs`.
-- **Approach:** Opens with the **KTD2 proof spike**: demonstrate on redb the
-  multi-table atomic commit, kill-point crash recovery, bounded executor
-  backpressure and queue saturation (KTD8), a logical consistent snapshot
-  (KTD17), rotation/audit index query latency (KTD16), file growth and
+- **Approach:** Opens with the **KTD2 proof spike**, narrowed to store-facts
+  (wayfinder T04): demonstrate on redb the multi-table atomic commit, kill-point
+  crash recovery, a logical consistent snapshot (KTD17), file growth and
   compaction behavior, and durable commit latency on the named low-cost
   reference host, recording quantitative pass/fail thresholds — the SQLite
-  fallback triggers here or never. Then: a `meta` table (store id,
-  `format_version`, `lifecycle` per R35); a `system_keyring` table holding the
-  `age` envelope (KTD3); a `secret_meta` table per KTD11; a `secrets` table
-  keyed by logical path holding versioned records (version number, created_time,
-  key id, nonce, ciphertext). The server `age` identity loads into a
-  `secrecy::SecretBox` at boot; the database is opened, the `system_keyring`
-  envelope read and decrypted exactly once, and its embedded store id checked
-  against the clear store id (KTD3; R21 — the identity is never written to disk,
-  shell history, or argv). Values are AEAD-encrypted (XChaCha20-Poly1305, KTD3)
-  under the keyring's record key with the canonical binary header and associated
-  data binding store id, record type, mount, path, version, and key id, every
-  encryption drawing a fresh 192-bit CSPRNG nonce stored in the record header —
-  rewrites included; clear structural records carry KTD15 metadata-integrity
-  MACs verified on every read (R39). The `meta` table also carries the
-  wall-clock high-water mark (Assumptions — clock model). Encrypt on write,
-  decrypt on read; plaintext buffers zeroize on drop. Checked-in cross-version
-  crypto fixtures and canonical AAD test vectors freeze the encoding before
-  storage-format fixtures freeze; the spike records XChaCha software performance
-  on the supported targets — no configurable cipher negotiation exists.
+  fallback triggers here or never. (Bounded-executor backpressure and
+  queue-saturation behavior are executor properties, not store properties — they
+  are proven by executor tests here and in U6, not by the spike.) Then: a `meta`
+  table (store id, `format_version`, `lifecycle` per R35); a `system_keyring`
+  table holding the `age` envelope (KTD3); a `secret_meta` table per KTD11; a
+  `secrets` table keyed by logical path holding versioned records (version
+  number, created_time, key id, nonce, ciphertext). The server `age` identity
+  loads into a `secrecy::SecretBox` at boot; the database is opened, the
+  `system_keyring` envelope read and decrypted exactly once, and its embedded
+  store id checked against the clear store id (KTD3; R21 — the identity is never
+  written to disk, shell history, or argv). Values are AEAD-encrypted
+  (XChaCha20-Poly1305, KTD3) under the keyring's record key with the canonical
+  binary header and associated data binding store id, record type, mount, path,
+  version, and key id, every encryption drawing a fresh 192-bit CSPRNG nonce
+  stored in the record header — rewrites included; clear structural records
+  carry KTD15 metadata-integrity MACs verified on every read (R39). The `meta`
+  table also carries the wall-clock high-water mark (Assumptions — clock model).
+  Encrypt on write, decrypt on read; plaintext buffers zeroize on drop.
+  Checked-in cross-version crypto fixtures and canonical AAD test vectors freeze
+  the encoding before storage-format fixtures freeze; the spike records XChaCha
+  software performance on the supported targets — no configurable cipher
+  negotiation exists.
 - **Execution note:** Characterization-test the redb round-trip and the
   version-append semantics before layering the API on top.
 - **Test scenarios:**
@@ -1849,6 +1935,9 @@ Milestones:
     without claiming to inspect allocator or kernel copies outside R5.
   - Test expectation for on-disk format: byte-inspect that no plaintext secret
     substring appears in the redb file.
+  - Saturate the storage executor's bounded queue → memory stays bounded, excess
+    requests are rejected in order, and the reserved control lane stays live
+    (KTD8 — executor test, moved from the KTD2 spike, wayfinder T04).
   - Unknown `format_version` in `meta` → open refused (R35).
 - **Verification:** `cargo test --test store` green; hexdump spot-check shows
   ciphertext; spike results recorded against KTD2's gate.
@@ -2032,8 +2121,8 @@ Milestones:
   (linearization), KTD4, KTD8.
 - **Dependencies:** U2.
 - **Files:** `src/txn.rs`, `src/audit/mod.rs`, `src/audit/chain.rs`,
-  `src/audit/checkpoint.rs`, `src/audit/index.rs`, `src/cli.rs`,
-  `tests/audit.rs`, `tests/fault/txn_crash.rs`.
+  `src/audit/checkpoint.rs`, `src/cli.rs`, `tests/audit.rs`,
+  `tests/fault/txn_crash.rs`.
 - **Approach:** The coordinator (KTD8) is built first: mutations commit state
   plus audit entry in one multi-table transaction; reads revalidate, decrypt,
   prepare the response, append the audit entry, commit, then transmit. No
@@ -2046,19 +2135,24 @@ Milestones:
   traces, errors, panics); entry payloads are encrypted under the keyring's
   audit key with a plaintext envelope of sequence, timestamp, previous hash, and
   ciphertext digest, so the `blake3` chain verifies without decryption (KTD4).
-  In the same transaction the coordinator writes KTD16's blind query-index rows;
-  `audit index rebuild` recreates them from primary events. Rate-limiter-dropped
-  requests aggregate into bounded entries (R13). Checkpointing is external
-  (KTD4): `audit checkpoint prepare` commits the canonical descriptor including
-  the KTD15 state digest, the CLI signs it with the operator-supplied key and
-  registers it via `audit checkpoint register`, and
+  Status and observation queries scan primary events inside R23's lookback
+  window — KTD16's index and its same-transaction rows are deferred post-v0.1,
+  so the scan path is the only query path and the primary events are always
+  authoritative. Rate-limiter-dropped requests aggregate into bounded entries
+  (R13). Checkpointing is external (KTD4): `audit checkpoint prepare` commits
+  the canonical descriptor including the KTD15 state digest, the CLI signs it
+  with the operator-supplied key and registers it via
+  `audit checkpoint register`, and
   `audit verify [--checkpoint <path>] [--state]` checks the chain and state
-  digest and reports R14's verification tiers. `audit archive`,
-  `audit archive register`, and `audit prune` implement KTD4's segmented
-  retention under R23's guard. Audit-log capacity is monitored with warning and
+  digest and reports R14's two v0.1 verification tiers. (`audit archive` /
+  `audit archive register` / `audit prune` left v0.1 with segmented retention's
+  deferral — KTD4.) Audit-log capacity is monitored with warning and
   stop-admitting thresholds and R27's preallocated `recovery.reserve` allowance
   (request-size and attempt-rate limits on the unauthenticated HTTP surface live
-  in U4).
+  in U4). The bounded executor's backpressure and queue-saturation behavior are
+  proven here by executor tests (moved from KTD2's spike — wayfinder T04):
+  saturate the request queue and assert bounded memory, orderly rejection, and a
+  live control lane.
 - **Execution note:** Test-first on the crash-atomicity, tamper-detection, and
   fail-closed paths — this log is the sole record a rotation trusts, and the
   coordinator is the invariant everything else leans on.
@@ -2082,24 +2176,17 @@ Milestones:
   - Covers R27. Audit store approaches capacity → warning then fail-closed
     before exhaustion, with checkpoint export and shutdown still possible from
     the reserved allowance.
-  - Delete an on-current index row → status reads incomplete or
-    `silent-since-write` and completion is blocked (KTD16).
-  - Insert or transplant an index row pointing at an event for another path,
-    identity, or version → primary-event verification rejects it (KTD16).
-  - Rebuild the index from primary audit events → the same verified query
-    results are produced (KTD16).
-  - Corrupt the index while leaving the primary chain intact → secret reads stay
-    available; rotation closeout and audit queries fail closed until rebuild
-    (KTD16, R33).
+  - Status-query scan over R23's lookback window returns correct
+    on-current/on-prior/silent-since-write buckets computed from primary events,
+    at a synthetic event volume representing years of small-team use, within
+    operator-command latency tolerance (R33, R23 — the measured anchor for
+    KTD16's upgrade trigger).
+  - Saturate the bounded executor's request queue → memory stays bounded, excess
+    requests are rejected in order, and the reserved control lane still serves
+    backup/checkpoint/shutdown (KTD8 — moved from KTD2's spike, wayfinder T04).
   - Fill the active audit area to the stop-admitting threshold → data-plane
-    admission stops while archive, checkpoint registration, diagnostics, and
-    orderly shutdown still succeed via the reserved lane and reserve file (R27,
-    KTD8).
-  - Attempt to prune an uncheckpointed, unverified, or in-lookback segment →
-    refused (R13, R23).
-  - Archive, register, prune, and compact a closed segment → active disk usage
-    falls; full verification succeeds with the archive supplied and accurately
-    reports the archive dependency when it is absent (R14).
+    admission stops while checkpoint registration, diagnostics, and orderly
+    shutdown still succeed via the reserved lane and reserve file (R27, KTD8).
 - **Verification:** `cargo test --test audit --test txn_crash` green;
   `<binary> audit verify` detects a hand-tampered log.
 
@@ -2118,33 +2205,34 @@ Milestones:
   authorized, and observed as three separately labeled sets with reconciliation
   states (declared-but-unauthorized, authorized-but-undeclared,
   declared-but-unobserved, observed-but-undeclared); observed reads — last-read
-  time and version — come through KTD16's verified index queries over R23's
-  window, and recency annotates, never filters (R10). `rotation begin` creates a
-  prepared record snapshotting the declared, authorized, and active
-  consumer-instance sets, the prior version, the expected CAS, actor, and time —
-  without writing a secret. `rotation cutover` accepts the bounded secret object
-  through an approved input channel (R37) and atomically performs the CAS write
-  plus the prepared → cutover transition (R11). States are
+  time and version — come from scanning primary audit events over R23's window
+  (KTD16's index is deferred post-v0.1), and recency annotates, never filters
+  (R10). `rotation begin` creates a prepared record snapshotting the declared,
+  authorized, and active consumer-instance sets, the prior version, the expected
+  CAS, actor, and time — without writing a secret. `rotation cutover` accepts
+  the bounded secret object through an approved input channel (R37) and
+  atomically performs the CAS write plus the prepared → cutover transition
+  (R11). States are
   `prepared | cutover | completed | cancelled-before-cutover | superseded` — no
   post-cutover abort; recovery after cutover is an explicit copy-forward
   rollback to a new higher version. `rotation status <path>` classifies each
   snapshotted consumer as `on-current` / `on-prior` / `silent-since-write` from
-  R13's versioned read events via the verified index — at declared-consumer,
-  identity, and consumer-instance granularity, with accessor drill-down where
-  distinct accessors appear, labeled "fetched", never "using" (R33).
-  `rotation complete` succeeds only while the target is still the current
-  version and every snapshotted consumer is `on-current` — retired instances
-  need a recorded reason — otherwise it requires `--acknowledge-unverified` with
-  an audited reason (R33); it records upstream revocation as an operator
-  assertion (never a server action), emits R33's redacted closeout report
-  referencing the write and completion audit sequence numbers and the latest
-  checkpoint, and retires the prior version; writes outside a rotation set
-  `changed_since_last_completed_rotation` (R12). Secret age is time since last
-  completed rotation, else creation; the interval lives in server-owned rotation
-  metadata writable only through the control plane (R12, KTD11); "no interval
-  set" when none configured. Enumeration, status, registry mutation, and audit
-  read each require their capability (R22), and all mutations flow through the
-  coordinator (KTD8).
+  R13's versioned read events, scanned in the primary store over R23's window —
+  at declared-consumer, identity, and consumer-instance granularity, with
+  accessor drill-down where distinct accessors appear, labeled "fetched", never
+  "using" (R33). `rotation complete` succeeds only while the target is still the
+  current version and every snapshotted consumer is `on-current` — retired
+  instances need a recorded reason — otherwise it requires
+  `--acknowledge-unverified` with an audited reason (R33); it records upstream
+  revocation as an operator assertion (never a server action), emits R33's
+  redacted closeout report referencing the write and completion audit sequence
+  numbers and the latest checkpoint, and retires the prior version; writes
+  outside a rotation set `changed_since_last_completed_rotation` (R12). Secret
+  age is time since last completed rotation, else creation; the interval lives
+  in server-owned rotation metadata writable only through the control plane
+  (R12, KTD11); "no interval set" when none configured. Enumeration, status,
+  registry mutation, and audit read each require their capability (R22), and all
+  mutations flow through the coordinator (KTD8).
 - **Test scenarios:**
   - Covers AE3. Three identities have read a key within the window → all three
     enumerated; `rotation begin` then `cutover` with a replacement → consumers
@@ -2217,11 +2305,12 @@ Milestones:
   rotates by the offline whole-store re-encryption; the metadata-integrity key
   by an offline rewrite and MAC regeneration; the audit-payload key
   forward-only, retaining decrypt-only historical keys because rewriting
-  ciphertext would invalidate anchored audit hashes; the audit-index key by
-  rebuilding the non-authoritative index from primary events; and the
-  credential-verifier key only together with a credential-epoch increment (R41),
-  invalidating all outstanding tokens and secret_ids. Audit history survives
-  every operation.
+  ciphertext would invalidate anchored audit hashes; and the credential-verifier
+  key only together with a credential-epoch increment (R41), invalidating all
+  outstanding tokens and secret_ids. (The fifth semantic — the audit-index key,
+  rotated by rebuilding the non-authoritative index from primary events — leaves
+  v0.1 with KTD16's deferral; the key stays minted-but-dormant in the keyring,
+  KTD3, wayfinder T10.) Audit history survives every operation.
 - **Execution note:** Test the interruption path explicitly — the original store
   must remain intact and no mixed-key state may ever be servable.
 - **Test scenarios:**
@@ -2376,10 +2465,10 @@ Milestones:
   injection (feeds AE9); **property** — canonical path/grant equivalence models
   (U3); **fuzz** — token strings, request paths, JSON bodies, encrypted record
   and checkpoint decoders; **canary scan** — seeded secret values must appear in
-  no log, trace, panic, audit ciphertext-adjacent index, or test artifact (R25).
-  A benchmark records the audited-read/write baseline on a named reference host
-  (Performance and Capacity). Client versions are pinned in CI so an upgrade
-  cannot silently break R2.
+  no log, trace, panic, or test artifact (R25). A benchmark records the
+  audited-read/write baseline on a named reference host (Performance and
+  Capacity). Client versions are pinned in CI so an upgrade cannot silently
+  break R2.
 - **Execution note:** This is the compat gate — API-shape unit tests are
   necessary but the real clients drive the fragile preflight joint.
 - **Test scenarios:**
@@ -2423,28 +2512,48 @@ Milestones:
   data-dir ownership and lock, keyring decryptability and store-id match, schema
   and lifecycle state, chain and checkpoint freshness, disk capacity vs
   thresholds and the recovery reserve (R27), last verified backup age, age of
-  the last successful `backup verify --full` rehearsal (R32), audit-index health
-  (KTD16), informational per-key operation counts (KTD3), TLS cert expiry, and
-  clock sanity against the persisted high-water mark — without touching secret
-  values, with stable JSON and documented stable exit codes. `docs/operating.md`
-  documents F1 end to end (key-material channels per R21/R37, first identity,
-  first read), the developer-token posture (accept-and-mitigate; optional
-  keychain helper), the workload secret_id delivery posture, checkpoint
-  mirroring (KTD4), backup/restore and the recovery package (U10), key rotation
-  (U8), and hardened systemd unit settings — shipped as tested example units in
-  `examples/systemd/` covering `LoadCredential`/`LoadCredentialEncrypted`
-  delivery of the active `age` identity, plus a separate timer/service pair that
-  supplies the checkpoint signing key only to the short-lived checkpoint CLI
-  process (KTD4) — exercised by U1's credentials-directory test. MPL-2.0 at the
-  tree root with no `ee/` carve-out (R19, KTD13). `deny.toml` configures
-  `cargo-deny` for licenses and advisories so the Verification Contract's
-  `cargo deny check` gate has an owner. Release integrity (R38) lands here: the
-  release pipeline emits signed checksums, an SBOM, and build provenance for
-  every artifact; MSRV is pinned and `Cargo.lock` is committed with `--locked`
-  enforced everywhere; `SECURITY.md` documents the vulnerability-reporting
-  process; every storage-format change ships upgrade notes; and the release
-  smoke test consumes the actual published binary, restoring at least one prior
-  release's store fixture (R35).
+  the last successful `backup verify --full` rehearsal (R32), audit-table size
+  against KTD16's upgrade trigger (the index-health check arrives with the
+  index, post-v0.1), informational per-key operation counts (KTD3), TLS cert
+  expiry, and clock sanity against the persisted high-water mark — without
+  touching secret values, with stable JSON and documented stable exit codes.
+  `docs/operating.md` documents F1 end to end (key-material channels per
+  R21/R37, first identity, first read), the developer-token posture
+  (accept-and-mitigate; optional keychain helper), the workload secret_id
+  delivery posture, checkpoint mirroring (KTD4), backup/restore and the recovery
+  package (U10), key rotation (U8), and hardened systemd unit settings — shipped
+  as tested example units in `examples/systemd/` covering
+  `LoadCredential`/`LoadCredentialEncrypted` delivery of the active `age`
+  identity, plus a separate timer/service pair that supplies the checkpoint
+  signing key only to the short-lived checkpoint CLI process (KTD4) — exercised
+  by U1's credentials-directory test. MIT at the tree root with no `ee/`
+  carve-out (R19, KTD13 — revised from MPL-2.0, wayfinder T13). `deny.toml`
+  configures `cargo-deny` for licenses and advisories (license config follows
+  MIT) so the Verification Contract's `cargo deny check` gate has an owner. The
+  README leads with the positioning paragraph settled at T13 (working name until
+  OQ3's deadline):
+
+  > **[name]** is a single-binary, Vault-KV-v2-compatible secrets server for
+  > teams too small to run Vault. It exists for one workflow: rotating a
+  > credential without an outage. Every read is audited atomically, so before
+  > you revoke anything upstream the server can show you exactly who fetched the
+  > old value and who has picked up the new one — declared, authorized, and
+  > observed consumers, never collapsed into one comfortable list. The ops-light
+  > claim is a list of refusals: no cluster, no external database, no policy
+  > language, no plugin system, no remotely reachable management surface, no
+  > unseal ceremony. Management lives on a local socket; one operator can run
+  > backup, restore, key rotation, and incident response alone. Works with
+  > unmodified `vault`/`bao` CLIs and fnox. MIT, whole tree, nothing held back.
+
+  The README also says "outgrow it → OpenBao" out loud (T01's accepted
+  consequence). Release integrity (R38) lands here: the release pipeline emits
+  signed checksums, an SBOM, and build provenance for every artifact; MSRV is
+  pinned and `Cargo.lock` is committed with `--locked` enforced everywhere;
+  `SECURITY.md` documents the vulnerability-reporting process; every
+  storage-format change ships upgrade notes; and the release smoke test consumes
+  the actual published binary, restoring at least one prior release's store
+  fixture (R35).
+
 - **Test scenarios:**
   - Covers AE8. A fresh consumer host following the documented sequence reaches
     a first fnox secret read with no fnox change beyond configuration.
@@ -2507,8 +2616,7 @@ external service, no restart, no policy language.
 - Fail-closed postures hold: unsafe-config startup refusal (R18, clock rollback
   and forward-jump included), plaintext-remote refusal (R20), audit-atomicity
   and audit-failure-means-operation-failure (R26), record-MAC failure takes
-  readiness false (R39), index unhealthiness blocks rotation closeout and never
-  satisfies it (KTD16), restore credential epoch (R32), init
+  readiness false (R39), restore credential epoch (R32), init
   disclosure-before-commit (R17), and the rotation closeout guard (R33).
 - No handler commits state or audit outside the transaction coordinator — module
   visibility enforces it, and the crash suite proves the atomicity (KTD8, AE9).
@@ -2558,3 +2666,14 @@ contains only genuinely deferred work and currently open decisions.
   fingerprint endpoint is rejected outright), and event delivery via the local
   signed outbox build on R13's version-on-audit seam post-v0.1 (Scope Boundaries
   carries the reduced shapes).
+- **Audit scale machinery** (deferred 2026-07-16, wayfinder T08): KTD16's blind
+  query index and KTD4's segmented retention/archive/prune. v0.1 scans primary
+  events inside R23's window and retains all events; both designs are recorded
+  in their KTDs so they land intact when a measured status scan or
+  `doctor`-reported capacity pressure triggers them. The index arrives via
+  `audit index rebuild` over append-only data (its purpose key is minted,
+  dormant — KTD3); segmentation arrives as an R35 forward-only migration.
+- **Vault-CLI shim** (demoted 2026-07-16, wayfinder T03): post-v0.1,
+  evidence-gated behind the BUSL exit ladder (Scope Boundaries) — built only if
+  `bao`, the upstream fnox provider (confirmed welcome, fnox discussion #615),
+  and a documented `vault` install all fail AND someone is actually blocked.

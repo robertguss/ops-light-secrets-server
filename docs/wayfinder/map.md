@@ -23,6 +23,13 @@ keep / simplify / defer — and which Robert can explain from understanding and
 start building. The map is done when T14's rewrite lands and nothing is left
 to decide before implementation starts.
 
+**DESTINATION REACHED (2026-07-16).** T14's rewrite landed as
+`docs/plans/2026-07-16-002-feat-ops-light-secrets-server-plan.md`; all
+fourteen tickets closed; nothing left to decide before building. One carried
+obligation: the explain-back rehearsal (and T05's own-words redo) deferred to
+build start — Robert's call. Building follows the revised plan as a fresh
+effort.
+
 ## Notes
 
 - Domain: self-hosted secrets server (Rust, Vault KV v2-compatible) for a
@@ -149,14 +156,18 @@ to decide before implementation starts.
   rewrites it (R19 unaffected); positioning paragraph drafted on ticket for
   T14's README.
 
+- [Synthesis: rewrite the plan as the right-sized, owned v0.1](tickets/T14-synthesis-rewrite.md)
+  — **destination reached**: successor plan
+  `docs/plans/2026-07-16-002` committed (T08 defers, T03 ladder, T04 spike
+  shrink, T10 dormant key, T13 MIT, T02/OQ1 fold all applied; U0–U12/G0–G3/
+  M0–M3 survive); old plan banner'd superseded; plan-history fifth round
+  recorded. Explain-back rehearsal deferred to build start (Robert's call).
+
 ## Not yet specified
 
-- Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
-  edges) lists need re-cutting once v0.1 verdicts land — what got deferred
-  joins them, what got cut leaves them. Now holds T08's two defers: KTD16
-  blind query index and audit segmentation/archive/prune.
-- Whether the plan's unit structure (U0–U12), freeze gates (G0–G3), and
-  milestones (M0–M3) survive the re-scope or get redrawn — sharpens at T14.
+Empty — the frontier reached the destination. (The former two items resolved
+at T14: post-v0.1 lists re-cut in the plan's Deferred / Open Questions and
+Scope Boundaries; unit/gate/milestone structure confirmed standing.)
 
 ## Out of scope
 

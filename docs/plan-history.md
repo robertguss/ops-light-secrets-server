@@ -1,9 +1,51 @@
 # Plan History — Ops-Light Secrets Server
 
-Decision and revision history moved out of
-`docs/plans/2026-07-15-001-feat-ops-light-secrets-server-plan.md` so the plan
-stays a present-tense, canonical contract. Where anything here disagrees with
-the plan, the plan wins.
+Decision and revision history moved out of the plan document so the plan stays a
+present-tense, canonical contract. The canonical plan is
+`docs/plans/2026-07-16-002-feat-ops-light-secrets-server-plan.md` (superseding
+`2026-07-15-001`). Where anything here disagrees with the plan, the plan wins.
+
+## Fifth revision round (2026-07-16): the wayfinder walk
+
+The wayfinder map (`docs/wayfinder/map.md`, tickets T01–T14) re-derived every
+load-bearing decision from first principles, one ticket per area, with Robert's
+keep/simplify/defer verdict on each. Outcome: the design survived almost intact
+— T01 (product frame), T05 (crypto at rest), T06 (authn), T07 (authz), T09
+(rotation), T10 (recovery), T11 (transport/deployment), and T12 (verification
+contract) all closed keep-as-written with zero amendments. Substantive changes,
+all folded into `2026-07-16-002`:
+
+- **KTD16 blind query index deferred post-v0.1** (T08): v0.1 rotation-status
+  queries scan primary audit events inside R23's lookback window; R33's
+  index-health closeout clause removed; the tag-cardinality leak left the threat
+  model; the audit-index purpose key stays minted but dormant (T10); the index's
+  format left G2 and M0. Upgrade path: `audit index rebuild` over append-only
+  data when a measured scan hurts.
+- **Segmented audit retention/archive/prune deferred post-v0.1** (T08): all
+  events stay in the active database; R13's no-silent-discard holds trivially,
+  R23's pruning guard is dormant, R14 reports two verification tiers in
+  practice, backups carry all events. Arrives later as an R35 forward-only
+  migration when `doctor` shows capacity pressure.
+- **BUSL Vault-CLI shim demoted to post-v0.1, evidence-gated** (T03): the v0.1
+  exit ladder is bao-CLI → upstream direct-HTTP fnox provider → documented
+  `vault` install with an honest licensing note. U0's exit gate reworded; a
+  done-when-questions-answered guard added to U0.
+- **KTD2 spike narrowed to store-facts** (T04): executor backpressure and
+  index-query latency left the gate — backpressure moved to U2/U6 executor
+  tests, and the index latency question left with KTD16.
+- **License changed to MIT** (T13, first plan-decision override): KTD13
+  rewritten from MPL-2.0; R19 unaffected (MIT is OSI, whole tree, nothing held
+  back); `deny.toml` follows; closed forks knowingly accepted. Project name
+  parked with a before-any-public-artifact deadline (OQ3). README positioning
+  paragraph added to U12.
+- **OQ1 answered** (T02, fnox discussion #615): jdx welcomes a direct-HTTP
+  rewrite of the existing `vault` provider (in place, keep config/auth/TLS,
+  compat tests vs Vault and OpenBao); fnox-native protocol interest without
+  commitment — phase 2 gates on a use-case-first design discussion.
+- **Deploy reality confirmed: systemd VM** (T11) — the certified runtime matrix
+  matches actual usage; `LoadCredentialEncrypted` covers unattended restarts.
+- Unit structure U0–U12, gates G0–G3 (G1/G2 rewordings above), and milestones
+  M0–M3 all survive unchanged otherwise.
 
 ## Revision rounds (2026-07-15)
 
@@ -59,24 +101,24 @@ into the redb `system_keyring` table so keyring changes commit atomically with
 their audit events (KTD3, KTD8, U8); a rebuildable blind audit query index
 (KTD16); the checkpoint private key moved out of the daemon into an explicit
 prepare/sign/register CLI flow (KTD4, R14, R36); raw-request-target validation
-before router decoding plus duplicate-key/header rejection (R8, KTD9, U3, U9);
-a bounded storage executor owning redb (KTD8, U2); rotation split into
+before router decoding plus duplicate-key/header rejection (R8, KTD9, U3, U9); a
+bounded storage executor owning redb (KTD8, U2); rotation split into
 begin/cutover with stable consumer-instance ids and a server-owned rotation
 interval (F4, R11, R12, R33, KTD5, U7); the declared-consumer registry pulled
 into v0.1 (R40, AE13 — reversing the earlier deferral recorded below;
 discovery/import stay v0.2); credential kind/audience/epoch in the verifier
 domain, `SO_PEERCRED` on the control socket, and the credential-epoch incident
 command pulled into v0.1 (R17, R24, R31, R32, R34, R41); clock forward-jump
-protection and `clock repair` (R18, R36, Assumptions); XChaCha20-Poly1305 with
-a canonical binary crypto encoding (KTD3, U2); a logical backup format with
+protection and `clock repair` (R18, R36, Assumptions); XChaCha20-Poly1305 with a
+canonical binary crypto encoding (KTD3, U2); a logical backup format with
 explicit recovery audit epochs (R32, KTD17, U10); the compatibility matrix
 regenerated at U0 time, a BUSL-client release gate, and remote metadata-delete
 declared unsupported (KTD14, U0, R1, R29); segmented audit retention with
 archive/prune and a preallocated recovery reserve (R13, R14, R23, R27, KTD4,
 U6); a Linux-first supported-runtime contract and corrected axum/axum-server
 attribution (Scope Boundaries, KTD1, R38); and milestones M0–M3 with U0 ∥ U1
-sequencing (Sequencing, Unit Index). The problem frame, actors, positioning,
-and single-node ceiling are again unchanged.
+sequencing (Sequencing, Unit Index). The problem frame, actors, positioning, and
+single-node ceiling are again unchanged.
 
 ## Review dispositions
 
