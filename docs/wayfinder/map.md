@@ -143,6 +143,12 @@ to decide before implementation starts.
   posture): Robert keeps the whole attestation set in v0.1 incl. SBOM +
   provenance. Per-gate failure map recorded on ticket.
 
+- [Project meta: name, repo home, license](tickets/T13-project-meta.md)
+  — name PARKED (deadline: before any public artifact; working name serves);
+  license **MIT** — first plan override, KTD13's MPL-2.0 falls and T14
+  rewrites it (R19 unaffected); positioning paragraph drafted on ticket for
+  T14's README.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
