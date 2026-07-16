@@ -33,6 +33,11 @@ grep -Fq 'permissions:' .github/workflows/ci.yml
 grep -Fq 'contents: read' .github/workflows/ci.yml
 grep -Fq 'cancel-in-progress: true' .github/workflows/ci.yml
 grep -Fq 'timeout-minutes:' .github/workflows/ci.yml
+grep -Fq '  workflow_dispatch:' .github/workflows/ci.yml
+if grep -Eq '^  (pull_request|push):' .github/workflows/ci.yml; then
+    printf 'CI must remain manual-only; run verification locally\n' >&2
+    exit 1
+fi
 # GitHub expands this expression in workflow YAML, not in this test shell.
 # shellcheck disable=SC2016
 matrix_invocation='./scripts/verify.sh "${{ matrix.check }}"'
