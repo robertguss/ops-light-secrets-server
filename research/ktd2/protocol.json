@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "status": "preregistered_not_executed",
+  "preregistered_at": "2026-07-16T21:24:00Z",
+  "gate": "G1",
+  "storage_candidate": {
+    "crate": "redb",
+    "version": "2.6.3",
+    "selection_reason": "newest crates.io release compatible with project MSRV Rust 1.85"
+  },
+  "fallback": {
+    "crate": "rusqlite",
+    "trigger": "any gated threshold fails",
+    "required_followup": "revise every redb-specific downstream bead before closing U2.1"
+  },
+  "reference_host": {
+    "provider": "Hetzner",
+    "commercial_instance_type": "metadata-unavailable",
+    "instance_identity_surrogate": "Hetzner vServer / KVM / 2 vCPU / 7.6 GiB RAM / AMD EPYC-Milan / ash-dc1",
+    "region": "us-east",
+    "availability_zone": "ash-dc1",
+    "architecture": "x86_64",
+    "cpu_count": 2,
+    "cpu_model": "AMD EPYC-Milan Processor",
+    "memory_gib": 7.6,
+    "kernel": "Linux 6.8.0-134-generic x86_64",
+    "disk": {
+      "device": "/dev/sda1",
+      "model": "QEMU HARDDISK",
+      "size_gib": 76.0,
+      "rotational": false,
+      "write_cache": "write back",
+      "force_unit_access": false
+    },
+    "filesystem": {
+      "type": "ext4",
+      "mount_options": ["rw", "relatime"],
+      "block_size": 4096
+    },
+    "host_change_rule": "any provider, zone, CPU count/model, RAM class, disk class, filesystem, mount option, or durability change requires a full rerun"
+  },
+  "durability": {
+    "redb_mode": "Durability::Immediate",
+    "commit_semantics": "each measured transaction completes redb commit before reply",
+    "filesystem_sync": "redb immediate durability; no benchmark-level batching",
+    "cache_state": "warm database and OS cache after explicit warmup; durable commit still syncs"
+  },
+  "workloads": {
+    "atomic_state_audit": {
+      "transactions": 1000,
+      "state_value_bytes": 256,
+      "audit_value_bytes": 256,
+      "tables": ["state", "audit", "meta"],
+      "invariant": "state sequence, audit sequence, and meta head advance together or not at all"
+    },
+    "durable_latency": {
+      "concurrency_points": [1, 8, 32],
+      "aggregate_arrival_rate_per_second": 100,
+      "workload_mix": "100% durable state+audit commits; unique 256-byte state and audit values",
+      "warmup_commits_per_point": 50,
+      "measured_commits_per_repetition": 500,
+      "repetitions": 3,
+      "percentile_method": "nearest-rank over all 1500 measured commits at each concurrency point",
+      "primary_gate_point": 32
+    },
+    "crash_recovery": {
+      "repetitions_per_point": 25,
+      "kill_points": [
+        "before_begin",
+        "after_begin",
+        "after_state_insert",
+        "after_audit_insert",
+        "commit_started",
+        "commit_returned"
+      ],
+      "invariant": "database reopens and recovered state/audit/meta are either all previous or all next generation"
+    },
+    "concurrent_snapshot": {
+      "writer_commits": 500,
+      "long_read_holds_initial_snapshot": true,
+      "snapshot_invariant": "state/audit/meta generation remains internally consistent for entire read transaction",
+      "writer_stall_method": "compare maximum concurrent-snapshot commit with baseline p99"
+    },
+    "growth_compaction": {
+      "cycles": 10,
+      "records_per_cycle": 20000,
+      "value_bytes": 1024,
+      "delete_fraction_each_cycle": 0.5,
+      "live_data_definition": "sum of retained key and value byte lengths after final cycle",
+      "measurement": "database bytes before churn, before compact, and after redb compact"
+    },
+    "xchacha20poly1305": {
+      "crate": "chacha20poly1305",
+      "version": "0.11.0",
+      "message_bytes": 4096,
+      "warmup_operations": 2000,
+      "measured_operations": 20000,
+      "metrics": ["encrypt_mib_per_second", "decrypt_mib_per_second", "encrypt_p99_us", "decrypt_p99_us"],
+      "native_targets": [
+        {"target": "x86_64-unknown-linux-gnu", "host": "reference_host"},
+        {"target": "aarch64-unknown-linux-gnu", "host": "external-native-host-required"}
+      ]
+    }
+  },
+  "thresholds": {
+    "durable_commit_p99_ms_at_concurrency_32": 25.0,
+    "crash_recovery_success_percent": 100.0,
+    "snapshot_consistency_success_percent": 100.0,
+    "snapshot_writer_max_stall": "no more than baseline_p99_ms plus one observed durable commit p99",
+    "post_compaction_max_file_to_live_ratio": 3.0,
+    "xchacha20poly1305": "measurement-only; no cipher negotiation or fallback"
+  },
+  "result_contract": {
+    "raw_json": "research/ktd2/results.json",
+    "summary_markdown": "research/ktd2/RESULTS.md",
+    "redacted_command": "cargo run --release --locked --manifest-path research/ktd2/spike/Cargo.toml -- run --protocol research/ktd2/protocol.json --output research/ktd2/results.json",
+    "required_fields": ["host_fingerprint", "redb_version", "samples", "percentiles", "crash_matrix", "snapshot", "growth", "xchacha", "threshold_verdicts", "overall_verdict"]
+  },
+  "excluded": ["bounded executor backpressure", "queue saturation policy", "release throughput promises"]
+}
