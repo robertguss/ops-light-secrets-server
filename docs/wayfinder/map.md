@@ -137,6 +137,12 @@ to decide before implementation starts.
   LoadCredentialEncrypted covers unattended restarts, no KMS/unseal
   ceremony. Refuse-vs-warn rationale recorded on ticket.
 
+- [Test & release weight: harness, differential suite, fuzz, attestations](tickets/T12-test-release-weight.md)
+  — verification contract kept whole, zero rows dropped: every gate is the
+  test-shaped shadow of a floor kept on T06–T11. One question asked (R38
+  posture): Robert keeps the whole attestation set in v0.1 incl. SBOM +
+  provenance. Per-gate failure map recorded on ticket.
+
 ## Not yet specified
 
 - Post-v0.1 package re-sort: the v0.2 (discovery/import) and v0.3 (automation
