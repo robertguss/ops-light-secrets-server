@@ -29,6 +29,18 @@ records the frozen protocol digest, native host fingerprint, aggregate rates,
 percentiles, and raw samples. Return that JSON artifact for review and committed
 integration; do not replace the reference-host `results.json` with it.
 
+Verify the returned artifact locally before review:
+
+```text
+cargo run --release --locked --manifest-path research/ktd2/spike/Cargo.toml -- verify-aarch64-xchacha --protocol research/ktd2/protocol.json --evidence aarch64-xchacha-results.json
+```
+
+The verifier requires an exact evidence schema, matching frozen-protocol
+digest, native aarch64 kernel and build fingerprints, the registered 4 KiB ×
+20,000-operation workload, complete sorted raw samples, and summaries that
+recompute from the raw timings. It rejects missing, extra, altered, cross-host,
+or non-finite fields.
+
 The frozen run completed with a `redb_pass` verdict. See
 [`RESULTS.md`](RESULTS.md) for the threshold summary and
 [`results.json`](results.json) for the raw samples and execution-host

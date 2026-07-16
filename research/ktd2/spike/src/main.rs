@@ -50,17 +50,22 @@ fn real_main() -> AnyResult<()> {
         {
             measure_aarch64_xchacha(Path::new(&args[3]), Path::new(&args[5]))
         }
+        Some("verify-aarch64-xchacha")
+            if args.len() == 6 && args[2] == "--protocol" && args[4] == "--evidence" =>
+        {
+            verify_aarch64_xchacha(Path::new(&args[3]), Path::new(&args[5]))
+        }
         Some("crash-child") if args.len() == 5 => {
             crash_child(Path::new(&args[2]), &args[3], args[4].parse()?)
         }
         _ => Err(
-            "usage: ktd2-spike (run|measure-aarch64-xchacha) --protocol PATH --output PATH".into(),
+            "usage: ktd2-spike (run|measure-aarch64-xchacha|verify-aarch64-xchacha) --protocol PATH (--output|--evidence) PATH".into(),
         ),
     }
 }
 
 fn measure_aarch64_xchacha(protocol_path: &Path, output_path: &Path) -> AnyResult<()> {
-    require_aarch64(env::consts::ARCH)?;
+    require_native_aarch64()?;
     let protocol_bytes = fs::read(protocol_path)?;
     let protocol: Value = serde_json::from_slice(&protocol_bytes)?;
     validate_protocol(&protocol)?;
@@ -76,12 +81,172 @@ fn measure_aarch64_xchacha(protocol_path: &Path, output_path: &Path) -> AnyResul
     Ok(())
 }
 
+fn verify_aarch64_xchacha(protocol_path: &Path, evidence_path: &Path) -> AnyResult<()> {
+    let protocol_bytes = fs::read(protocol_path)?;
+    let protocol: Value = serde_json::from_slice(&protocol_bytes)?;
+    validate_protocol(&protocol)?;
+    let evidence: Value = serde_json::from_slice(&fs::read(evidence_path)?)?;
+    verify_aarch64_evidence_value(&evidence, blake3::hash(&protocol_bytes).to_hex().as_ref())
+}
+
+fn verify_aarch64_evidence_value(evidence: &Value, protocol_digest: &str) -> AnyResult<()> {
+    exact_keys(
+        evidence,
+        &[
+            "schema",
+            "evidence_kind",
+            "measured_at_unix_seconds",
+            "protocol_digest_blake3",
+            "execution_host_observation",
+            "xchacha",
+        ],
+        "evidence",
+    )?;
+    if evidence["schema"] != 1
+        || evidence["evidence_kind"] != "native_aarch64_xchacha20poly1305"
+        || evidence["protocol_digest_blake3"] != protocol_digest
+        || evidence["measured_at_unix_seconds"].as_u64().is_none()
+    {
+        return Err("aarch64 evidence envelope mismatch".into());
+    }
+
+    let host = &evidence["execution_host_observation"];
+    exact_keys(
+        host,
+        &[
+            "architecture",
+            "machine_architecture",
+            "cpu_count",
+            "cpu_model",
+            "memory_gib",
+            "kernel",
+            "benchmark_mount",
+        ],
+        "execution_host_observation",
+    )?;
+    if host["architecture"] != "aarch64"
+        || host["machine_architecture"] != "aarch64"
+        || host["cpu_count"].as_u64().is_none_or(|count| count == 0)
+        || !positive_finite(&host["memory_gib"])
+        || host["cpu_model"].as_str().is_none_or(str::is_empty)
+        || host["kernel"]
+            .as_str()
+            .is_none_or(|kernel| !kernel.contains("Linux") || !kernel.contains("aarch64"))
+        || host["benchmark_mount"].as_str().is_none_or(str::is_empty)
+    {
+        return Err("aarch64 host fingerprint mismatch".into());
+    }
+
+    let measurement = &evidence["xchacha"];
+    exact_keys(
+        measurement,
+        &[
+            "target",
+            "message_bytes",
+            "measured_operations",
+            "encrypt_elapsed_seconds",
+            "decrypt_elapsed_seconds",
+            "encrypt_mib_per_second",
+            "decrypt_mib_per_second",
+            "encrypt_p99_us",
+            "decrypt_p99_us",
+            "raw_encrypt_latency_us",
+            "raw_decrypt_latency_us",
+        ],
+        "xchacha",
+    )?;
+    if measurement["target"] != "aarch64"
+        || measurement["message_bytes"] != 4096
+        || measurement["measured_operations"] != 20_000
+    {
+        return Err("aarch64 XChaCha workload mismatch".into());
+    }
+    let encrypt = latency_samples(&measurement["raw_encrypt_latency_us"])?;
+    let decrypt = latency_samples(&measurement["raw_decrypt_latency_us"])?;
+    if encrypt.len() != 20_000 || decrypt.len() != 20_000 {
+        return Err("aarch64 XChaCha raw sample count mismatch".into());
+    }
+    let encrypt_elapsed = finite_number(&measurement["encrypt_elapsed_seconds"])?;
+    let decrypt_elapsed = finite_number(&measurement["decrypt_elapsed_seconds"])?;
+    let measured_mib = (20_000.0 * 4096.0) / (1024.0 * 1024.0);
+    verify_float(
+        &measurement["encrypt_mib_per_second"],
+        measured_mib / encrypt_elapsed,
+    )?;
+    verify_float(
+        &measurement["decrypt_mib_per_second"],
+        measured_mib / decrypt_elapsed,
+    )?;
+    verify_float(&measurement["encrypt_p99_us"], percentile_us(&encrypt, 99))?;
+    verify_float(&measurement["decrypt_p99_us"], percentile_us(&decrypt, 99))?;
+    Ok(())
+}
+
+fn exact_keys(value: &Value, expected: &[&str], name: &str) -> AnyResult<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{name} is not an object"))?;
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(format!("{name} fields mismatch").into());
+    }
+    Ok(())
+}
+
+fn latency_samples(value: &Value) -> AnyResult<Vec<u64>> {
+    let samples = value
+        .as_array()
+        .ok_or("XChaCha raw samples are not an array")?
+        .iter()
+        .map(|sample| sample.as_u64().ok_or("XChaCha raw sample is not u64"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !samples.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return Err("XChaCha raw samples are not sorted".into());
+    }
+    Ok(samples)
+}
+
+fn finite_number(value: &Value) -> AnyResult<f64> {
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number > 0.0)
+        .ok_or_else(|| "measurement is not a positive finite number".into())
+}
+
+fn positive_finite(value: &Value) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number > 0.0)
+}
+
+fn verify_float(value: &Value, expected: f64) -> AnyResult<()> {
+    let observed = finite_number(value)?;
+    if (observed - expected).abs() > expected.abs().max(1.0) * 1e-12 {
+        return Err("measurement summary does not match raw evidence".into());
+    }
+    Ok(())
+}
+
 fn require_aarch64(architecture: &str) -> AnyResult<()> {
     if architecture == "aarch64" {
         Ok(())
     } else {
         Err("native aarch64 execution required; cross-builds and emulation are not evidence".into())
     }
+}
+
+fn require_native_aarch64() -> AnyResult<()> {
+    require_aarch64(env::consts::ARCH)?;
+    if command_output("uname", &["-m"])? != "aarch64" {
+        return Err("kernel does not report native aarch64".into());
+    }
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?.to_ascii_lowercase();
+    if ["genuineintel", "authenticamd", "x86_64"]
+        .iter()
+        .any(|marker| cpuinfo.contains(marker))
+    {
+        return Err("host CPU fingerprint is not aarch64".into());
+    }
+    Ok(())
 }
 
 fn run(protocol_path: &Path, output_path: &Path) -> AnyResult<()> {
@@ -241,11 +406,31 @@ fn validate_protocol(value: &Value) -> AnyResult<()> {
 }
 
 fn execution_host_observation() -> AnyResult<Value> {
-    let cpu_model = fs::read_to_string("/proc/cpuinfo")?
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
+    let cpu_model = cpuinfo
         .lines()
         .find_map(|line| line.strip_prefix("model name\t: "))
-        .ok_or("CPU model unavailable")?
-        .to_owned();
+        .map(str::to_owned)
+        .or_else(|| {
+            let identity = cpuinfo
+                .lines()
+                .filter(|line| {
+                    [
+                        "CPU implementer",
+                        "CPU architecture",
+                        "CPU variant",
+                        "CPU part",
+                        "CPU revision",
+                        "Hardware",
+                    ]
+                    .iter()
+                    .any(|key| line.starts_with(key))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            (!identity.is_empty()).then_some(identity)
+        })
+        .ok_or("CPU model unavailable")?;
     let memory_kib: u64 = fs::read_to_string("/proc/meminfo")?
         .lines()
         .find_map(|line| {
@@ -255,9 +440,11 @@ fn execution_host_observation() -> AnyResult<Value> {
         .ok_or("memory total unavailable")?
         .parse()?;
     let uname = command_output("uname", &["-srmo"])?;
+    let machine_architecture = command_output("uname", &["-m"])?;
     let mount = command_output("findmnt", &["-T", "/tmp", "-no", "SOURCE,FSTYPE,OPTIONS"])?;
     Ok(json!({
         "architecture": env::consts::ARCH,
+        "machine_architecture": machine_architecture,
         "cpu_count": thread::available_parallelism()?.get(),
         "cpu_model": cpu_model,
         "memory_gib": memory_kib as f64 / 1024.0 / 1024.0,
@@ -729,6 +916,8 @@ fn xchacha_test() -> AnyResult<Value> {
         "target": env::consts::ARCH,
         "message_bytes": 4096,
         "measured_operations": 20000,
+        "encrypt_elapsed_seconds": encrypt_elapsed,
+        "decrypt_elapsed_seconds": decrypt_elapsed,
         "encrypt_mib_per_second": mib / encrypt_elapsed,
         "decrypt_mib_per_second": mib / decrypt_elapsed,
         "encrypt_p99_us": percentile_us(&encrypt_us, 99),
@@ -772,6 +961,38 @@ fn write_summary(path: PathBuf, result: &Value) -> AnyResult<()> {
 mod tests {
     use super::*;
 
+    fn valid_aarch64_evidence(digest: &str) -> Value {
+        let samples = vec![1_u64; 20_000];
+        json!({
+            "schema": 1,
+            "evidence_kind": "native_aarch64_xchacha20poly1305",
+            "measured_at_unix_seconds": 1_784_000_000_u64,
+            "protocol_digest_blake3": digest,
+            "execution_host_observation": {
+                "architecture": "aarch64",
+                "machine_architecture": "aarch64",
+                "cpu_count": 4,
+                "cpu_model": "ARM Neoverse",
+                "memory_gib": 8.0,
+                "kernel": "Linux 6.8 aarch64 GNU/Linux",
+                "benchmark_mount": "/dev/vda1 ext4 rw,relatime",
+            },
+            "xchacha": {
+                "target": "aarch64",
+                "message_bytes": 4096,
+                "measured_operations": 20_000,
+                "encrypt_elapsed_seconds": 1.0,
+                "decrypt_elapsed_seconds": 1.0,
+                "encrypt_mib_per_second": 78.125,
+                "decrypt_mib_per_second": 78.125,
+                "encrypt_p99_us": 1.0,
+                "decrypt_p99_us": 1.0,
+                "raw_encrypt_latency_us": samples,
+                "raw_decrypt_latency_us": vec![1_u64; 20_000],
+            },
+        })
+    }
+
     #[test]
     fn architecture_evidence_gate_refuses_non_native_targets() {
         assert!(require_aarch64("aarch64").is_ok());
@@ -779,6 +1000,29 @@ mod tests {
             require_aarch64("x86_64").unwrap_err().to_string(),
             "native aarch64 execution required; cross-builds and emulation are not evidence"
         );
+    }
+
+    #[test]
+    fn aarch64_evidence_verifier_recomputes_and_rejects_tampering() {
+        let digest = "frozen-protocol-digest";
+        let valid = valid_aarch64_evidence(digest);
+        verify_aarch64_evidence_value(&valid, digest).unwrap();
+
+        let mut wrong_digest = valid.clone();
+        wrong_digest["protocol_digest_blake3"] = json!("other");
+        assert!(verify_aarch64_evidence_value(&wrong_digest, digest).is_err());
+
+        let mut wrong_rate = valid.clone();
+        wrong_rate["xchacha"]["encrypt_mib_per_second"] = json!(99.0);
+        assert!(verify_aarch64_evidence_value(&wrong_rate, digest).is_err());
+
+        let mut wrong_host = valid.clone();
+        wrong_host["execution_host_observation"]["machine_architecture"] = json!("x86_64");
+        assert!(verify_aarch64_evidence_value(&wrong_host, digest).is_err());
+
+        let mut extra_field = valid;
+        extra_field["xchacha"]["unregistered"] = json!(true);
+        assert!(verify_aarch64_evidence_value(&extra_field, digest).is_err());
     }
 
     #[test]
