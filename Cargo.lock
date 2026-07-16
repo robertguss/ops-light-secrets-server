@@ -855,6 +855,7 @@ dependencies = [
  "clap",
  "libc",
  "rcgen",
+ "redb",
  "rpassword",
  "rustls",
  "rustls-pemfile",
