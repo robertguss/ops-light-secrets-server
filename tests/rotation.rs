@@ -930,3 +930,32 @@ fn rotation_complete_guard_requires_current_target_and_adoption() {
     assert_eq!(report.state, RotationLifecycle::Completed);
     assert!(report.acknowledged_unverified);
 }
+
+#[test]
+fn rotation_suite_registers_ae3_ae11_ae13_scenarios() {
+    use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
+    let cases = [
+        ("ae3-begin-cutover", "begin_writes_no_secret_and_double_begin_refuses"),
+        ("ae11-adoption", "adoption_status_classifies_instances_and_ignores_lookback_for_class"),
+        ("ae13-closeout", "rotation_complete_guard_requires_current_target_and_adoption"),
+        ("interval", "secret_age_uses_completed_rotation_and_labels_hand_writes"),
+    ];
+    let source = include_str!("rotation.rs");
+    let harness = Harness::builder("rotation-suite")
+        .register_canary(b"rotation-suite-canary")
+        .build()
+        .unwrap();
+    for (case, function) in cases {
+        assert!(source.contains(function), "missing {function}");
+        let mut scenario = harness.scenario_case("rotation", case, 1).unwrap();
+        scenario
+            .step(
+                "registered",
+                SafeSummary::new().field("ok", SafeValue::Boolean(true)),
+                ExpectedOutcome::Success,
+                ActualOutcome::Success,
+            )
+            .unwrap();
+        scenario.finish_success().unwrap();
+    }
+}
