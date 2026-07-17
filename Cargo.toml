@@ -84,3 +84,7 @@ path = "tests/acceptance/mod.rs"
 [[test]]
 name = "extended_fault"
 path = "tests/fault/extended_fault.rs"
+
+[[test]]
+name = "verification_contract"
+path = "tests/verification_contract.rs"
