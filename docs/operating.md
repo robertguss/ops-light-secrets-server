@@ -217,6 +217,31 @@ The unanchored audit tail retains the documented live-compromise limitation.
 A metadata-key rotation changes these tuples and is incomplete until its new
 state digest is externally checkpointed.
 
+## External audit checkpoints
+
+Daemon stores checkpoint public keys and lineage only. Private Ed25519 keys
+must remain in separate custody and enter only short-lived offline commands;
+daemon has no checkpoint timer or private-key input. `audit checkpoint prepare`
+atomically appends prepare event as last anchored sequence, computes state
+digest inside same redb write transaction, and stores canonical descriptor.
+`audit checkpoint sign --descriptor PATH --public-key-descriptor PATH
+--private-key-source SOURCE --output PATH` reads exactly 32 raw private-key
+bytes from approved typed source, checks descriptor key ID and retained public
+key validity window, signs under checkpoint domain, zeroizes bytes, and creates
+detached file with mode 0600 using no-follow, fsync, and atomic rename.
+Registration verifies retained public key and chains to last registered
+checkpoint. Abandoned prepares remain visible but never become previous link.
+
+Checkpoint freshness is warning, never data-plane readiness failure. Defaults:
+`checkpoint.max_age_seconds = 86400` and
+`checkpoint.max_unanchored_events = 10000`. Environment names are
+`OLSS_CHECKPOINT_MAX_AGE_SECONDS` and
+`OLSS_CHECKPOINT_MAX_UNANCHORED_EVENTS`. Stale becomes true only when registered
+checkpoint age is greater than max age or unanchored tail count is greater than
+max events; equality remains fresh. Mirror detached checkpoints off-host with
+operator-owned rsync, cron, or systemd path units. Server sends no webhook or
+object-store traffic.
+
 ## Encrypted record format
 
 Encrypted records use the fixed, NCC-audited RustCrypto XChaCha20-Poly1305

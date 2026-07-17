@@ -1,9 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
-use ops_light_secrets_server::config::Config;
+use ops_light_secrets_server::config::{Config, SecretSource, SystemSecretInput};
 use ops_light_secrets_server::startup::validate_serve_shell;
 use ops_light_secrets_server::store::keyring::{
     AgeIdentityMetadata, IdentityPurpose, SystemRandom, generate_age_identity,
+};
+use ops_light_secrets_server::store::{
+    Canonical, CheckpointDescriptor, CheckpointPublicKey, sign_checkpoint_authorized,
+    write_checkpoint_atomic,
 };
 use std::ffi::OsString;
 use std::io::Write;
@@ -12,7 +16,8 @@ use std::path::PathBuf;
 
 const LONG_ABOUT: &str = "Local secrets service. Configuration comes from --config and OLSS_* environment settings.\n\
 Secret settings accept descriptors only: stdin, fd:N, credential:NAME, tty, or env:NAME with --unsafe-dev-secret-env.\n\
-TLS files: OLSS_TLS_CERTIFICATE and OLSS_TLS_PRIVATE_KEY. Mount settings: OLSS_MOUNTS_SECRET_CAS_REQUIRED and OLSS_MOUNTS_SECRET_MAX_VERSIONS.";
+TLS files: OLSS_TLS_CERTIFICATE and OLSS_TLS_PRIVATE_KEY. Mount settings: OLSS_MOUNTS_SECRET_CAS_REQUIRED and OLSS_MOUNTS_SECRET_MAX_VERSIONS.
+Checkpoint settings: OLSS_CHECKPOINT_MAX_AGE_SECONDS and OLSS_CHECKPOINT_MAX_UNANCHORED_EVENTS.";
 
 #[derive(Debug, Parser)]
 #[command(name = "ops-light-secrets-server", version, about, long_about = LONG_ABOUT)]
@@ -56,6 +61,42 @@ enum Command {
     Key {
         #[command(subcommand)]
         command: KeyCommand,
+    },
+    /// External audit checkpoint operations
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditCommand {
+    /// Checkpoint preparation, offline signing, and registration
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CheckpointCommand {
+    /// Sign a canonical prepared descriptor without contacting daemon
+    Sign {
+        /// Canonical descriptor emitted by checkpoint prepare
+        #[arg(long)]
+        descriptor: PathBuf,
+
+        /// Canonical retained public-key descriptor, including validity window
+        #[arg(long)]
+        public_key_descriptor: PathBuf,
+
+        /// Approved typed source: stdin, fd:N, credential:NAME, tty, or guarded env:NAME
+        #[arg(long)]
+        private_key_source: SecretSource,
+
+        /// New detached checkpoint file; existing paths and symlinks are refused
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -150,6 +191,27 @@ pub fn run() -> Result<(), String> {
     {
         return run_age_identity_generate((*purpose).into(), *private_output_fd, *output);
     }
+    if let Some(Command::Audit {
+        command:
+            AuditCommand::Checkpoint {
+                command:
+                    CheckpointCommand::Sign {
+                        descriptor,
+                        public_key_descriptor,
+                        private_key_source,
+                        output,
+                    },
+            },
+    }) = &cli.command
+    {
+        return run_checkpoint_sign(
+            descriptor,
+            public_key_descriptor,
+            private_key_source,
+            output,
+            cli.unsafe_dev_secret_env,
+        );
+    }
 
     if let Some(command) = &cli.command {
         let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
@@ -217,9 +279,47 @@ pub fn run() -> Result<(), String> {
                 return Err("clock_repair_refused code=integration_pending setting=credential_epoch_replacement remediation='complete U8.3 R41 primitive'".into());
             }
             Command::Key { .. } => unreachable!("stateless key command handled before config"),
+            Command::Audit { .. } => unreachable!("offline audit command handled before config"),
         }
     }
     Ok(())
+}
+
+fn run_checkpoint_sign(
+    descriptor_path: &std::path::Path,
+    public_key_descriptor_path: &std::path::Path,
+    source: &SecretSource,
+    output: &std::path::Path,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    if matches!(source, SecretSource::UnsafeEnvironment(_)) && !unsafe_environment {
+        return Err(
+            "checkpoint signing key environment source requires --unsafe-dev-secret-env".into(),
+        );
+    }
+    let descriptor = std::fs::read(descriptor_path)
+        .map_err(|_| "checkpoint descriptor read failed")
+        .and_then(|bytes| {
+            CheckpointDescriptor::decode(&bytes)
+                .map_err(|_| "checkpoint descriptor verification failed")
+        })?;
+    let public = std::fs::read(public_key_descriptor_path)
+        .map_err(|_| "checkpoint public key descriptor read failed")
+        .and_then(|bytes| {
+            CheckpointPublicKey::decode(&bytes)
+                .map_err(|_| "checkpoint public key descriptor verification failed")
+        })?;
+    let mut input = SystemSecretInput::from_environment();
+    let secret = source
+        .read("checkpoint.private_key_source", &mut input)
+        .map_err(|_| "checkpoint private key source failed")?;
+    let mut private: [u8; 32] = secret
+        .expose()
+        .try_into()
+        .map_err(|_| "checkpoint private key must be exactly 32 raw bytes")?;
+    let checkpoint = sign_checkpoint_authorized(descriptor, &public, &mut private)
+        .map_err(|error| error.to_string())?;
+    write_checkpoint_atomic(output, &checkpoint).map_err(|error| error.to_string())
 }
 
 fn parse_private_fd(value: &str) -> Result<i32, String> {

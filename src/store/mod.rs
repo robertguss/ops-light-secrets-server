@@ -2,6 +2,7 @@
 
 mod aead;
 mod audit;
+mod checkpoint;
 mod codec;
 #[allow(dead_code)]
 mod coordinator;
@@ -19,6 +20,13 @@ pub use audit::{
     AuditAuthorization, AuditCapability, AuditEnvelope, AuditError, AuditEvent, AuditOperation,
     AuditOutcome, AuditOverloadCount, AuditReason, AuditResource, AuditStateCommitment,
     FloodAggregate, StoredAuditEntry, genesis_event, verify_chain,
+};
+pub use checkpoint::{
+    CHECKPOINT_DESCRIPTOR_VERSION, CHECKPOINT_FILE_VERSION, CheckpointDescriptor, CheckpointError,
+    CheckpointFreshness, CheckpointHealth, CheckpointKeyStatus, CheckpointPublicKey,
+    CheckpointSignature, CheckpointTrust, VerificationTier, checkpoint_digest, reconcile_state,
+    sign_checkpoint, sign_checkpoint_authorized, signing_key_id, stale_checkpoint,
+    verify_audit_checkpoint, verify_checkpoint, verify_checkpoint_chain, write_checkpoint_atomic,
 };
 pub use codec::{Canonical, CodecError};
 pub(crate) use codec::{Decoder, Encoder};
@@ -53,6 +61,10 @@ const AUDIT_EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_
 const AUDIT_HEAD: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_head");
 const IDENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identities");
 const GRANTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("grants");
+const CHECKPOINT_PREPARED: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("checkpoint_prepared");
+const CHECKPOINT_REGISTERED: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("checkpoint_registered");
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
@@ -1286,6 +1298,12 @@ impl Store {
                 .map_err(|_| StoreError::Database)?
                 .insert(grant.value.id.as_slice(), grant.encode()?.as_slice())
                 .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CHECKPOINT_PREPARED)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CHECKPOINT_REGISTERED)
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {
@@ -1332,6 +1350,12 @@ impl Store {
                 .open_table(IDENTITIES)
                 .map_err(|_| StoreError::Database)?;
             write.open_table(GRANTS).map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CHECKPOINT_PREPARED)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CHECKPOINT_REGISTERED)
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {

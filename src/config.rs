@@ -10,6 +10,8 @@ use std::str::FromStr;
 use zeroize::Zeroizing;
 
 const DEFAULT_MAX_VERSIONS: u16 = 10;
+pub const DEFAULT_CHECKPOINT_MAX_AGE_SECONDS: u64 = 86_400;
+pub const DEFAULT_CHECKPOINT_MAX_UNANCHORED_EVENTS: u64 = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecretSource {
@@ -205,6 +207,13 @@ pub struct Config {
     pub tls_key_passphrase: Option<SecretSource>,
     pub tls: TlsFiles,
     pub mount: SecretMount,
+    pub checkpoint: CheckpointConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckpointConfig {
+    pub max_age_seconds: u64,
+    pub max_unanchored_events: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -258,6 +267,12 @@ impl Config {
                 }
                 "OLSS_MOUNTS_SECRET_MAX_VERSIONS" => {
                     self.mount.max_versions = parse_max_versions(&key, &value)?
+                }
+                "OLSS_CHECKPOINT_MAX_AGE_SECONDS" => {
+                    self.checkpoint.max_age_seconds = parse_positive_u64(&key, &value)?
+                }
+                "OLSS_CHECKPOINT_MAX_UNANCHORED_EVENTS" => {
+                    self.checkpoint.max_unanchored_events = parse_positive_u64(&key, &value)?
                 }
                 _ => return Err(ConfigError::unknown(&key)),
             }
@@ -329,6 +344,14 @@ fn parse_max_versions(setting: &str, value: &str) -> Result<u16, ConfigError> {
         .map_err(|_| ConfigError::invalid(setting, "integer 0..=1024"))
 }
 
+fn parse_positive_u64(setting: &str, value: &str) -> Result<u64, ConfigError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ConfigError::invalid(setting, "positive integer"))
+}
+
 fn deserialize(contents: &str) -> Result<RawConfig, ConfigError> {
     let deserializer = toml::Deserializer::parse(contents).map_err(|error| {
         let setting = error
@@ -366,6 +389,23 @@ struct RawConfig {
     secrets: RawSecrets,
     tls: RawTls,
     mounts: RawMounts,
+    checkpoint: RawCheckpoint,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawCheckpoint {
+    max_age_seconds: u64,
+    max_unanchored_events: u64,
+}
+
+impl Default for RawCheckpoint {
+    fn default() -> Self {
+        Self {
+            max_age_seconds: DEFAULT_CHECKPOINT_MAX_AGE_SECONDS,
+            max_unanchored_events: DEFAULT_CHECKPOINT_MAX_UNANCHORED_EVENTS,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +481,10 @@ impl TryFrom<RawConfig> for Config {
             mount: SecretMount {
                 cas_required: raw.mounts.secret.cas_required,
                 max_versions: raw.mounts.secret.max_versions,
+            },
+            checkpoint: CheckpointConfig {
+                max_age_seconds: raw.checkpoint.max_age_seconds,
+                max_unanchored_events: raw.checkpoint.max_unanchored_events,
             },
         })
     }
@@ -623,6 +667,30 @@ mod tests {
 
         assert!(config.mount.cas_required);
         assert_eq!(config.mount.max_versions, 21);
+    }
+
+    #[test]
+    fn checkpoint_defaults_and_environment_bounds_are_stable() {
+        let config = Config::try_from(deserialize("").unwrap()).unwrap();
+        assert_eq!(config.checkpoint.max_age_seconds, 86_400);
+        assert_eq!(config.checkpoint.max_unanchored_events, 10_000);
+
+        let raw =
+            deserialize("[checkpoint]\nmax_age_seconds = 60\nmax_unanchored_events = 7\n").unwrap();
+        let mut config = Config::try_from(raw).unwrap();
+        config
+            .apply_environment([
+                ("OLSS_CHECKPOINT_MAX_AGE_SECONDS".into(), "120".into()),
+                ("OLSS_CHECKPOINT_MAX_UNANCHORED_EVENTS".into(), "9".into()),
+            ])
+            .unwrap();
+        assert_eq!(config.checkpoint.max_age_seconds, 120);
+        assert_eq!(config.checkpoint.max_unanchored_events, 9);
+        assert!(
+            config
+                .apply_environment([("OLSS_CHECKPOINT_MAX_AGE_SECONDS".into(), "0".into(),)])
+                .is_err()
+        );
     }
 
     #[test]

@@ -13,7 +13,10 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
-use ops_light_secrets_server::config::{Config, SecretMount, TlsFiles};
+use ops_light_secrets_server::config::{
+    CheckpointConfig, Config, DEFAULT_CHECKPOINT_MAX_AGE_SECONDS,
+    DEFAULT_CHECKPOINT_MAX_UNANCHORED_EVENTS, SecretMount, TlsFiles,
+};
 use ops_light_secrets_server::transport::{
     PreparedTlsConfig, TlsReason, TlsReloader, TlsSetting, TransportCommitError,
     TransportFingerprint, TransportFingerprintCommit,
@@ -110,6 +113,10 @@ fn configured_paths_feed_the_single_reload_primitive() {
         mount: SecretMount {
             cas_required: false,
             max_versions: 10,
+        },
+        checkpoint: CheckpointConfig {
+            max_age_seconds: DEFAULT_CHECKPOINT_MAX_AGE_SECONDS,
+            max_unanchored_events: DEFAULT_CHECKPOINT_MAX_UNANCHORED_EVENTS,
         },
     };
     let commit = CommitSpy::default();
