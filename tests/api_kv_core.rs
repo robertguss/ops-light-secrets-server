@@ -12,7 +12,8 @@ use ops_light_secrets_server::identity::{
 };
 use ops_light_secrets_server::input_hygiene::InputHygieneState;
 use ops_light_secrets_server::kv::{
-    CasSource, KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService, kv_router,
+    CasSource, KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService, MAX_VERSION_BATCH,
+    MAX_VERSIONS, MaxVersionsSource, MetadataUpdate, kv_router,
 };
 use ops_light_secrets_server::raw_target::parse_raw_target;
 use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
@@ -227,6 +228,11 @@ fn mount_default_is_dynamic_and_path_override_wins_in_both_directions() {
             CasSource::MountDefault
         );
         catalog.set_mount_cas_required(false);
+        assert_eq!(
+            catalog.effective_max_versions("inherited").source,
+            MaxVersionsSource::MountDefault
+        );
+        assert_eq!(catalog.effective_max_versions("inherited").effective, 10);
     });
     assert_eq!(
         service
@@ -437,4 +443,266 @@ fn audit_type_has_no_secret_value_or_body_fields() {
         let rendered = format!("{:?}", catalog.audit());
         assert!(!rendered.contains("PRIVATE_CANARY"));
     });
+}
+
+#[test]
+fn deletion_metadata_and_retention_state_machine_is_atomic_and_bounded() {
+    let service = service(
+        &[
+            Capability::SecretWrite,
+            Capability::SecretReadCurrent,
+            Capability::SecretReadHistory,
+            Capability::SecretList,
+            Capability::SecretSoftDelete,
+            Capability::SecretUndelete,
+            Capability::SecretDestroy,
+        ],
+        false,
+    );
+    let write = endpoint(&Method::POST, "/v1/secret/data/lifecycle");
+    for value in 1..=3 {
+        service
+            .write(
+                IDENTITY,
+                &write,
+                data(value),
+                (value > 1).then_some((value - 1) as u64),
+            )
+            .unwrap();
+    }
+    let delete = endpoint(&Method::POST, "/v1/secret/delete/lifecycle");
+    let undelete = endpoint(&Method::POST, "/v1/secret/undelete/lifecycle");
+    let destroy = endpoint(&Method::POST, "/v1/secret/destroy/lifecycle");
+    service
+        .mutate_versions(
+            IDENTITY,
+            &delete,
+            &[1, 2],
+            ops_light_secrets_server::identity::SecretAction::SoftDelete,
+        )
+        .unwrap();
+    assert!(matches!(
+        service.mutate_versions(
+            IDENTITY,
+            &undelete,
+            &[1, 99],
+            ops_light_secrets_server::identity::SecretAction::Undelete
+        ),
+        Err(KvError::NotFound)
+    ));
+    let first = endpoint(&Method::GET, "/v1/secret/data/lifecycle?version=1");
+    assert!(matches!(
+        service.read(IDENTITY, &first),
+        Err(KvError::VersionUnavailable {
+            destroyed: false,
+            ..
+        })
+    ));
+    service
+        .mutate_versions(
+            IDENTITY,
+            &undelete,
+            &[1],
+            ops_light_secrets_server::identity::SecretAction::Undelete,
+        )
+        .unwrap();
+    assert_eq!(
+        service.read(IDENTITY, &first).unwrap().data,
+        json!({"value": 1})
+    );
+    service
+        .mutate_versions(
+            IDENTITY,
+            &destroy,
+            &[1],
+            ops_light_secrets_server::identity::SecretAction::Destroy,
+        )
+        .unwrap();
+    service
+        .mutate_versions(
+            IDENTITY,
+            &undelete,
+            &[1],
+            ops_light_secrets_server::identity::SecretAction::Undelete,
+        )
+        .unwrap();
+    assert!(matches!(
+        service.read(IDENTITY, &first),
+        Err(KvError::VersionUnavailable {
+            destroyed: true,
+            ..
+        })
+    ));
+
+    let metadata_endpoint = endpoint(&Method::GET, "/v1/secret/metadata/lifecycle");
+    service
+        .update_metadata(
+            IDENTITY,
+            &metadata_endpoint,
+            MetadataUpdate {
+                cas_required: Some(true),
+                max_versions: Some(1),
+                delete_version_after: Some("0s".into()),
+                custom_metadata: Some(std::collections::BTreeMap::from([(
+                    "owner".into(),
+                    "platform".into(),
+                )])),
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            service.read(IDENTITY, &first),
+            Err(KvError::VersionUnavailable {
+                destroyed: true,
+                ..
+            })
+        ),
+        "metadata update must not eagerly prune"
+    );
+    let metadata = service.metadata(IDENTITY, &metadata_endpoint).unwrap();
+    assert_eq!(metadata["max_versions"], 1);
+    assert_eq!(metadata["custom_metadata"]["owner"], "platform");
+    assert_eq!(metadata["versions"]["1"]["destroyed"], true);
+    assert_eq!(MAX_VERSIONS, 1_024);
+    assert_eq!(
+        service.update_metadata(
+            IDENTITY,
+            &metadata_endpoint,
+            MetadataUpdate {
+                cas_required: None,
+                max_versions: Some(MAX_VERSIONS + 1),
+                delete_version_after: None,
+                custom_metadata: None,
+            }
+        ),
+        Err(KvError::Invalid)
+    );
+    assert_eq!(
+        service.mutate_versions(
+            IDENTITY,
+            &delete,
+            &vec![1; MAX_VERSION_BATCH + 1],
+            ops_light_secrets_server::identity::SecretAction::SoftDelete,
+        ),
+        Err(KvError::Invalid)
+    );
+}
+
+#[tokio::test]
+async fn router_supports_all_delete_forms_metadata_and_remote_purge_refusal() {
+    let (auth, token) = auth_fixture();
+    let kv = service(
+        &[
+            Capability::SecretWrite,
+            Capability::SecretReadCurrent,
+            Capability::SecretReadHistory,
+            Capability::SecretList,
+            Capability::SecretSoftDelete,
+            Capability::SecretUndelete,
+            Capability::SecretDestroy,
+        ],
+        false,
+    );
+    let app = kv_router(auth, kv, InputHygieneState::new([9; 32]));
+    let request = |method: Method, uri: &str, body: &'static str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-vault-token", &token)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    };
+    for cas in [0, 1] {
+        let body = if cas == 0 {
+            r#"{"data":{"value":1},"options":{"cas":0}}"#
+        } else {
+            r#"{"data":{"value":2},"options":{"cas":1}}"#
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::POST, "/v1/secret/data/wire", body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    for (method, uri, body) in [
+        (Method::DELETE, "/v1/secret/data/wire", ""),
+        (
+            Method::POST,
+            "/v1/secret/undelete/wire",
+            r#"{"versions":[2]}"#,
+        ),
+        (
+            Method::POST,
+            "/v1/secret/delete/wire",
+            r#"{"versions":[1,2]}"#,
+        ),
+        (
+            Method::POST,
+            "/v1/secret/destroy/wire",
+            r#"{"versions":[1]}"#,
+        ),
+        (
+            Method::POST,
+            "/v1/secret/undelete/wire",
+            r#"{"versions":[1]}"#,
+        ),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request(method, uri, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(request(Method::GET, "/v1/secret/metadata/wire", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let metadata: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(metadata["data"]["versions"]["1"]["destroyed"], true);
+    assert_eq!(metadata["data"]["versions"]["2"]["destroyed"], false);
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                Method::POST,
+                "/v1/secret/metadata/wire",
+                r#"{"cas_required":false,"max_versions":0,"delete_version_after":"0s","custom_metadata":{"team":"platform"}}"#,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let unsupported = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/v1/secret/metadata/wire",
+            r#"{"delete_version_after":"1h"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&to_bytes(unsupported.into_body(), 1024).await.unwrap())
+            .contains("delete_version_after")
+    );
+    assert_eq!(
+        app.oneshot(request(Method::DELETE, "/v1/secret/metadata/wire", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_IMPLEMENTED
+    );
 }

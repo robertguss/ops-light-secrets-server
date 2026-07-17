@@ -713,7 +713,9 @@ impl AuthorizationRequest {
             SecretAction::Metadata if endpoint.kind == EndpointKind::Metadata => {
                 (AuthorizationOperation::List, Capability::SecretList)
             }
-            SecretAction::Write if endpoint.kind == EndpointKind::Data => {
+            SecretAction::Write
+                if matches!(endpoint.kind, EndpointKind::Data | EndpointKind::Metadata) =>
+            {
                 (AuthorizationOperation::Write, Capability::SecretWrite)
             }
             SecretAction::SoftDelete if endpoint.kind == EndpointKind::Delete => (

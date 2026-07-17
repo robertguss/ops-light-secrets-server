@@ -671,6 +671,15 @@ its own `secret-list` capability. Ordinary history is pruned to `max_versions`;
 an active rotation may protect its snapshot temporarily, and clearing that
 protection immediately reapplies ordinary retention.
 
+KV deletion has three distinct meanings. Soft-delete is reversible; destroy
+removes one version's ciphertext from the active store while retaining its
+metadata marker; full purge is a separately authorized local control-plane
+operation and is never exposed by remote metadata DELETE. Destroy is logical
+unavailability, not cryptographic erasure: encrypted copies can remain in
+backups, filesystem remnants, and storage snapshots. Compaction may remove
+obsolete active-file pages but is not an erasure claim. Disposal of whole
+copies follows external backup, media, and key-custody policy.
+
 ## TLS files and live reload
 
 Configure the certificate and private key as a pair with `[tls].certificate`

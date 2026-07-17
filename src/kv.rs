@@ -9,7 +9,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
 use serde_json::{Map, Value, json};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::auth::{AuthService, AuthenticatedToken, token_auth_guard};
 use crate::identity::{AuthorizationRequest, GrantRecord, SecretAction, authorize};
@@ -19,7 +19,8 @@ use crate::store::VersionState;
 
 pub const SECRET_MOUNT: &str = "secret";
 pub const DEFAULT_MAX_VERSIONS: u16 = 10;
-pub const MAX_VERSIONS: u16 = 1_000;
+pub const MAX_VERSIONS: u16 = 1_024;
+pub const MAX_VERSION_BATCH: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CasSource {
@@ -34,6 +35,18 @@ pub struct EffectiveCasRequired {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaxVersionsSource {
+    PathOverride,
+    MountDefault,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectiveMaxVersions {
+    pub effective: u16,
+    pub source: MaxVersionsSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KvAuditOutcome {
     Succeeded,
     Denied,
@@ -45,6 +58,11 @@ pub enum KvAuditOperation {
     Read,
     Write,
     List,
+    MetadataRead,
+    MetadataWrite,
+    SoftDelete,
+    Undelete,
+    Destroy,
 }
 
 /// Secret-safe operation evidence. Values and request bodies have no field here.
@@ -62,6 +80,7 @@ struct VersionValue {
     encoded: Zeroizing<Vec<u8>>,
     created_unix_milliseconds: u64,
     state: VersionState,
+    deletion_unix_milliseconds: Option<u64>,
 }
 
 struct Entry {
@@ -71,6 +90,7 @@ struct Entry {
     max_versions: Option<u16>,
     protected_version: Option<u64>,
     retention_deferred: bool,
+    custom_metadata: BTreeMap<String, String>,
 }
 
 impl Entry {
@@ -82,6 +102,7 @@ impl Entry {
             max_versions: None,
             protected_version: None,
             retention_deferred: false,
+            custom_metadata: BTreeMap::new(),
         }
     }
 }
@@ -121,10 +142,6 @@ impl KvCatalog {
             return Err(KvError::Invalid);
         }
         self.mount_max_versions = value;
-        let paths = self.entries.keys().cloned().collect::<Vec<_>>();
-        for path in paths {
-            self.prune(&path)?;
-        }
         Ok(())
     }
 
@@ -147,7 +164,7 @@ impl KvCatalog {
             .entry(path.to_owned())
             .or_insert_with(|| Entry::new(None))
             .max_versions = value;
-        self.prune(path)
+        Ok(())
     }
 
     pub fn set_rotation_protection(
@@ -178,6 +195,19 @@ impl KvCatalog {
             None => EffectiveCasRequired {
                 effective: self.mount_cas_required,
                 source: CasSource::MountDefault,
+            },
+        }
+    }
+
+    pub fn effective_max_versions(&self, path: &str) -> EffectiveMaxVersions {
+        match self.entries.get(path).and_then(|entry| entry.max_versions) {
+            Some(effective) => EffectiveMaxVersions {
+                effective,
+                source: MaxVersionsSource::PathOverride,
+            },
+            None => EffectiveMaxVersions {
+                effective: self.mount_max_versions,
+                source: MaxVersionsSource::MountDefault,
             },
         }
     }
@@ -290,6 +320,7 @@ impl KvService {
                 encoded: Zeroizing::new(encoded),
                 created_unix_milliseconds: created,
                 state: VersionState::Live,
+                deletion_unix_milliseconds: None,
             },
         );
         catalog.prune(&path)?;
@@ -325,15 +356,7 @@ impl KvService {
             return Err(KvError::NotFound);
         };
         let version = endpoint.version.unwrap_or(entry.current_version);
-        let selected = entry.versions.get(&version).and_then(|value| {
-            (value.state == VersionState::Live).then(|| {
-                (
-                    serde_json::from_slice(&value.encoded),
-                    value.created_unix_milliseconds,
-                )
-            })
-        });
-        let Some((data, created)) = selected else {
+        let Some(value) = entry.versions.get(&version) else {
             catalog.audit.push(audit_event(
                 identity_id,
                 &path,
@@ -344,7 +367,24 @@ impl KvService {
             ));
             return Err(KvError::NotFound);
         };
-        let data = data.map_err(|_| KvError::Internal)?;
+        if value.state != VersionState::Live {
+            let unavailable = KvError::VersionUnavailable {
+                version,
+                deletion_time: value.deletion_unix_milliseconds.unwrap_or(0),
+                destroyed: value.state == VersionState::Destroyed,
+            };
+            catalog.audit.push(audit_event(
+                identity_id,
+                &path,
+                KvAuditOperation::Read,
+                KvAuditOutcome::Failed,
+                Some(version),
+                Some("not-found"),
+            ));
+            return Err(unavailable);
+        }
+        let data = serde_json::from_slice(&value.encoded).map_err(|_| KvError::Internal)?;
+        let created = value.created_unix_milliseconds;
         catalog.audit.push(audit_event(
             identity_id,
             &path,
@@ -401,6 +441,217 @@ impl KvService {
         ));
         Ok(keys.into_iter().collect())
     }
+
+    pub fn mutate_versions(
+        &self,
+        identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+        versions: &[u64],
+        action: SecretAction,
+    ) -> Result<(), KvError> {
+        let expected = match action {
+            SecretAction::SoftDelete => EndpointKind::Delete,
+            SecretAction::Undelete => EndpointKind::Undelete,
+            SecretAction::Destroy => EndpointKind::Destroy,
+            _ => return Err(KvError::Invalid),
+        };
+        validate_endpoint(endpoint, expected)?;
+        validate_versions(versions)?;
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        authorize_operation(&mut catalog, identity_id, endpoint, action)?;
+        let path = logical_path(endpoint);
+        mutate_versions_locked(&mut catalog, identity_id, &path, versions, action)
+    }
+
+    pub fn soft_delete_latest(
+        &self,
+        identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+    ) -> Result<(), KvError> {
+        validate_endpoint(endpoint, EndpointKind::Data)?;
+        let mut delete = endpoint.clone();
+        delete.kind = EndpointKind::Delete;
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        authorize_operation(&mut catalog, identity_id, &delete, SecretAction::SoftDelete)?;
+        let path = logical_path(endpoint);
+        let version = catalog
+            .entries
+            .get(&path)
+            .map(|entry| entry.current_version)
+            .ok_or(KvError::NotFound)?;
+        mutate_versions_locked(
+            &mut catalog,
+            identity_id,
+            &path,
+            &[version],
+            SecretAction::SoftDelete,
+        )
+    }
+
+    pub fn metadata(
+        &self,
+        identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+    ) -> Result<Value, KvError> {
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        validate_endpoint(endpoint, EndpointKind::Metadata)?;
+        authorize_operation(&mut catalog, identity_id, endpoint, SecretAction::Metadata)?;
+        let path = logical_path(endpoint);
+        let entry = catalog.entries.get(&path).ok_or(KvError::NotFound)?;
+        let versions = entry
+            .versions
+            .iter()
+            .map(|(version, value)| {
+                (
+                    version.to_string(),
+                    json!({
+                        "created_time": value.created_unix_milliseconds.to_string(),
+                        "deletion_time": value.deletion_unix_milliseconds.map_or_else(String::new, |time| time.to_string()),
+                        "destroyed": value.state == VersionState::Destroyed,
+                    }),
+                )
+            })
+            .collect::<Map<String, Value>>();
+        let oldest = entry.versions.keys().next().copied().unwrap_or(0);
+        let custom = entry
+            .custom_metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect::<Map<String, Value>>();
+        let result = json!({
+            "cas_required": entry.cas_required.unwrap_or(catalog.mount_cas_required),
+            "current_version": entry.current_version,
+            "custom_metadata": custom,
+            "delete_version_after": "0s",
+            "max_versions": entry.max_versions.unwrap_or(0),
+            "oldest_version": oldest,
+            "versions": versions,
+        });
+        catalog.audit.push(audit_event(
+            identity_id,
+            &path,
+            KvAuditOperation::MetadataRead,
+            KvAuditOutcome::Succeeded,
+            None,
+            None,
+        ));
+        Ok(result)
+    }
+
+    pub fn update_metadata(
+        &self,
+        identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+        update: MetadataUpdate,
+    ) -> Result<(), KvError> {
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        validate_endpoint(endpoint, EndpointKind::Metadata)?;
+        authorize_operation(&mut catalog, identity_id, endpoint, SecretAction::Write)?;
+        if update
+            .delete_version_after
+            .as_deref()
+            .is_some_and(|value| value != "0s")
+        {
+            return Err(KvError::UnsupportedField);
+        }
+        if update
+            .max_versions
+            .is_some_and(|value| value > MAX_VERSIONS)
+        {
+            return Err(KvError::Invalid);
+        }
+        let path = logical_path(endpoint);
+        let entry = catalog
+            .entries
+            .entry(path.clone())
+            .or_insert_with(|| Entry::new(None));
+        if let Some(value) = update.cas_required {
+            entry.cas_required = Some(value);
+        }
+        if let Some(value) = update.max_versions {
+            entry.max_versions = (value != 0).then_some(value);
+        }
+        if let Some(custom) = update.custom_metadata {
+            entry.custom_metadata = custom;
+        }
+        catalog.audit.push(audit_event(
+            identity_id,
+            &path,
+            KvAuditOperation::MetadataWrite,
+            KvAuditOutcome::Succeeded,
+            None,
+            None,
+        ));
+        Ok(())
+    }
+}
+
+fn mutate_versions_locked(
+    catalog: &mut KvCatalog,
+    identity_id: [u8; 16],
+    path: &str,
+    versions: &[u64],
+    action: SecretAction,
+) -> Result<(), KvError> {
+    let now = catalog.effective_unix_milliseconds;
+    let entry = catalog.entries.get_mut(path).ok_or(KvError::NotFound)?;
+    if versions
+        .iter()
+        .any(|version| !entry.versions.contains_key(version))
+    {
+        return Err(KvError::NotFound);
+    }
+    if action == SecretAction::SoftDelete
+        && versions
+            .iter()
+            .any(|version| entry.versions[version].state == VersionState::Destroyed)
+    {
+        return Err(KvError::Invalid);
+    }
+    for version in versions {
+        let value = entry.versions.get_mut(version).ok_or(KvError::Internal)?;
+        match action {
+            SecretAction::SoftDelete => {
+                value.state = VersionState::SoftDeleted;
+                value.deletion_unix_milliseconds = Some(now);
+            }
+            SecretAction::Undelete if value.state == VersionState::SoftDeleted => {
+                value.state = VersionState::Live;
+                value.deletion_unix_milliseconds = None;
+            }
+            SecretAction::Undelete => {}
+            SecretAction::Destroy => {
+                value.encoded.zeroize();
+                value.state = VersionState::Destroyed;
+                value.deletion_unix_milliseconds = None;
+            }
+            _ => return Err(KvError::Invalid),
+        }
+    }
+    let operation = match action {
+        SecretAction::SoftDelete => KvAuditOperation::SoftDelete,
+        SecretAction::Undelete => KvAuditOperation::Undelete,
+        SecretAction::Destroy => KvAuditOperation::Destroy,
+        _ => return Err(KvError::Invalid),
+    };
+    for version in versions {
+        catalog.audit.push(audit_event(
+            identity_id,
+            path,
+            operation,
+            KvAuditOutcome::Succeeded,
+            Some(*version),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+pub struct MetadataUpdate {
+    pub cas_required: Option<bool>,
+    pub max_versions: Option<u16>,
+    pub delete_version_after: Option<String>,
+    pub custom_metadata: Option<BTreeMap<String, String>>,
 }
 
 pub struct WriteResult {
@@ -421,6 +672,12 @@ pub enum KvError {
     PermissionDenied,
     CasConflict,
     NotFound,
+    VersionUnavailable {
+        version: u64,
+        deletion_time: u64,
+        destroyed: bool,
+    },
+    UnsupportedField,
     Internal,
 }
 
@@ -453,9 +710,12 @@ fn authorize_operation(
     }
     let operation = match action {
         SecretAction::Read => KvAuditOperation::Read,
+        SecretAction::Metadata => KvAuditOperation::MetadataRead,
         SecretAction::List => KvAuditOperation::List,
         SecretAction::Write => KvAuditOperation::Write,
-        _ => return Err(KvError::Invalid),
+        SecretAction::SoftDelete => KvAuditOperation::SoftDelete,
+        SecretAction::Undelete => KvAuditOperation::Undelete,
+        SecretAction::Destroy => KvAuditOperation::Destroy,
     };
     catalog.audit.push(audit_event(
         identity_id,
@@ -564,6 +824,61 @@ async fn dispatch(
                 Err(error) => error_response(error),
             }
         }
+        (EndpointKind::Data, "DELETE") => {
+            match state
+                .service
+                .soft_delete_latest(token.identity_id, &endpoint)
+            {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error_response(error),
+            }
+        }
+        (EndpointKind::Delete | EndpointKind::Undelete | EndpointKind::Destroy, "POST") => {
+            let Some(Extension(body)) = body else {
+                return vault_error(StatusCode::BAD_REQUEST, "invalid request");
+            };
+            let Ok(versions) = parse_versions(body.0) else {
+                return vault_error(StatusCode::BAD_REQUEST, "invalid request");
+            };
+            let action = match endpoint.kind {
+                EndpointKind::Delete => SecretAction::SoftDelete,
+                EndpointKind::Undelete => SecretAction::Undelete,
+                EndpointKind::Destroy => SecretAction::Destroy,
+                _ => unreachable!(),
+            };
+            match state
+                .service
+                .mutate_versions(token.identity_id, &endpoint, &versions, action)
+            {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error_response(error),
+            }
+        }
+        (EndpointKind::Metadata, "GET") => {
+            match state.service.metadata(token.identity_id, &endpoint) {
+                Ok(metadata) => (StatusCode::OK, Json(json!({"data": metadata}))).into_response(),
+                Err(error) => error_response(error),
+            }
+        }
+        (EndpointKind::Metadata, "POST" | "PUT") => {
+            let Some(Extension(body)) = body else {
+                return vault_error(StatusCode::BAD_REQUEST, "invalid request");
+            };
+            let Ok(update) = parse_metadata(body.0) else {
+                return vault_error(StatusCode::BAD_REQUEST, "invalid request");
+            };
+            match state
+                .service
+                .update_metadata(token.identity_id, &endpoint, update)
+            {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error_response(error),
+            }
+        }
+        (EndpointKind::Metadata, "DELETE") => vault_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "remote metadata deletion is not supported",
+        ),
         (EndpointKind::List, "LIST" | "GET") => {
             match state.service.list(token.identity_id, &endpoint) {
                 Ok(keys) => (StatusCode::OK, Json(json!({"data": {"keys": keys}}))).into_response(),
@@ -598,6 +913,101 @@ fn parse_write(value: Value) -> Result<(Map<String, Value>, Option<u64>), KvErro
     Ok((data, cas))
 }
 
+fn parse_versions(value: Value) -> Result<Vec<u64>, KvError> {
+    let Value::Object(mut root) = value else {
+        return Err(KvError::Invalid);
+    };
+    if root.len() != 1 {
+        return Err(KvError::Invalid);
+    }
+    let Some(Value::Array(values)) = root.remove("versions") else {
+        return Err(KvError::Invalid);
+    };
+    let versions = values
+        .into_iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .ok_or(KvError::Invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_versions(&versions)?;
+    Ok(versions)
+}
+
+fn validate_versions(versions: &[u64]) -> Result<(), KvError> {
+    if versions.is_empty() || versions.len() > MAX_VERSION_BATCH {
+        return Err(KvError::Invalid);
+    }
+    let unique = versions.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != versions.len() || unique.contains(&0) {
+        return Err(KvError::Invalid);
+    }
+    Ok(())
+}
+
+fn parse_metadata(value: Value) -> Result<MetadataUpdate, KvError> {
+    let Value::Object(mut root) = value else {
+        return Err(KvError::Invalid);
+    };
+    if !root.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "cas_required" | "max_versions" | "delete_version_after" | "custom_metadata"
+        )
+    }) {
+        return Err(KvError::Invalid);
+    }
+    let cas_required = root
+        .remove("cas_required")
+        .map(|value| value.as_bool().ok_or(KvError::Invalid))
+        .transpose()?;
+    let max_versions = root
+        .remove("max_versions")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or(KvError::Invalid)
+        })
+        .transpose()?;
+    let delete_version_after = root
+        .remove("delete_version_after")
+        .map(|value| value.as_str().map(str::to_owned).ok_or(KvError::Invalid))
+        .transpose()?;
+    let custom_metadata = root
+        .remove("custom_metadata")
+        .map(|value| {
+            let Value::Object(values) = value else {
+                return Err(KvError::Invalid);
+            };
+            if values.len() > 64 {
+                return Err(KvError::Invalid);
+            }
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    if key.is_empty() || key.len() > 128 {
+                        return Err(KvError::Invalid);
+                    }
+                    let value = value.as_str().ok_or(KvError::Invalid)?.to_owned();
+                    if value.len() > 512 {
+                        return Err(KvError::Invalid);
+                    }
+                    Ok((key, value))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+        })
+        .transpose()?;
+    Ok(MetadataUpdate {
+        cas_required,
+        max_versions,
+        delete_version_after,
+        custom_metadata,
+    })
+}
+
 fn version_metadata(created: u64, version: u64) -> Value {
     json!({
         "created_time": created.to_string(),
@@ -618,6 +1028,26 @@ fn error_response(error: KvError) -> Response {
             "check-and-set parameter did not match the current version",
         ),
         KvError::NotFound => vault_error(StatusCode::NOT_FOUND, "secret not found"),
+        KvError::VersionUnavailable {
+            version,
+            deletion_time,
+            destroyed,
+        } => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "errors": ["secret not found"],
+                "data": {"metadata": {
+                    "version": version,
+                    "deletion_time": if deletion_time == 0 { String::new() } else { deletion_time.to_string() },
+                    "destroyed": destroyed,
+                }}
+            })),
+        )
+            .into_response(),
+        KvError::UnsupportedField => vault_error(
+            StatusCode::BAD_REQUEST,
+            "delete_version_after is not supported",
+        ),
         KvError::Internal => vault_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }
