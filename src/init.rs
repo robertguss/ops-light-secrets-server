@@ -220,6 +220,13 @@ impl KeyringInitTransaction {
     pub fn commit(self, path: impl AsRef<Path>) -> Result<Store, StoreError> {
         Store::create_with_keyring(path, &self.meta, &self.prepared)
     }
+
+    pub fn bootstrap_credential(&self) -> Option<&str> {
+        self.prepared
+            .bootstrap_credential_secret
+            .as_ref()
+            .map(|secret| secret.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

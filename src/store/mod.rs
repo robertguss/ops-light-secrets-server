@@ -61,6 +61,8 @@ const AUDIT_EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_
 const AUDIT_HEAD: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_head");
 const IDENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identities");
 const GRANTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("grants");
+const CREDENTIALS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("credentials");
+const CREDENTIAL_EPOCH: TableDefinition<&[u8], &[u8]> = TableDefinition::new("credential_epoch");
 const CHECKPOINT_PREPARED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("checkpoint_prepared");
 const CHECKPOINT_REGISTERED: TableDefinition<&[u8], &[u8]> =
@@ -70,6 +72,7 @@ const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
 pub(crate) const PROVISIONAL_META_KEY: &[u8] = b"\x01provisional_meta";
 const AUDIT_HEAD_KEY: &[u8] = b"\x01current";
+pub(crate) const CREDENTIAL_EPOCH_KEY: &[u8] = b"\x01current";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoreId(pub [u8; 16]);
@@ -1298,6 +1301,27 @@ impl Store {
                 .map_err(|_| StoreError::Database)?
                 .insert(grant.value.id.as_slice(), grant.encode()?.as_slice())
                 .map_err(|_| StoreError::Database)?;
+            let credential_epoch = prepared
+                .credential_epoch
+                .as_ref()
+                .ok_or(StoreError::Integrity)?;
+            let bootstrap_credential = prepared
+                .bootstrap_credential
+                .as_ref()
+                .ok_or(StoreError::Integrity)?;
+            write
+                .open_table(CREDENTIAL_EPOCH)
+                .map_err(|_| StoreError::Database)?
+                .insert(CREDENTIAL_EPOCH_KEY, credential_epoch.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CREDENTIALS)
+                .map_err(|_| StoreError::Database)?
+                .insert(
+                    bootstrap_credential.value.accessor.0.as_slice(),
+                    bootstrap_credential.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
             write
                 .open_table(CHECKPOINT_PREPARED)
                 .map_err(|_| StoreError::Database)?;
@@ -1350,6 +1374,12 @@ impl Store {
                 .open_table(IDENTITIES)
                 .map_err(|_| StoreError::Database)?;
             write.open_table(GRANTS).map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CREDENTIALS)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(CREDENTIAL_EPOCH)
+                .map_err(|_| StoreError::Database)?;
             write
                 .open_table(CHECKPOINT_PREPARED)
                 .map_err(|_| StoreError::Database)?;
@@ -1545,6 +1575,155 @@ impl Store {
         self.get(META, PROVISIONAL_META_KEY)?
             .map(|bytes| Sealed::decode(&bytes).map_err(StoreError::from))
             .transpose()
+    }
+
+    pub fn credential_snapshot(
+        &self,
+        accessor: crate::credential::CredentialAccessor,
+        mac_key: &[u8; 32],
+    ) -> Result<
+        (
+            Sealed<crate::credential::CredentialEpoch>,
+            Option<Sealed<crate::credential::CredentialRecord>>,
+        ),
+        StoreError,
+    > {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
+        let store_id = self.meta()?.store_id;
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let epoch_bytes = read
+            .open_table(CREDENTIAL_EPOCH)
+            .map_err(|_| StoreError::Database)?
+            .get(CREDENTIAL_EPOCH_KEY)
+            .map_err(|_| StoreError::Database)?
+            .ok_or(StoreError::Integrity)?
+            .value()
+            .to_vec();
+        let epoch = Sealed::<crate::credential::CredentialEpoch>::decode(&epoch_bytes)?;
+        if epoch.generation != epoch.value.current
+            || epoch
+                .verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)
+                .is_err()
+        {
+            self.integrity.trip(
+                RecordClass::CredentialMetadata,
+                CREDENTIAL_EPOCH_KEY,
+                mac_key,
+            );
+            return Err(StoreError::Integrity);
+        }
+        let credential = read
+            .open_table(CREDENTIALS)
+            .map_err(|_| StoreError::Database)?
+            .get(accessor.0.as_slice())
+            .map_err(|_| StoreError::Database)?
+            .map(|bytes| Sealed::<crate::credential::CredentialRecord>::decode(bytes.value()))
+            .transpose()?;
+        if let Some(credential) = &credential {
+            if credential.generation != credential.value.generation
+                || credential.value.accessor != accessor
+                || credential.verify(mac_key, store_id, &accessor.0).is_err()
+            {
+                self.integrity
+                    .trip(RecordClass::CredentialMetadata, &accessor.0, mac_key);
+                return Err(StoreError::Integrity);
+            }
+        }
+        Ok((epoch, credential))
+    }
+
+    pub fn credential_records(
+        &self,
+        mac_key: &[u8; 32],
+    ) -> Result<Vec<Sealed<crate::credential::CredentialRecord>>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Diagnostics)?;
+        let store_id = self.meta()?.store_id;
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let table = read
+            .open_table(CREDENTIALS)
+            .map_err(|_| StoreError::Database)?;
+        let mut records = Vec::new();
+        for row in table.iter().map_err(|_| StoreError::Database)? {
+            let (key, bytes) = row.map_err(|_| StoreError::Database)?;
+            let accessor: [u8; 16] = key.value().try_into().map_err(|_| StoreError::Integrity)?;
+            let record = Sealed::<crate::credential::CredentialRecord>::decode(bytes.value())?;
+            if record.value.accessor.0 != accessor
+                || record.generation != record.value.generation
+                || record.verify(mac_key, store_id, &accessor).is_err()
+            {
+                self.integrity
+                    .trip(RecordClass::CredentialMetadata, &accessor, mac_key);
+                return Err(StoreError::Integrity);
+            }
+            records.push(record);
+        }
+        records.sort_by_key(|record| record.value.id);
+        Ok(records)
+    }
+
+    pub fn commit_credential(
+        &self,
+        credential: &Sealed<crate::credential::CredentialRecord>,
+        expected_epoch: u64,
+        mac_key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        let store_id = self.meta()?.store_id;
+        credential.verify(mac_key, store_id, &credential.value.accessor.0)?;
+        if credential.generation != credential.value.generation
+            || credential.value.issue_epoch != expected_epoch
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let epoch_bytes = write
+            .open_table(CREDENTIAL_EPOCH)
+            .map_err(|_| StoreError::Database)?
+            .get(CREDENTIAL_EPOCH_KEY)
+            .map_err(|_| StoreError::Database)?
+            .ok_or(StoreError::Integrity)?
+            .value()
+            .to_vec();
+        let epoch = Sealed::<crate::credential::CredentialEpoch>::decode(&epoch_bytes)?;
+        epoch.verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        if epoch.value.current != expected_epoch {
+            return Err(StoreError::Integrity);
+        }
+        let mut table = write
+            .open_table(CREDENTIALS)
+            .map_err(|_| StoreError::Database)?;
+        for row in table.iter().map_err(|_| StoreError::Database)? {
+            let (_, bytes) = row.map_err(|_| StoreError::Database)?;
+            let existing = Sealed::<crate::credential::CredentialRecord>::decode(bytes.value())?;
+            existing.verify(mac_key, store_id, &existing.value.accessor.0)?;
+            if existing.value.accessor == credential.value.accessor
+                || existing.value.id == credential.value.id
+                || existing.value.issuance_request_id == credential.value.issuance_request_id
+                || (existing.value.identity_id == credential.value.identity_id
+                    && existing.value.kind == credential.value.kind
+                    && existing.value.audience == credential.value.audience
+                    && existing.value.label == credential.value.label)
+            {
+                return Err(StoreError::Integrity);
+            }
+        }
+        table
+            .insert(
+                credential.value.accessor.0.as_slice(),
+                credential.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        drop(table);
+        write.commit().map_err(|_| StoreError::Database)
     }
 
     pub fn identity(

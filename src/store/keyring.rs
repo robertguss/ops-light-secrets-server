@@ -8,6 +8,12 @@ use super::{
     StoreError, StoreId, VersionSetSummary,
 };
 use crate::clock::WatermarkCommand;
+use crate::credential::{
+    CredentialAccessor, CredentialAudience, CredentialEpoch, CredentialIssueMetadata,
+    CredentialKind, CredentialRecord, CredentialVerification, CredentialVerificationContext,
+    CredentialWire, DIRECT_TOKEN_DEFAULT_TTL_SECONDS, IssuedCredential, issue_credential,
+    verify_credential,
+};
 use crate::identity::{
     BOOTSTRAP_IDENTITY_NAME, GrantRecord, IdentityKind, IdentityRecord, IdentityStatus,
 };
@@ -170,6 +176,10 @@ impl Keyring {
         self.credential_verifier.id()
     }
 
+    pub(crate) fn credential_verifier_key(&self) -> &[u8; 32] {
+        self.credential_verifier.expose()
+    }
+
     pub fn metadata_integrity_key_id(&self) -> KeyId {
         self.metadata_integrity.id()
     }
@@ -240,6 +250,91 @@ impl Keyring {
         identity_id: [u8; 16],
     ) -> Result<Vec<Sealed<GrantRecord>>, StoreError> {
         store.grants_for_identity(identity_id, self.metadata_integrity_key())
+    }
+
+    pub fn credential_records(
+        &self,
+        store: &Store,
+    ) -> Result<Vec<Sealed<CredentialRecord>>, StoreError> {
+        store.credential_records(self.metadata_integrity_key())
+    }
+
+    pub fn credential_by_issuance_request(
+        &self,
+        store: &Store,
+        request_id: [u8; 16],
+    ) -> Result<Option<CredentialRecord>, StoreError> {
+        Ok(self
+            .credential_records(store)?
+            .into_iter()
+            .find(|record| record.value.issuance_request_id == request_id)
+            .map(|record| record.value))
+    }
+
+    pub fn verify_credential(
+        &self,
+        store: &Store,
+        raw: &str,
+        expected_kind: CredentialKind,
+        expected_audience: CredentialAudience,
+        effective_seconds: u64,
+    ) -> Result<CredentialVerification, StoreError> {
+        let accessor =
+            CredentialWire::parse(raw).map_or(CredentialAccessor([0; 16]), |wire| wire.accessor);
+        let (epoch, credential) =
+            store.credential_snapshot(accessor, self.metadata_integrity_key())?;
+        Ok(verify_credential(
+            raw,
+            CredentialVerificationContext {
+                expected_kind,
+                expected_audience,
+                current_epoch: epoch.value.current,
+                effective_seconds,
+                store_id: self.store_id,
+                verifier_key: self.credential_verifier_key(),
+            },
+            &|candidate| {
+                credential
+                    .as_ref()
+                    .filter(|record| record.value.accessor == candidate)
+                    .map(|record| record.value.clone())
+            },
+        ))
+    }
+
+    pub fn seal_credential(
+        &self,
+        record: CredentialRecord,
+    ) -> Result<Sealed<CredentialRecord>, CodecError> {
+        let generation = record.generation;
+        let accessor = record.accessor;
+        self.seal_clear(record, generation, &accessor.0)
+    }
+
+    pub fn commit_credential(
+        &self,
+        store: &Store,
+        record: &Sealed<CredentialRecord>,
+        expected_epoch: u64,
+    ) -> Result<(), StoreError> {
+        store.commit_credential(record, expected_epoch, self.metadata_integrity_key())
+    }
+
+    pub fn prepare_credential(
+        &self,
+        metadata: CredentialIssueMetadata,
+        label: String,
+        accessor_exists: &mut impl FnMut(CredentialAccessor) -> bool,
+        random: &mut impl RandomSource,
+    ) -> Result<IssuedCredential, crate::credential::CredentialError> {
+        issue_credential(
+            self.credential_verifier_key(),
+            self.store_id,
+            metadata,
+            label,
+            accessor_exists,
+            random,
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -642,6 +737,9 @@ pub struct PreparedKeyring {
     pub audit_genesis: Option<super::StoredAuditEntry>,
     pub bootstrap_identity: Option<Sealed<IdentityRecord>>,
     pub bootstrap_grant: Option<Sealed<GrantRecord>>,
+    pub credential_epoch: Option<Sealed<CredentialEpoch>>,
+    pub bootstrap_credential: Option<Sealed<CredentialRecord>>,
+    pub bootstrap_credential_secret: Option<Zeroizing<String>>,
 }
 
 pub fn prepare_keyring(
@@ -674,6 +772,9 @@ pub fn prepare_keyring(
         audit_genesis: None,
         bootstrap_identity: None,
         bootstrap_grant: None,
+        credential_epoch: None,
+        bootstrap_credential: None,
+        bootstrap_credential_secret: None,
     })
 }
 
@@ -685,6 +786,7 @@ pub fn prepare_keyring_for_init(
     random: &mut impl RandomSource,
 ) -> Result<PreparedKeyring, KeyringError> {
     let store_id = provisional_meta.store_id;
+    let high_water_unix_seconds = provisional_meta.high_water_unix_seconds;
     let effective = provisional_meta
         .high_water_unix_seconds
         .checked_mul(1_000)
@@ -735,6 +837,48 @@ pub fn prepare_keyring_for_init(
             .map_err(|_| KeyringError::Invalid)?
             .seal(opened.metadata_integrity_key(), store_id)?,
     );
+    let credential_epoch = CredentialEpoch {
+        current: 1,
+        generation: 1,
+    };
+    prepared.credential_epoch =
+        Some(opened.seal_clear(credential_epoch, 1, super::CREDENTIAL_EPOCH_KEY)?);
+    let mut credential_id = [0; 16];
+    let mut issuance_request_id = [0; 16];
+    random.fill(&mut credential_id)?;
+    random.fill(&mut issuance_request_id)?;
+    if credential_id == [0; 16] || issuance_request_id == [0; 16] {
+        return Err(KeyringError::Random);
+    }
+    let issued = issue_credential(
+        opened.credential_verifier_key(),
+        store_id,
+        CredentialIssueMetadata {
+            id: credential_id,
+            identity_id,
+            kind: CredentialKind::Token,
+            audience: CredentialAudience::Control,
+            issue_epoch: 1,
+            expires_at_effective_seconds: high_water_unix_seconds
+                .checked_add(DIRECT_TOKEN_DEFAULT_TTL_SECONDS)
+                .ok_or(KeyringError::Invalid)?,
+            created_at_effective_seconds: high_water_unix_seconds,
+            issuer_identity_id: identity_id,
+            issuance_request_id,
+            parent_accessor: None,
+            consumer_instance_id: None,
+        },
+        "bootstrap-control".into(),
+        &mut |_| false,
+        random,
+    )
+    .map_err(|_| KeyringError::Invalid)?;
+    prepared.bootstrap_credential = Some(opened.seal_clear(
+        issued.record.clone(),
+        issued.record.generation,
+        &issued.record.accessor.0,
+    )?);
+    prepared.bootstrap_credential_secret = Some(Zeroizing::new(issued.expose_once().to_owned()));
     Ok(prepared)
 }
 

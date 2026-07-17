@@ -1565,6 +1565,7 @@ dependencies = [
  "age",
  "axum",
  "axum-server",
+ "base64ct",
  "bech32",
  "blake3",
  "chacha20poly1305 0.10.1",

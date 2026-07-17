@@ -257,6 +257,27 @@ are marked audit-required. If client disconnects after issuance commit, durable
 record remains discoverable and revocable; server does not pretend commit
 rolled back.
 
+Credential wire form is exactly
+`<kind>.<audience>.<22-char-accessor>.<43-char-secret>`. Closed kind labels are
+`token` and `secret-id`; audiences are `control` and `data`; binary fields use
+base64url without padding. Alternate case, padding, extra fields, truncation,
+and noncanonical encodings fail. Control bootstrap tokens are cryptographically
+invalid on data listener before grant checks. Accessor selects one MAC'd server
+record; unknown accessors still perform one keyed BLAKE3 computation, one
+32-byte constant-time comparison, one epoch read, and one accessor lookup using
+dummy record inputs. Verifier domain binds store ID, kind, audience, accessor,
+issue epoch, and 256-bit random secret. Raw secret is disclosed before commit,
+zeroized, and never stored or recoverable; retry after lost disclosure returns
+metadata only, then operator must revoke and replace.
+
+Frozen bounds: direct tokens 300/86400/2592000 seconds min/default/max; role
+tokens 60/3600/86400; secret IDs 300/86400/2592000. Secret-ID uses range is
+1..=1000; zero is invalid, not unlimited. Inputs outside bounds are rejected,
+never clamped. Credential epoch is a MAC'd state record and remains a separate
+mandatory equality check even when verifier-key rotation also invalidates MAC.
+No password KDF exists because all credential secrets are CSPRNG-generated
+256-bit values.
+
 ## Encrypted record format
 
 Encrypted records use the fixed, NCC-audited RustCrypto XChaCha20-Poly1305

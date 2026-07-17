@@ -4,10 +4,10 @@ use super::codec::{Decoder, Encoder};
 use super::keyring::KeyringMetadata;
 use super::{
     AUDIT_EVENTS, AUDIT_HEAD, AUDIT_HEAD_KEY, CHECKPOINT_PREPARED, CHECKPOINT_REGISTERED,
-    Canonical, CodecError, EncryptedTable, GRANTS, IDENTITIES, META, META_KEY, MetaRecord,
-    PROVISIONAL_META_KEY, ProvisionalMetaRecord, ReadableTable, SECRET_META, SECRETS, Sealed,
-    SecretMetadata, StateDeltaSet, StateDigest, StateTuple, Store, StoreError, StoreId,
-    StoredAuditEntry, audit_key,
+    CREDENTIAL_EPOCH, CREDENTIAL_EPOCH_KEY, CREDENTIALS, Canonical, CodecError, EncryptedTable,
+    GRANTS, IDENTITIES, META, META_KEY, MetaRecord, PROVISIONAL_META_KEY, ProvisionalMetaRecord,
+    ReadableTable, SECRET_META, SECRETS, Sealed, SecretMetadata, StateDeltaSet, StateDigest,
+    StateTuple, Store, StoreError, StoreId, StoredAuditEntry, audit_key,
 };
 use crate::identity::{GrantRecord, IdentityRecord};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -839,6 +839,20 @@ fn state_digest_in_write(write: &redb::WriteTransaction) -> Result<StateDigest, 
     collect_clear::<SecretMetadata>(write, SECRET_META, &mut tuples)?;
     collect_clear::<IdentityRecord>(write, IDENTITIES, &mut tuples)?;
     collect_clear::<GrantRecord>(write, GRANTS, &mut tuples)?;
+    collect_clear::<crate::credential::CredentialRecord>(write, CREDENTIALS, &mut tuples)?;
+    {
+        let table = write
+            .open_table(CREDENTIAL_EPOCH)
+            .map_err(|_| StoreError::Database)?;
+        let value = table
+            .get(CREDENTIAL_EPOCH_KEY)
+            .map_err(|_| StoreError::Database)?
+            .ok_or(StoreError::Integrity)?;
+        tuples.push(
+            Sealed::<crate::credential::CredentialEpoch>::decode(value.value())?
+                .state_tuple(CREDENTIAL_EPOCH_KEY)?,
+        );
+    }
     {
         let table = write
             .open_table(SECRETS)
