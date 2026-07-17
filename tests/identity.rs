@@ -15,6 +15,9 @@ use ops_light_secrets_server::store::keyring::{KeyringError, KeyringOpener, Rand
 use ops_light_secrets_server::store::{
     Canonical, CodecError, FORMAT_VERSION, Lifecycle, MetaRecord, StoreId, mac_conformance,
 };
+use test_support::{
+    ActualOutcome, ExpectedOutcome, Harness, PropertyEvidence, RedactedCommand, SafeSummary,
+};
 use zeroize::Zeroize;
 
 const ACTIVE_IDENTITY: &str =
@@ -266,6 +269,8 @@ fn matcher_uses_segment_boundaries_and_request_shape_for_explicit_versions() {
             Capability::SecretWrite,
         ],
     );
+    let actor = identity(2, "alice");
+    let token = TokenServerRecord::issue([9; 16], actor.id, 100, 300, 1, "ae6".into()).unwrap();
     for raw in [
         "/v1/kv/data/apps/populi/api-key",
         "/v1/kv/metadata/apps/populi/api-key",
@@ -283,6 +288,16 @@ fn matcher_uses_segment_boundaries_and_request_shape_for_explicit_versions() {
         let decision = authorize(&request, [&subtree]);
         assert!(!decision.allow);
         assert_eq!(decision.deny_reason, Some(DenyReason::PrefixBoundaryMiss));
+        let token_decision = TokenAuthorizationSnapshot::new(
+            Some(&token),
+            Some(&actor),
+            std::slice::from_ref(&subtree),
+            150,
+            1,
+        )
+        .authorize(&request);
+        assert!(!token_decision.allow);
+        assert!(token_decision.audit_required);
     }
 
     let equal = parse_raw_target(&Method::GET, "/v1/kv/data/apps/canvas").unwrap();
@@ -324,6 +339,128 @@ fn matcher_uses_segment_boundaries_and_request_shape_for_explicit_versions() {
     );
     let local_purge = AuthorizationRequest::local_destroy_all(&metadata.resource).unwrap();
     assert_eq!(local_purge.capability, Capability::SecretDestroyAll);
+}
+
+#[test]
+fn generated_matcher_property_is_segment_exact_and_harness_attested() {
+    let harness = Harness::builder("identity-matcher-property")
+        .register_canary(b"identity-matcher-property-canary")
+        .build()
+        .unwrap();
+    let mut scenario = harness
+        .scenario_case("identity-matcher-property", "segment-prefix", 1)
+        .unwrap();
+    scenario
+        .set_reproduction(
+            RedactedCommand::new("cargo")
+                .literal("test")
+                .literal("--locked")
+                .literal("--test")
+                .literal("identity"),
+        )
+        .unwrap();
+
+    let seed = 0x1d3a_71a5_u64;
+    let mut state = seed;
+    let mut evidence = Vec::new();
+    for case in 0..512_u16 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let mount = format!("m{}", state % 97);
+        let prefix = [format!("app{}", state % 1_009), format!("key{}", case)];
+        let kind = (state >> 32) % 4;
+        let candidate = match kind {
+            0 => prefix.to_vec(),
+            1 => vec![prefix[0].clone(), prefix[1].clone(), "child".into()],
+            2 => vec![prefix[0].clone(), format!("{}suffix", prefix[1])],
+            _ => vec![prefix[0].clone(), "sibling".into()],
+        };
+        let target = format!("/v1/{mount}/data/{}", candidate.join("/"));
+        let request = read_request(&target);
+        for (id, scope, expected) in [
+            (1, GrantScope::Exact, kind == 0),
+            (2, GrantScope::Subtree, kind <= 1),
+        ] {
+            let row = grant(
+                id,
+                2,
+                &mount,
+                scope,
+                &[prefix[0].as_str(), prefix[1].as_str()],
+                &[Capability::SecretReadCurrent],
+            );
+            let decision = authorize(&request, [&row]);
+            assert_eq!(decision.allow, expected, "case={case} scope={scope:?}");
+            assert_eq!(
+                decision.deny_reason,
+                (!expected).then_some(DenyReason::PrefixBoundaryMiss)
+            );
+        }
+        evidence.push(target);
+    }
+
+    let corpus_digest = blake3::hash(evidence.join("\n").as_bytes())
+        .to_hex()
+        .to_string();
+    scenario
+        .property_step(
+            "segment-prefix",
+            SafeSummary::new(),
+            ExpectedOutcome::Success,
+            ActualOutcome::Success,
+            PropertyEvidence::new(
+                seed,
+                corpus_digest,
+                blake3::hash(b"/v1/m/data/a").to_hex().to_string(),
+                blake3::hash(b"identity-generated-matcher-corpus")
+                    .to_hex()
+                    .to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(scenario.finish_success().unwrap().scan_attestation.clean);
+}
+
+#[test]
+fn raw_alias_corpus_refuses_before_authorization_and_forms_share_resource() {
+    for target in [
+        "/v1/kv/data/apps%2Fcanvas/key",
+        "/v1/kv/data/apps%2fcanvas/key",
+        "/v1/kv/data/apps%5Ccanvas/key",
+        "/v1/kv/data/apps%252Fcanvas/key",
+        "/v1/kv/data/apps/./canvas",
+        "/v1/kv/data/apps//canvas",
+        "/v1/kv/data/apps/%ZZ",
+        "/v1/kv/data/apps%00canvas/key",
+    ] {
+        assert!(
+            parse_raw_target(&Method::GET, target).is_err(),
+            "accepted alias {target}"
+        );
+    }
+
+    let forms = [
+        ("/v1/kv/data/apps/canvas/key", SecretAction::Read),
+        ("/v1/kv/metadata/apps/canvas/key", SecretAction::Metadata),
+        (
+            "/v1/kv/metadata/apps/canvas/key?list=true",
+            SecretAction::List,
+        ),
+    ];
+    let requests = forms
+        .into_iter()
+        .map(|(target, action)| {
+            let endpoint = parse_raw_target(&Method::GET, target).unwrap();
+            AuthorizationRequest::secret(&endpoint, action).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        requests
+            .windows(2)
+            .all(|pair| pair[0].resource == pair[1].resource)
+    );
 }
 
 #[test]
