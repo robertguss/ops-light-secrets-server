@@ -125,6 +125,7 @@ pub struct KvCatalog {
     entries: BTreeMap<String, Entry>,
     grants: Vec<GrantRecord>,
     audit: Vec<KvAuditEvent>,
+    fail_next_read_audit_commit: bool,
 }
 
 impl KvCatalog {
@@ -136,6 +137,7 @@ impl KvCatalog {
             entries: BTreeMap::new(),
             grants: Vec::new(),
             audit: Vec::new(),
+            fail_next_read_audit_commit: false,
         }
     }
 
@@ -243,6 +245,12 @@ impl KvCatalog {
 
     pub fn audit(&self) -> &[KvAuditEvent] {
         &self.audit
+    }
+
+    /// Fault-injection seam for proving that reads disclose nothing before audit commit.
+    #[doc(hidden)]
+    pub fn fail_next_read_audit_commit(&mut self) {
+        self.fail_next_read_audit_commit = true;
     }
 
     fn prune(&mut self, path: &str) -> Result<(), KvError> {
@@ -566,6 +574,10 @@ impl KvService {
                 Some("not-found"),
             ));
             return Err(unavailable);
+        }
+        if catalog.fail_next_read_audit_commit {
+            catalog.fail_next_read_audit_commit = false;
+            return Err(KvError::Internal);
         }
         let data = serde_json::from_slice(&value.encoded).map_err(|_| KvError::Internal)?;
         let created = value.created_unix_milliseconds;

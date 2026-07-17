@@ -1,3 +1,7 @@
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode};
+use ops_light_secrets_server::auth::{AppRoleRecord, AuthCatalog, AuthService};
+use ops_light_secrets_server::control::data_router_with_auth_and_kv;
 use ops_light_secrets_server::credential::{
     ACCESSOR_COLLISION_ATTEMPTS, CredentialAudience, CredentialIssueMetadata, CredentialKind,
     CredentialRecord, CredentialRejectReason, CredentialVerificationContext, CredentialWire,
@@ -5,14 +9,22 @@ use ops_light_secrets_server::credential::{
     issue_credential, validate_secret_id_uses, validate_ttl, verify_credential,
 };
 use ops_light_secrets_server::identity::TokenStatus;
+use ops_light_secrets_server::identity::{
+    Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
+};
 use ops_light_secrets_server::init::KeyringInitTransaction;
+use ops_light_secrets_server::input_hygiene::InputHygieneState;
+use ops_light_secrets_server::kv::{KvCatalog, KvService};
+use ops_light_secrets_server::raw_target::parse_raw_target;
 use ops_light_secrets_server::store::keyring::{KeyringError, KeyringOpener, RandomSource};
 use ops_light_secrets_server::store::{
     Canonical, FORMAT_VERSION, Lifecycle, MetaRecord, StoreId, mac_conformance,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
+use tower::ServiceExt;
 
 struct Counter(u8);
 
@@ -719,14 +731,131 @@ fn auth_path_has_no_password_kdf_dependency_or_call() {
     }
 }
 
-#[test]
-#[ignore = "U5.6 owns the final scoped AppRole-to-KV read tail"]
-fn scoped_approle_token_reads_authorized_kv_path() {
-    panic!("replace with U5.6 assembled KV authorization evidence");
+fn assembled_kv_fixture() -> (AuthService, KvService, String) {
+    let store_id = StoreId([8; 16]);
+    let verifier_key = [9; 32];
+    let identity_id = [2; 16];
+    let mut auth = AuthCatalog::new(store_id, verifier_key, 1, 100).unwrap();
+    auth.insert_identity(
+        IdentityRecord::new(identity_id, "kv-workload".into(), IdentityKind::Workload).unwrap(),
+    )
+    .unwrap();
+    auth.insert_role(
+        AppRoleRecord::new(
+            [6; 16],
+            "kv-role".into(),
+            "kv".into(),
+            identity_id,
+            Some(600),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let secret_id = issue_credential(
+        &verifier_key,
+        store_id,
+        CredentialIssueMetadata {
+            id: [7; 16],
+            identity_id,
+            kind: CredentialKind::SecretId,
+            audience: CredentialAudience::Data,
+            issue_epoch: 1,
+            expires_at_effective_seconds: 1_000,
+            created_at_effective_seconds: 100,
+            issuer_identity_id: [3; 16],
+            issuance_request_id: [4; 16],
+            parent_accessor: None,
+            consumer_instance_id: None,
+        },
+        "kv-runtime".into(),
+        &mut |_| false,
+        &mut Counter(20),
+    )
+    .unwrap();
+    let secret = secret_id.expose_once().to_owned();
+    auth.insert_secret_id([6; 16], secret_id.record.clone(), 3)
+        .unwrap();
+    let auth = AuthService::new(auth, Counter(40));
+    let token = auth
+        .login("kv-role", &secret, [8; 16])
+        .unwrap()
+        .credential
+        .expose_once()
+        .to_owned();
+
+    let mut kv = KvCatalog::new(false, 1_800_000_000_000);
+    kv.replace_grants(vec![
+        GrantRecord::new(
+            [9; 16],
+            identity_id,
+            "secret".into(),
+            GrantScope::Subtree,
+            Vec::new(),
+            [Capability::SecretReadCurrent, Capability::SecretWrite]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        )
+        .unwrap(),
+    ]);
+    let kv = KvService::new(kv);
+    let write = parse_raw_target(&Method::POST, "/v1/secret/data/apps/key").unwrap();
+    kv.write(
+        identity_id,
+        &write,
+        serde_json::Map::from_iter([("value".into(), serde_json::json!("ready"))]),
+        Some(0),
+    )
+    .unwrap();
+    (auth, kv, token)
 }
 
-#[test]
-#[ignore = "U5.6 owns the final expired-and-revoked KV rejection tail"]
-fn scoped_expired_and_revoked_tokens_cannot_read_kv() {
-    panic!("replace with U5.6 assembled KV authorization evidence");
+async fn kv_read(auth: AuthService, kv: KvService, token: &str) -> (StatusCode, Vec<u8>) {
+    let response = data_router_with_auth_and_kv(auth, kv, InputHygieneState::new([5; 32]))
+        .oneshot(
+            Request::get("/v1/secret/data/apps/key")
+                .header("x-vault-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 4096).await.unwrap().to_vec();
+    (status, body)
+}
+
+#[tokio::test]
+async fn scoped_approle_token_reads_authorized_kv_path() {
+    let (auth, kv, token) = assembled_kv_fixture();
+    let (status, body) = kv_read(auth, kv, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["data"]["data"]["value"], "ready");
+}
+
+#[tokio::test]
+async fn scoped_expired_and_revoked_tokens_cannot_read_kv() {
+    let (expired_auth, expired_kv, expired_token) = assembled_kv_fixture();
+    expired_auth.with_catalog(|catalog| catalog.set_effective_seconds(700).unwrap());
+    let (status, body) = kv_read(expired_auth, expired_kv, &expired_token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"errors": ["permission denied"]})
+    );
+
+    let (revoked_auth, revoked_kv, revoked_token) = assembled_kv_fixture();
+    revoked_auth.with_catalog(|catalog| {
+        let accessor = CredentialWire::parse(&revoked_token).unwrap().accessor;
+        let current = catalog.credential(accessor).unwrap().clone();
+        catalog
+            .replace_credential(current.revoke(current.generation).unwrap())
+            .unwrap();
+    });
+    let (status, body) = kv_read(revoked_auth, revoked_kv, &revoked_token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"errors": ["permission denied"]})
+    );
 }

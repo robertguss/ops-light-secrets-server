@@ -162,29 +162,9 @@ fn clock_restore_and_incident_compile_against_one_epoch_rotation_primitive() {
 }
 
 #[test]
-fn ignored_integration_tails_are_owned_only_by_open_beads() {
-    let issue_lines = include_str!("../.beads/issues.jsonl");
-    for (source, annotation, owner) in [
-        (
-            include_str!("auth.rs"),
-            "U5.6 owns the final scoped AppRole-to-KV read tail",
-            "olss-charter-qul.7.6",
-        ),
-        (
-            include_str!("auth.rs"),
-            "U5.6 owns the final expired-and-revoked KV rejection tail",
-            "olss-charter-qul.7.6",
-        ),
-    ] {
-        assert!(source.contains(annotation));
-        let issue = issue_lines
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .find(|issue| issue["id"] == owner)
-            .unwrap();
-        assert_eq!(
-            issue["status"], "open",
-            "closed owner left ignored tail: {owner}"
-        );
-    }
+fn kv_auth_integration_tails_are_live() {
+    let source = include_str!("auth.rs");
+    assert!(source.contains("async fn scoped_approle_token_reads_authorized_kv_path"));
+    assert!(source.contains("async fn scoped_expired_and_revoked_tokens_cannot_read_kv"));
+    assert!(!source.contains("#[ignore"));
 }

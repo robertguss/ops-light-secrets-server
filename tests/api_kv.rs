@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use axum::body::{Body, to_bytes};
@@ -16,15 +17,135 @@ use ops_light_secrets_server::kv::{
     MAX_CUSTOM_METADATA_KEY_CHARS, MAX_CUSTOM_METADATA_KEYS, MAX_CUSTOM_METADATA_VALUE_CHARS,
     MAX_LIST_RESULTS, MAX_SECRET_ENCODED_BYTES, MAX_SECRET_FIELD_NAME_CHARS, MAX_SECRET_FIELDS,
     MAX_SECRET_NESTING_DEPTH, MAX_VERSION_BATCH, MAX_VERSIONS, MaxVersionsSource, MetadataUpdate,
-    kv_router,
+    kv_router, kv_router_with_limits,
+};
+use ops_light_secrets_server::rate_limit::{
+    AggregateClass, DropReason, RateLimitConfig, RateLimitService,
 };
 use ops_light_secrets_server::raw_target::parse_raw_target;
 use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
 use ops_light_secrets_server::store::{StoreId, VersionState};
 use serde_json::{Map, Value, json};
+use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
 use tower::ServiceExt;
 
 const IDENTITY: [u8; 16] = [2; 16];
+
+const API_KV_SCENARIOS: [(&str, &[&str]); 12] = [
+    (
+        "api-kv-01-unsupported",
+        &["unsupported_surface_is_exact_enumerable_and_never_succeeds_empty"],
+    ),
+    (
+        "api-kv-02-preflight-read",
+        &["final_router_dispatches_literal_list_and_get_list_true_with_strict_shapes"],
+    ),
+    (
+        "api-kv-03-versioned-read",
+        &["explicit_version_even_current_requires_history_capability"],
+    ),
+    (
+        "api-kv-04-cas",
+        &[
+            "cas_matrix_is_monotonic_and_failures_are_audited_without_success",
+            "deletion_state_never_changes_cas_comparand_or_reopens_create_only",
+            "concurrent_same_cas_cutover_succeeds_exactly_once",
+        ],
+    ),
+    (
+        "api-kv-05-retention",
+        &[
+            "ordinary_history_prunes_but_rotation_protection_survives_until_clear",
+            "mount_default_is_dynamic_and_path_override_wins_in_both_directions",
+        ],
+    ),
+    (
+        "api-kv-06-delete-destroy",
+        &[
+            "deletion_metadata_and_retention_state_machine_is_atomic_and_bounded",
+            "router_supports_all_delete_forms_metadata_and_remote_purge_refusal",
+        ],
+    ),
+    (
+        "api-kv-07-missing-envelope",
+        &["unsupported_surface_is_exact_enumerable_and_never_succeeds_empty"],
+    ),
+    (
+        "api-kv-08-secret-response",
+        &[
+            "final_router_dispatches_literal_list_and_get_list_true_with_strict_shapes",
+            "audit_type_has_no_secret_value_or_body_fields",
+        ],
+    ),
+    (
+        "api-kv-09-bounds",
+        &[
+            "kv_value_bounds_hold_at_n_minus_one_n_and_n_plus_one",
+            "kv_depth_metadata_and_list_bounds_are_explicit",
+            "deletion_batch_bound_holds_at_n_minus_one_n_and_n_plus_one",
+            "content_encoding_is_rejected_before_body_processing",
+            "kv_handler_rejects_duplicate_ambiguous_and_unknown_inputs",
+        ],
+    ),
+    (
+        "api-kv-10-deleted-matrix",
+        &["deletion_metadata_and_retention_state_machine_is_atomic_and_bounded"],
+    ),
+    (
+        "api-kv-11-identity-limit",
+        &["kv_router_mounts_identity_rate_limit_and_bounded_aggregates"],
+    ),
+    (
+        "api-kv-12-list-shape",
+        &[
+            "list_returns_sorted_immediate_children_and_has_its_own_capability",
+            "final_router_dispatches_literal_list_and_get_list_true_with_strict_shapes",
+        ],
+    ),
+];
+
+#[test]
+fn every_api_kv_scenario_has_source_evidence_and_safe_observability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let own_source = include_str!("api_kv.rs");
+    let harness = Harness::builder("api-kv")
+        .register_canary(b"api-kv-private-canary-9f3c1a")
+        .build()
+        .unwrap();
+    for (index, (id, evidence)) in API_KV_SCENARIOS.iter().enumerate() {
+        for item in *evidence {
+            if let Some((path, test)) = item.split_once("::") {
+                let source = std::fs::read_to_string(root.join(path)).unwrap();
+                assert!(
+                    source.contains(&format!("fn {test}")),
+                    "missing evidence {item}"
+                );
+            } else {
+                assert!(
+                    own_source.contains(&format!("fn {item}")),
+                    "missing evidence {item}"
+                );
+            }
+        }
+        let mut scenario = harness.scenario(id, 1).unwrap();
+        scenario
+            .step(
+                "contract-evidence",
+                SafeSummary::new()
+                    .field("scenario", SafeValue::Unsigned((index + 1) as u64))
+                    .field("evidence_count", SafeValue::Unsigned(evidence.len() as u64)),
+                ExpectedOutcome::Success,
+                ActualOutcome::Success,
+            )
+            .unwrap();
+        let report = scenario.finish_success().unwrap();
+        assert!(report.scan_attestation.clean);
+        assert!(report.jsonl.contains("\"event\":\"scenario_begin\""));
+        assert!(report.jsonl.contains("\"event\":\"step\""));
+        assert!(report.jsonl.contains("\"event\":\"scenario_end\""));
+        assert!(!report.jsonl.contains("api-kv-private-canary-9f3c1a"));
+    }
+}
 
 struct Counter(u8);
 
@@ -818,6 +939,148 @@ async fn content_encoding_is_rejected_before_body_processing() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("content_encoding_not_supported"));
+}
+
+#[tokio::test]
+async fn kv_handler_rejects_duplicate_ambiguous_and_unknown_inputs() {
+    let (auth, token) = auth_fixture();
+    let app = kv_router(
+        auth,
+        service(
+            &[Capability::SecretReadHistory, Capability::SecretWrite],
+            false,
+        ),
+        InputHygieneState::new([9; 32]),
+    );
+    let duplicate_query = Request::get("/v1/secret/data/apps/key?version=1&version=1")
+        .header("x-vault-token", &token)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(duplicate_query).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let duplicate_token = Request::get("/v1/secret/data/apps/key")
+        .header("x-vault-token", &token)
+        .header("x-vault-token", &token)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(duplicate_token).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    for body in [
+        r#"{"data":{"value":1},"unknown":true}"#,
+        r#"{"data":{"value":1},"options":{"cas":"0"}}"#,
+        r#"{"data":{"value":1},"options":{"cas":0,"extra":1}}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/secret/data/apps/key")
+                    .header("x-vault-token", &token)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn authorized_read_audit_failure_returns_zero_secret_bytes() {
+    let (auth, token) = auth_fixture();
+    let kv = service(
+        &[Capability::SecretWrite, Capability::SecretReadCurrent],
+        false,
+    );
+    let write = endpoint(&Method::POST, "/v1/secret/data/audit-failure");
+    kv.write(
+        IDENTITY,
+        &write,
+        Map::from_iter([("value".into(), json!("PRIVATE_READ_CANARY"))]),
+        Some(0),
+    )
+    .unwrap();
+    kv.with_catalog(KvCatalog::fail_next_read_audit_commit);
+    let app = kv_router(auth, kv, InputHygieneState::new([9; 32]));
+    let response = app
+        .oneshot(
+            Request::get("/v1/secret/data/audit-failure")
+                .header("x-vault-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"errors": ["internal error"]})
+    );
+    assert!(
+        !body
+            .windows(20)
+            .any(|window| window == b"PRIVATE_READ_CANARY")
+    );
+}
+
+#[tokio::test]
+async fn kv_router_mounts_identity_rate_limit_and_bounded_aggregates() {
+    let (auth, token) = auth_fixture();
+    let kv = service(
+        &[Capability::SecretWrite, Capability::SecretReadCurrent],
+        false,
+    );
+    let write = endpoint(&Method::POST, "/v1/secret/data/rate-limited");
+    kv.write(IDENTITY, &write, data(1), Some(0)).unwrap();
+    let limits = RateLimitService::new(
+        RateLimitConfig {
+            window_milliseconds: 60_000,
+            global_attempts: 100,
+            login_attempts: 10,
+            probe_attempts: 10,
+            identity_attempts: 2,
+            source_shards: 4,
+            identity_shards: 4,
+            max_aggregates: 4,
+            unauthenticated_body_bytes: 4096,
+            authenticated_body_bytes: 4096,
+            authenticated_concurrency: 2,
+        },
+        [0x61; 32],
+    )
+    .unwrap();
+    let app = kv_router_with_limits(auth, kv, InputHygieneState::new([9; 32]), limits.clone());
+    for expected in [
+        StatusCode::OK,
+        StatusCode::OK,
+        StatusCode::TOO_MANY_REQUESTS,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/secret/data/rate-limited")
+                    .header("x-vault-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    let aggregates = limits.take_aggregates();
+    assert!(aggregates.len() <= 4);
+    assert!(aggregates.iter().any(|aggregate| {
+        aggregate.class == AggregateClass::Authenticated
+            && aggregate.reason == DropReason::Rate
+            && aggregate.count == 1
+    }));
 }
 
 #[test]

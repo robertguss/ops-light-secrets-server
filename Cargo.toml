@@ -41,5 +41,9 @@ test-support = { path = "crates/test-support" }
 tower = { version = "0.5.3", features = ["util"] }
 
 [[test]]
+name = "api_kv"
+path = "tests/api_kv.rs"
+
+[[test]]
 name = "txn_crash"
 path = "tests/fault/txn_crash.rs"
