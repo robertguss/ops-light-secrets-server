@@ -8,6 +8,7 @@ pub mod credential;
 pub mod identity;
 pub mod init;
 pub mod input_hygiene;
+pub mod kv;
 pub mod proxy;
 pub mod raw_target;
 pub mod startup;

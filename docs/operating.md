@@ -381,6 +381,26 @@ explicit Vault error `token renewal is not supported`. `X-Vault-Token` is
 extracted once by the hygiene layer, and data/control listener middleware uses
 cryptographically separate audience checks. No network bootstrap route exists.
 
+## KV v2 data contract
+
+The only data mount is `secret/`. Data reads and writes use
+`/v1/secret/data/<path>`; listing uses the literal `LIST` method on
+`/v1/secret/metadata/<prefix>` or the narrow `GET ...?list=true` equivalent.
+Nonempty Vault namespaces and other mounts are refused explicitly.
+
+Writes accept `data` plus optional `options.cas`. CAS `0` is create-only and
+metadata existence remains authoritative after deletion. Positive CAS must
+equal the current monotonically increasing version, including when that
+version is deleted or destroyed. When effective `cas_required` is true, an
+unconditional write is refused. A per-path setting overrides the live mount
+default; otherwise changes to the mount default apply at the next transaction.
+
+An unversioned read requires `secret-read-current`. Every explicit
+`?version=N`, even when N is current, requires `secret-read-history`. LIST has
+its own `secret-list` capability. Ordinary history is pruned to `max_versions`;
+an active rotation may protect its snapshot temporarily, and clearing that
+protection immediately reapplies ordinary retention.
+
 ## TLS files and live reload
 
 Configure the certificate and private key as a pair with `[tls].certificate`

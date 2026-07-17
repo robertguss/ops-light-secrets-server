@@ -120,6 +120,11 @@
       "contract": "auth.approle_durable_coordinator",
       "owner": "olss-charter-qul.6.5",
       "verification": "Persist U4.2 AppRole roles and secret-id usage records from U4.5's lifecycle commands, hydrate AuthCatalog at serve startup, and adapt login so the usage CAS, token verifier insertion, canonical audit append, and reply commit through one real redb coordinator transaction."
+    },
+    {
+      "contract": "kv.durable_coordinator_router",
+      "owner": "olss-charter-qul.7.7",
+      "verification": "Assemble U5.1's final KV dispatcher in the real serve path with hydrated U4 grants and U2 encrypted records; adapt its transaction kernel so authorization reload, CAS, encrypted version mutation/read, canonical versioned audit append, commit, and reply all use the live redb coordinator. Prove the pinned fnox preflight plus KV read against that assembly."
     }
   ]
 }

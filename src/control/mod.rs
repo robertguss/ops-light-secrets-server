@@ -31,6 +31,17 @@ pub fn data_router_with_auth(
     data_router().merge(crate::auth::auth_router(service, hygiene))
 }
 
+/// Remote router with authentication and the final KV v2 data dispatcher.
+pub fn data_router_with_auth_and_kv(
+    auth: crate::auth::AuthService,
+    kv: crate::kv::KvService,
+    hygiene: crate::input_hygiene::InputHygieneState,
+) -> Router {
+    data_router()
+        .merge(crate::auth::auth_router(auth.clone(), hygiene.clone()))
+        .merge(crate::kv::kv_router(auth, kv, hygiene))
+}
+
 /// Router reachable only through the owner control socket.
 pub fn control_router() -> Router {
     Router::new()

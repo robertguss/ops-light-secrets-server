@@ -1,0 +1,440 @@
+use std::collections::BTreeSet;
+use std::sync::{Arc, Barrier};
+
+use axum::body::{Body, to_bytes};
+use axum::http::{Method, Request, StatusCode};
+use ops_light_secrets_server::auth::{AppRoleRecord, AuthCatalog, AuthService};
+use ops_light_secrets_server::credential::{
+    CredentialAudience, CredentialIssueMetadata, CredentialKind, issue_credential,
+};
+use ops_light_secrets_server::identity::{
+    Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
+};
+use ops_light_secrets_server::input_hygiene::InputHygieneState;
+use ops_light_secrets_server::kv::{
+    CasSource, KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService, kv_router,
+};
+use ops_light_secrets_server::raw_target::parse_raw_target;
+use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
+use ops_light_secrets_server::store::{StoreId, VersionState};
+use serde_json::{Map, Value, json};
+use tower::ServiceExt;
+
+const IDENTITY: [u8; 16] = [2; 16];
+
+struct Counter(u8);
+
+impl RandomSource for Counter {
+    fn fill(&mut self, output: &mut [u8]) -> Result<(), KeyringError> {
+        self.0 = self.0.wrapping_add(1);
+        output.fill(self.0);
+        Ok(())
+    }
+}
+
+fn endpoint(
+    method: &Method,
+    target: &str,
+) -> ops_light_secrets_server::raw_target::EndpointRequest {
+    parse_raw_target(method, target).unwrap()
+}
+
+fn grant(id: u8, capabilities: &[Capability]) -> GrantRecord {
+    GrantRecord::new(
+        [id; 16],
+        IDENTITY,
+        "secret".into(),
+        GrantScope::Subtree,
+        Vec::new(),
+        capabilities.iter().copied().collect::<BTreeSet<_>>(),
+    )
+    .unwrap()
+}
+
+fn data(value: i64) -> Map<String, Value> {
+    Map::from_iter([("value".into(), json!(value))])
+}
+
+fn service(capabilities: &[Capability], mount_cas_required: bool) -> KvService {
+    let mut catalog = KvCatalog::new(mount_cas_required, 1_800_000_000_000);
+    catalog.replace_grants(vec![grant(1, capabilities)]);
+    KvService::new(catalog)
+}
+
+#[test]
+fn cas_matrix_is_monotonic_and_failures_are_audited_without_success() {
+    let service = service(
+        &[Capability::SecretWrite, Capability::SecretReadCurrent],
+        false,
+    );
+    let request = endpoint(&Method::POST, "/v1/secret/data/apps/key");
+    assert_eq!(
+        service
+            .write(IDENTITY, &request, data(1), Some(0))
+            .unwrap()
+            .version,
+        1
+    );
+    assert!(matches!(
+        service.write(IDENTITY, &request, data(2), Some(0)),
+        Err(KvError::CasConflict)
+    ));
+    assert!(matches!(
+        service.write(IDENTITY, &request, data(2), Some(7)),
+        Err(KvError::CasConflict)
+    ));
+    assert_eq!(
+        service.with_catalog(|catalog| catalog.current_version("apps/key")),
+        Some(1)
+    );
+    assert_eq!(
+        service
+            .write(IDENTITY, &request, data(2), Some(1))
+            .unwrap()
+            .version,
+        2
+    );
+    service.with_catalog(|catalog| {
+        assert_eq!(catalog.audit().len(), 4);
+        assert_eq!(catalog.audit()[1].outcome, KvAuditOutcome::Failed);
+        assert_eq!(catalog.audit()[1].reason, Some("cas-conflict"));
+        assert_eq!(catalog.audit()[2].outcome, KvAuditOutcome::Failed);
+        assert_eq!(catalog.audit()[3].outcome, KvAuditOutcome::Succeeded);
+    });
+}
+
+#[test]
+fn deletion_state_never_changes_cas_comparand_or_reopens_create_only() {
+    for state in [VersionState::SoftDeleted, VersionState::Destroyed] {
+        let service = service(&[Capability::SecretWrite], false);
+        let request = endpoint(&Method::POST, "/v1/secret/data/apps/key");
+        service.write(IDENTITY, &request, data(1), None).unwrap();
+        service
+            .with_catalog(|catalog| catalog.set_version_state("apps/key", 1, state))
+            .unwrap();
+        assert!(matches!(
+            service.write(IDENTITY, &request, data(2), Some(0)),
+            Err(KvError::CasConflict)
+        ));
+        assert_eq!(
+            service
+                .write(IDENTITY, &request, data(2), Some(1))
+                .unwrap()
+                .version,
+            2
+        );
+    }
+}
+
+#[test]
+fn concurrent_same_cas_cutover_succeeds_exactly_once() {
+    let service = service(&[Capability::SecretWrite], false);
+    let request = endpoint(&Method::POST, "/v1/secret/data/cutover");
+    service.write(IDENTITY, &request, data(1), None).unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let workers = [2, 3].map(|value| {
+        let service = service.clone();
+        let request = request.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            service.write(IDENTITY, &request, data(value), Some(1))
+        })
+    });
+    barrier.wait();
+    let results = workers.map(|worker| worker.join().unwrap());
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(KvError::CasConflict)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        service.with_catalog(|catalog| catalog.current_version("cutover")),
+        Some(2)
+    );
+}
+
+#[test]
+fn ordinary_history_prunes_but_rotation_protection_survives_until_clear() {
+    let service = service(
+        &[Capability::SecretWrite, Capability::SecretReadHistory],
+        false,
+    );
+    service.with_catalog(|catalog| catalog.set_mount_max_versions(1).unwrap());
+    let write = endpoint(&Method::POST, "/v1/secret/data/rotation");
+    service.write(IDENTITY, &write, data(1), None).unwrap();
+    service
+        .with_catalog(|catalog| catalog.set_rotation_protection("rotation", Some(1)))
+        .unwrap();
+    for value in 2..=4 {
+        let expected = u64::try_from(value - 1).unwrap();
+        service
+            .write(IDENTITY, &write, data(value), Some(expected))
+            .unwrap();
+    }
+    let first = endpoint(&Method::GET, "/v1/secret/data/rotation?version=1");
+    let second = endpoint(&Method::GET, "/v1/secret/data/rotation?version=2");
+    assert_eq!(
+        service.read(IDENTITY, &first).unwrap().data,
+        json!({"value": 1})
+    );
+    assert!(matches!(
+        service.read(IDENTITY, &second),
+        Err(KvError::NotFound)
+    ));
+    assert!(service.with_catalog(|catalog| catalog.retention_deferred_by_rotation("rotation")));
+    service
+        .with_catalog(|catalog| catalog.set_rotation_protection("rotation", None))
+        .unwrap();
+    assert!(matches!(
+        service.read(IDENTITY, &first),
+        Err(KvError::NotFound)
+    ));
+    service.with_catalog(|catalog| {
+        assert!(!catalog.retention_deferred_by_rotation("rotation"));
+        assert_eq!(catalog.set_mount_max_versions(0), Err(KvError::Invalid));
+    });
+}
+
+#[test]
+fn mount_default_is_dynamic_and_path_override_wins_in_both_directions() {
+    let service = service(&[Capability::SecretWrite], false);
+    let inherited = endpoint(&Method::POST, "/v1/secret/data/inherited");
+    service.write(IDENTITY, &inherited, data(1), None).unwrap();
+    service.with_catalog(|catalog| catalog.set_mount_cas_required(true));
+    assert!(matches!(
+        service.write(IDENTITY, &inherited, data(2), None),
+        Err(KvError::CasConflict)
+    ));
+    service.with_catalog(|catalog| catalog.set_path_cas_required("inherited", Some(false)));
+    assert_eq!(
+        service
+            .write(IDENTITY, &inherited, data(2), None)
+            .unwrap()
+            .version,
+        2
+    );
+    service.with_catalog(|catalog| {
+        let effective = catalog.effective_cas_required("inherited");
+        assert!(!effective.effective);
+        assert_eq!(effective.source, CasSource::PathOverride);
+        catalog.set_path_cas_required("inherited", None);
+        assert_eq!(
+            catalog.effective_cas_required("inherited").source,
+            CasSource::MountDefault
+        );
+        catalog.set_mount_cas_required(false);
+    });
+    assert_eq!(
+        service
+            .write(IDENTITY, &inherited, data(3), None)
+            .unwrap()
+            .version,
+        3
+    );
+}
+
+#[test]
+fn explicit_version_even_current_requires_history_capability() {
+    let service = service(
+        &[Capability::SecretWrite, Capability::SecretReadCurrent],
+        false,
+    );
+    let write = endpoint(&Method::POST, "/v1/secret/data/apps/key");
+    service.write(IDENTITY, &write, data(1), None).unwrap();
+    let current = endpoint(&Method::GET, "/v1/secret/data/apps/key");
+    assert_eq!(
+        service.read(IDENTITY, &current).unwrap().data,
+        json!({"value": 1})
+    );
+    let explicit = endpoint(&Method::GET, "/v1/secret/data/apps/key?version=1");
+    assert!(matches!(
+        service.read(IDENTITY, &explicit),
+        Err(KvError::PermissionDenied)
+    ));
+    service.with_catalog(|catalog| {
+        catalog.replace_grants(vec![grant(2, &[Capability::SecretReadHistory])]);
+    });
+    assert_eq!(service.read(IDENTITY, &explicit).unwrap().version, 1);
+    assert!(matches!(
+        service.read(IDENTITY, &current),
+        Err(KvError::PermissionDenied)
+    ));
+}
+
+#[test]
+fn list_returns_sorted_immediate_children_and_has_its_own_capability() {
+    let service = service(&[Capability::SecretWrite], false);
+    for path in ["apps/a", "apps/team/b", "apps/team/c", "other/z"] {
+        let request = endpoint(&Method::POST, &format!("/v1/secret/data/{path}"));
+        service.write(IDENTITY, &request, data(1), None).unwrap();
+    }
+    let list_method = Method::from_bytes(b"LIST").unwrap();
+    let list = endpoint(&list_method, "/v1/secret/metadata/apps");
+    assert_eq!(
+        service.list(IDENTITY, &list),
+        Err(KvError::PermissionDenied)
+    );
+    service
+        .with_catalog(|catalog| catalog.replace_grants(vec![grant(3, &[Capability::SecretList])]));
+    assert_eq!(service.list(IDENTITY, &list).unwrap(), ["a", "team/"]);
+    service.with_catalog(|catalog| {
+        assert_eq!(
+            catalog.audit().last().unwrap().operation,
+            KvAuditOperation::List
+        );
+    });
+}
+
+fn auth_fixture() -> (AuthService, String) {
+    let store_id = StoreId([7; 16]);
+    let verifier_key = [8; 32];
+    let mut catalog = AuthCatalog::new(store_id, verifier_key, 1, 100).unwrap();
+    catalog
+        .insert_identity(
+            IdentityRecord::new(IDENTITY, "workload".into(), IdentityKind::Workload).unwrap(),
+        )
+        .unwrap();
+    catalog
+        .insert_role(
+            AppRoleRecord::new([1; 16], "role-a".into(), "role".into(), IDENTITY, Some(600))
+                .unwrap(),
+        )
+        .unwrap();
+    let metadata = CredentialIssueMetadata {
+        id: [3; 16],
+        identity_id: IDENTITY,
+        kind: CredentialKind::SecretId,
+        audience: CredentialAudience::Data,
+        issue_epoch: 1,
+        expires_at_effective_seconds: 1_000,
+        created_at_effective_seconds: 100,
+        issuer_identity_id: [4; 16],
+        issuance_request_id: [5; 16],
+        parent_accessor: None,
+        consumer_instance_id: None,
+    };
+    let mut random = Counter(10);
+    let issued = issue_credential(
+        &verifier_key,
+        store_id,
+        metadata,
+        "runtime".into(),
+        &mut |_| false,
+        &mut random,
+    )
+    .unwrap();
+    let secret_id = issued.expose_once().to_owned();
+    catalog
+        .insert_secret_id([1; 16], issued.record.clone(), 2)
+        .unwrap();
+    let auth = AuthService::new(catalog, Counter(100));
+    let token = auth
+        .login("role-a", &secret_id, [9; 16])
+        .unwrap()
+        .credential
+        .expose_once()
+        .to_owned();
+    (auth, token)
+}
+
+#[tokio::test]
+async fn final_router_dispatches_literal_list_and_get_list_true_with_strict_shapes() {
+    let (auth, token) = auth_fixture();
+    let kv = service(
+        &[
+            Capability::SecretWrite,
+            Capability::SecretReadCurrent,
+            Capability::SecretList,
+        ],
+        false,
+    );
+    let app = kv_router(auth, kv, InputHygieneState::new([9; 32]));
+
+    let write = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/secret/data/apps/key")
+        .header("x-vault-token", &token)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"data":{"value":"secret"},"options":{"cas":0}}"#,
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(write).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let read = Request::builder()
+        .uri("/v1/secret/data/apps/key")
+        .header("x-vault-token", &token)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(read).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["data"]["data"]["value"], "secret");
+    assert_eq!(body["data"]["metadata"]["version"], 1);
+
+    for (method, uri) in [
+        (
+            Method::from_bytes(b"LIST").unwrap(),
+            "/v1/secret/metadata/apps",
+        ),
+        (Method::GET, "/v1/secret/metadata/apps?list=true"),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-vault-token", &token)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"data": {"keys": ["key"]}}));
+    }
+
+    let duplicate = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/secret/data/apps/key")
+        .header("x-vault-token", &token)
+        .body(Body::from(r#"{"data":{"a":1},"data":{"a":2}}"#))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(duplicate).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let namespace = Request::builder()
+        .uri("/v1/secret/data/apps/key")
+        .header("x-vault-token", &token)
+        .header("x-vault-namespace", "team")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.oneshot(namespace).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn audit_type_has_no_secret_value_or_body_fields() {
+    let service = service(&[Capability::SecretWrite], false);
+    let request = endpoint(&Method::POST, "/v1/secret/data/canary");
+    service
+        .write(
+            IDENTITY,
+            &request,
+            Map::from_iter([("PRIVATE_CANARY".into(), json!(true))]),
+            None,
+        )
+        .unwrap();
+    service.with_catalog(|catalog| {
+        let rendered = format!("{:?}", catalog.audit());
+        assert!(!rendered.contains("PRIVATE_CANARY"));
+    });
+}
