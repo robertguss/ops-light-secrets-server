@@ -31,6 +31,7 @@ jobs:
         check:
           - compat-pins
           - compat-capture
+          - differential
           - lock-msrv
           - crypto-vectors
           - fmt

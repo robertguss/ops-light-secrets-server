@@ -52,3 +52,7 @@ path = "tests/compat/mod.rs"
 [[test]]
 name = "txn_crash"
 path = "tests/fault/txn_crash.rs"
+
+[[test]]
+name = "differential"
+path = "tests/differential/mod.rs"

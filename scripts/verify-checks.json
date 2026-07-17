@@ -14,6 +14,12 @@
       "toolchain": "default"
     },
     {
+      "id": "differential",
+      "program": "./scripts/check-differential.sh",
+      "args": [],
+      "toolchain": "default"
+    },
+    {
       "id": "lock-msrv",
       "toolchain": "default",
       "program": "./scripts/check-lock-msrv.sh",

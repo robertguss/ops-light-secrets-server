@@ -1,0 +1,318 @@
+{
+  "schema": 1,
+  "normalization_schema_version": 1,
+  "reference_version": "openbao-2.6.0",
+  "cases": [
+    {
+      "id": "write-then-read",
+      "family": "read-write",
+      "description": "CAS create then current read returns data+metadata.version",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/write-read",
+          "body": "{\"data\":{\"value\":\"diff-canary-value\"},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/write-read",
+        "body": null
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "cas-conflict",
+      "family": "cas",
+      "description": "Wrong CAS comparand fails without advancing version",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/cas",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/data/diff/cas",
+        "body": "{\"data\":{\"value\":2},\"options\":{\"cas\":0}}"
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "cas-required-missing",
+      "family": "cas",
+      "description": "Mount cas_required rejects unconditional write",
+      "setup": [],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/data/diff/cas-required",
+        "body": "{\"data\":{\"value\":1}}"
+      },
+      "auth": "valid",
+      "mount_cas_required": true
+    },
+    {
+      "id": "soft-delete-current",
+      "family": "delete",
+      "description": "DELETE current version yields no content",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/soft-del",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "DELETE",
+        "path": "/v1/secret/data/diff/soft-del",
+        "body": null
+      },
+      "auth": "valid",
+      "capabilities": ["write", "read", "soft_delete"]
+    },
+    {
+      "id": "versioned-delete-undelete-destroy",
+      "family": "delete",
+      "description": "Version batch delete/undelete/destroy lifecycle",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/lifecycle",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/lifecycle",
+          "body": "{\"data\":{\"value\":2},\"options\":{\"cas\":1}}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/secret/delete/diff/lifecycle",
+          "body": "{\"versions\":[1]}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/secret/undelete/diff/lifecycle",
+          "body": "{\"versions\":[1]}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/secret/destroy/diff/lifecycle",
+          "body": "{\"versions\":[1]}"
+        }
+      ],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/metadata/diff/lifecycle",
+        "body": null
+      },
+      "auth": "valid",
+      "capabilities": ["write", "read", "list", "soft_delete", "undelete", "destroy", "history"]
+    },
+    {
+      "id": "metadata-list",
+      "family": "list",
+      "description": "LIST and GET ?list=true return keys",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/list/alpha",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/metadata/diff/list?list=true",
+        "body": null
+      },
+      "auth": "valid",
+      "capabilities": ["write", "list"]
+    },
+    {
+      "id": "secret-not-found",
+      "family": "missing",
+      "description": "Missing secret uses frozen not-found envelope",
+      "setup": [],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/missing-path",
+        "body": null
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "auth-missing-token",
+      "family": "auth",
+      "description": "Missing token is denied",
+      "setup": [],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/auth-missing",
+        "body": null
+      },
+      "auth": "none"
+    },
+    {
+      "id": "auth-invalid-token",
+      "family": "auth",
+      "description": "Garbage token is denied",
+      "setup": [],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/auth-bad",
+        "body": null
+      },
+      "auth": "invalid"
+    },
+    {
+      "id": "version-query-current",
+      "family": "version-query",
+      "description": "Explicit version=1 after write",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/ver",
+          "body": "{\"data\":{\"value\":\"v1\"},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/ver?version=1",
+        "body": null
+      },
+      "auth": "valid",
+      "capabilities": ["write", "read", "history"]
+    },
+    {
+      "id": "metadata-partial-update",
+      "family": "metadata",
+      "description": "Metadata cas_required/max_versions update",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/meta",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/metadata/diff/meta",
+        "body": "{\"cas_required\":false,\"max_versions\":5,\"delete_version_after\":\"0s\",\"custom_metadata\":{\"team\":\"diff\"}}"
+      },
+      "auth": "valid",
+      "capabilities": ["write", "read"]
+    },
+    {
+      "id": "duplicate-json-keys",
+      "family": "hygiene",
+      "description": "Duplicate JSON object keys rejected",
+      "setup": [],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/data/diff/dup",
+        "body": "{\"data\":{\"a\":1},\"data\":{\"a\":2}}"
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "unsupported-patch-data",
+      "family": "unsupported",
+      "description": "PATCH data is R3 unsupported",
+      "setup": [],
+      "probe": {
+        "method": "PATCH",
+        "path": "/v1/secret/data/diff/patch",
+        "body": "{\"data\":{\"value\":1}}"
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "metadata-delete",
+      "family": "unsupported",
+      "description": "DELETE metadata is R3 unsupported",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/meta-del",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "DELETE",
+        "path": "/v1/secret/metadata/diff/meta-del",
+        "body": null
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "namespace-header",
+      "family": "unsupported",
+      "description": "X-Vault-Namespace rejected",
+      "setup": [],
+      "probe": {
+        "method": "GET",
+        "path": "/v1/secret/data/diff/ns",
+        "body": null,
+        "headers": {
+          "x-vault-namespace": "team"
+        }
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "token-renew-self",
+      "family": "unsupported",
+      "description": "Token renew-self is R3 unsupported",
+      "setup": [],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/auth/token/renew-self",
+        "body": "{}"
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "delete-version-after-partial",
+      "family": "unsupported",
+      "description": "Non-zero delete_version_after rejected",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/dva",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        }
+      ],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/metadata/diff/dva",
+        "body": "{\"delete_version_after\":\"1h\"}"
+      },
+      "auth": "valid"
+    },
+    {
+      "id": "mixed-delete-array",
+      "family": "delete",
+      "description": "Soft-delete specific versions array",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/mixed",
+          "body": "{\"data\":{\"value\":1},\"options\":{\"cas\":0}}"
+        },
+        {
+          "method": "POST",
+          "path": "/v1/secret/data/diff/mixed",
+          "body": "{\"data\":{\"value\":2},\"options\":{\"cas\":1}}"
+        }
+      ],
+      "probe": {
+        "method": "POST",
+        "path": "/v1/secret/delete/diff/mixed",
+        "body": "{\"versions\":[1,2]}"
+      },
+      "auth": "valid",
+      "capabilities": ["write", "soft_delete"]
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "reference_version": "openbao-2.6.0",
+  "implementation_version": "ops-light-secrets-server-0.1.0",
+  "entries": [
+    {
+      "case": "unsupported-patch-data",
+      "reference_version": "openbao-2.6.0",
+      "implementation_version": "ops-light-secrets-server-0.1.0",
+      "divergence": {
+        "kind": "status_and_errors_message",
+        "field": "errors[0]",
+        "reference": "method-not-allowed-or-path-not-found-class",
+        "implementation": "unsupported endpoint: PATCH /v1/:mount/data/:path"
+      },
+      "reason": "R3 explicit-unsupported surface: OLSS freezes enumerable unsupported envelopes rather than OpenBao's generic method/path messaging",
+      "owner": "unit-u11",
+      "review_by": "2027-01-01"
+    },
+    {
+      "case": "metadata-delete",
+      "reference_version": "openbao-2.6.0",
+      "implementation_version": "ops-light-secrets-server-0.1.0",
+      "divergence": {
+        "kind": "status",
+        "field": "status",
+        "reference": "204-or-200-class",
+        "implementation": "501"
+      },
+      "reason": "R3: remote metadata delete is explicit NOT_IMPLEMENTED; destructive metadata wipe is local control plane only",
+      "owner": "unit-u11",
+      "review_by": "2027-01-01"
+    },
+    {
+      "case": "namespace-header",
+      "reference_version": "openbao-2.6.0",
+      "implementation_version": "ops-light-secrets-server-0.1.0",
+      "divergence": {
+        "kind": "status_and_errors_message",
+        "field": "status",
+        "reference": "ignored-or-enterprise-namespace-class",
+        "implementation": "400"
+      },
+      "reason": "R3: namespaces are unsupported; X-Vault-Namespace is rejected with a frozen envelope",
+      "owner": "unit-u11",
+      "review_by": "2027-01-01"
+    },
+    {
+      "case": "token-renew-self",
+      "reference_version": "openbao-2.6.0",
+      "implementation_version": "ops-light-secrets-server-0.1.0",
+      "divergence": {
+        "kind": "status",
+        "field": "status",
+        "reference": "200-class-when-token-renewable",
+        "implementation": "501"
+      },
+      "reason": "R3: token renewal is out of v0.1 surface; renew-self is explicit NOT_IMPLEMENTED",
+      "owner": "unit-u11",
+      "review_by": "2027-01-01"
+    },
+    {
+      "case": "delete-version-after-partial",
+      "reference_version": "openbao-2.6.0",
+      "implementation_version": "ops-light-secrets-server-0.1.0",
+      "divergence": {
+        "kind": "status_and_errors_message",
+        "field": "errors[0]",
+        "reference": "accepts-duration-string",
+        "implementation": "delete_version_after is not supported"
+      },
+      "reason": "R3: timed version expiry is unsupported; only delete_version_after=0s is accepted as a no-op shape",
+      "owner": "unit-u11",
+      "review_by": "2027-01-01"
+    }
+  ]
+}

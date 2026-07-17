@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "reference_version": "openbao-2.6.0",
+  "source": "frozen-openbao-kv-v2-contract-plus-u0-capture-notes",
+  "outcomes": {
+    "write-then-read": {
+      "status": 200,
+      "status_class": "2xx",
+      "envelope_keys": ["data"],
+      "field_presence": {
+        "data.data.value": true,
+        "data.metadata.version": true,
+        "errors": false
+      },
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "cas-conflict": {
+      "status": 400,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true,
+        "data": false
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "notes": "OpenBao/Vault KV v2 CAS mismatch is 400 with errors[]; OLSS matches this class and message shape"
+    },
+    "cas-required-missing": {
+      "status": 400,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status"
+    },
+    "soft-delete-current": {
+      "status": 204,
+      "status_class": "2xx",
+      "envelope_keys": [],
+      "field_presence": {},
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "versioned-delete-undelete-destroy": {
+      "status": 200,
+      "status_class": "2xx",
+      "envelope_keys": ["data"],
+      "field_presence": {
+        "data.versions": true,
+        "errors": false
+      },
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "metadata-list": {
+      "status": 200,
+      "status_class": "2xx",
+      "envelope_keys": ["data"],
+      "field_presence": {
+        "data.keys": true
+      },
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "secret-not-found": {
+      "status": 404,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status"
+    },
+    "auth-missing-token": {
+      "status": 403,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "status_class",
+      "notes": "Reference may use 400/403 depending on token middleware; G0 freezes OLSS at 403 permission denied"
+    },
+    "auth-invalid-token": {
+      "status": 403,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "status_class"
+    },
+    "version-query-current": {
+      "status": 200,
+      "status_class": "2xx",
+      "envelope_keys": ["data"],
+      "field_presence": {
+        "data.data.value": true,
+        "data.metadata.version": true
+      },
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "metadata-partial-update": {
+      "status": 204,
+      "status_class": "2xx",
+      "envelope_keys": [],
+      "field_presence": {},
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    },
+    "duplicate-json-keys": {
+      "status": 400,
+      "status_class": "4xx",
+      "envelope_keys": [],
+      "field_presence": {},
+      "errors_count": null,
+      "compare_mode": "exact_status",
+      "notes": "Input hygiene rejects duplicate object keys before the Vault JSON envelope is built; status is the contract, body is plain text not errors[]"
+    },
+    "unsupported-patch-data": {
+      "status": 405,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "allowlisted": true
+    },
+    "metadata-delete": {
+      "status": 501,
+      "status_class": "5xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "allowlisted": true
+    },
+    "namespace-header": {
+      "status": 400,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "allowlisted": true
+    },
+    "token-renew-self": {
+      "status": 501,
+      "status_class": "5xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "allowlisted": true
+    },
+    "delete-version-after-partial": {
+      "status": 400,
+      "status_class": "4xx",
+      "envelope_keys": ["errors"],
+      "field_presence": {
+        "errors": true
+      },
+      "errors_count": 1,
+      "compare_mode": "exact_status",
+      "allowlisted": true
+    },
+    "mixed-delete-array": {
+      "status": 204,
+      "status_class": "2xx",
+      "envelope_keys": [],
+      "field_presence": {},
+      "errors_count": null,
+      "compare_mode": "exact_status"
+    }
+  }
+}
