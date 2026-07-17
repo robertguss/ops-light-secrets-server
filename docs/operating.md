@@ -335,6 +335,28 @@ symlink, non-socket, wrong owner, unsafe mode, or inode race fails closed. A
 confirmed stale owner-only socket may be replaced. Shutdown removes the socket
 only when its device and inode still match the one created by this process.
 
+Identity and grant administration uses `identity create|list|show|disable`,
+`grant add|remove|list`, and `authz explain`. Each CLI group requires
+`--control-socket` and a typed `--control-credential-source`; bearer bytes must
+never appear in argv. Machine output uses schema version 1, immutable 128-bit
+public IDs, stable ID ordering, cursor pagination, and a hard page limit of 100.
+
+Identity names are unique forever, including after terminal disable. Mutation
+targets use IDs, not names. Disable and grant removal require the exact current
+generation, a non-secret reason, and a request ID. Replaying the same request ID
+for the same target is idempotent; reuse for another command or target is a
+conflict. Disable is terminal in v0.1. Bounded affected-object counts never
+include names.
+
+The exhaustive control-command registry is authoritative for capability
+checks. Identity/grant operations map to `identity-grant-manage`; `authz
+explain` maps only to `diagnostics`; reserve operations map only to
+`store-maintenance`; and backup/audit-export discovery and resume retain their
+narrow capabilities. Checkpoint signing is local and has no server mapping.
+Control audience, owner UID, active credential, active identity, current grants,
+operation, and audit outcome are evaluated at the final coordinator barrier.
+The remote data router contains none of these routes.
+
 ## TLS files and live reload
 
 Configure the certificate and private key as a pair with `[tls].certificate`

@@ -1,5 +1,7 @@
 //! Owner-only control-plane listener and router separation.
 
+pub mod management;
+
 use axum::serve::Listener;
 use axum::{Json, Router, routing::get};
 use serde::Serialize;

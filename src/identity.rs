@@ -346,6 +346,18 @@ pub struct IdentityRecord {
 }
 
 impl IdentityRecord {
+    pub fn new(id: [u8; 16], name: String, kind: IdentityKind) -> Result<Self, IdentityError> {
+        let value = Self {
+            id,
+            name,
+            kind,
+            status: IdentityStatus::Active,
+            generation: 1,
+        };
+        value.validate().map_err(|_| IdentityError::Invalid)?;
+        Ok(value)
+    }
+
     pub fn seal(self, key: &[u8; 32], store_id: StoreId) -> Result<Sealed<Self>, CodecError> {
         self.validate()?;
         let generation = self.generation;

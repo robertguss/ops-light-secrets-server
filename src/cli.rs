@@ -67,6 +67,117 @@ enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Manage identities through the owner-only control socket
+    Identity {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: IdentityCommand,
+    },
+    /// Manage grants through the owner-only control socket
+    Grant {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: GrantCommand,
+    },
+    /// Explain an authorization decision through the owner-only control socket
+    Authz {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: AuthzCommand,
+    },
+}
+
+#[derive(Debug, clap::Args)]
+struct ControlConnectionArgs {
+    /// Owner-only Unix control socket
+    #[arg(long)]
+    control_socket: PathBuf,
+
+    /// Control-audience credential source descriptor; never pass bearer bytes in argv
+    #[arg(long)]
+    control_credential_source: SecretSource,
+
+    /// Stable machine output or concise operator output
+    #[arg(long, value_enum, default_value = "human")]
+    output: OutputFormat,
+}
+
+#[derive(Debug, Subcommand)]
+enum IdentityCommand {
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_enum)]
+        kind: IdentityKindArg,
+    },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Show {
+        identity_id: String,
+    },
+    Disable {
+        identity_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum IdentityKindArg {
+    Human,
+    Workload,
+}
+
+#[derive(Debug, Subcommand)]
+enum GrantCommand {
+    Add {
+        #[arg(long)]
+        identity_id: String,
+        #[arg(long)]
+        mount: String,
+        #[arg(long, value_parser = ["exact", "subtree"])]
+        scope: String,
+        #[arg(long = "prefix-segment")]
+        prefix_segments: Vec<String>,
+        #[arg(long = "capability", required = true)]
+        capabilities: Vec<String>,
+    },
+    Remove {
+        grant_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+    },
+    List {
+        #[arg(long)]
+        identity_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthzCommand {
+    Explain {
+        #[arg(long)]
+        identity_id: String,
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        operation: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -280,6 +391,9 @@ pub fn run() -> Result<(), String> {
             }
             Command::Key { .. } => unreachable!("stateless key command handled before config"),
             Command::Audit { .. } => unreachable!("offline audit command handled before config"),
+            Command::Identity { .. } | Command::Grant { .. } | Command::Authz { .. } => {
+                return Err("control_command_refused code=integration_pending setting=authenticated_request_coordinator remediation='complete U4.2 control-credential middleware and coordinator adapter'".into());
+            }
         }
     }
     Ok(())
