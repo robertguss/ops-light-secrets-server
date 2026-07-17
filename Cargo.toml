@@ -62,5 +62,9 @@ name = "core_recovery_gate"
 path = "tests/fault/core_recovery_gate.rs"
 
 [[test]]
+name = "e2e_recovery_alpha"
+path = "tests/e2e_recovery_alpha.rs"
+
+[[test]]
 name = "differential"
 path = "tests/differential/mod.rs"

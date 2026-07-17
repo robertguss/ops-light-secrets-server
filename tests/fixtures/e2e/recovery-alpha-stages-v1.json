@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "profile": "recovery-alpha",
+  "binary_source_kind": "release-profile-build",
+  "mandatory_stages": [
+    "binary_provenance",
+    "generate_active_identity",
+    "generate_recovery_identity",
+    "cli_surface_freeze",
+    "backup_owner_catalog_commands",
+    "init_serve_contract",
+    "backup_publication_matrix",
+    "detached_sign_and_rehearsal_modes",
+    "normal_restore_branch",
+    "credential_epoch_predecessor_reject",
+    "recipient_rewrap_offline",
+    "rollback_fork_activation",
+    "source_decommission_barrier",
+    "canary_scan_and_cleanup"
+  ],
+  "reproduction_command": "./scripts/e2e.sh --profile recovery-alpha"
+}
