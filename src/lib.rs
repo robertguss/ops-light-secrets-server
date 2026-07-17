@@ -1,5 +1,6 @@
 //! Shared implementation for the `ops-light-secrets-server` binary.
 
+pub mod audit_export;
 pub mod auth;
 pub mod backup;
 pub mod backup_format;

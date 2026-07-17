@@ -1,4 +1,13 @@
 use age::x25519;
+use ed25519_dalek::SigningKey;
+use ops_light_secrets_server::audit_export::{
+    AuditExportCatalog, AuditExportCatalogFilter, AuditExportCreateRequest, AuditExportError,
+    AuditExportRecipientCatalog, AuditExportRecord, AuditFilter, AuditQueryRequest, EvidenceKind,
+    ExportEvidence, ExportSignatureRegistration, MAX_EXPORT_RECIPIENTS, MAX_QUERY_PAGE,
+    RecipientMutation, abandon_confirmation, create_export, decrypt_export, query_snapshot,
+    recipient_confirmation, sign_export, verify_export,
+};
+use ops_light_secrets_server::backup::{ObservedPublication, PublicationState};
 use ops_light_secrets_server::init::KeyringInitTransaction;
 use ops_light_secrets_server::store::keyring::{
     Keyring, KeyringError, KeyringOpener, RandomSource, RecipientSet,
@@ -68,6 +77,401 @@ fn successful_read(event: u8, effective: u64, wall: u64) -> AuditEvent {
         flood: None,
         overload_counts: Vec::new(),
     }
+}
+
+fn audit_corpus(count: u8) -> (Keyring, Vec<StoredAuditEntry>) {
+    let mut random = Counter(0);
+    let keyring = keyring(&mut random);
+    let epoch = [9; 16];
+    let mut previous = [0; 32];
+    let mut entries = Vec::new();
+    for sequence in 1..=count {
+        let mut event = successful_read(
+            sequence,
+            1_800_000_000_000 + u64::from(sequence),
+            1_700_000_000_000 + u64::from(sequence),
+        );
+        if sequence % 2 == 0 {
+            event.resource = Some(AuditResource::Canonical("kv/apps/other/token".into()));
+        }
+        let entry = StoredAuditEntry::prepare(
+            &keyring,
+            &event,
+            epoch,
+            u64::from(sequence),
+            previous,
+            &mut random,
+        )
+        .unwrap();
+        previous = entry.envelope.chain_hash().unwrap();
+        entries.push(entry);
+    }
+    (keyring, entries)
+}
+
+#[test]
+fn bounded_audit_query_filters_pages_and_reauthorizes_before_release() {
+    let (keyring, entries) = audit_corpus(5);
+    let filter = AuditFilter {
+        canonical_path_prefix: Some("kv/apps/canvas".into()),
+        minimum_sequence: Some(1),
+        maximum_sequence: Some(5),
+        ..AuditFilter::default()
+    };
+    let cursor_key = [42; 32];
+    let request = |cursor| AuditQueryRequest {
+        store_incarnation_id: [7; 16],
+        filter: &filter,
+        limit: 2,
+        cursor,
+        cursor_key: &cursor_key,
+        authorized: true,
+    };
+    let first = query_snapshot(&entries, &keyring, request(None), || Ok(())).unwrap();
+    assert_eq!(
+        first
+            .views
+            .iter()
+            .map(|view| view.sequence)
+            .collect::<Vec<_>>(),
+        [1, 3]
+    );
+    let second = query_snapshot(
+        &entries,
+        &keyring,
+        request(first.next_cursor.as_ref()),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        second
+            .views
+            .iter()
+            .map(|view| view.sequence)
+            .collect::<Vec<_>>(),
+        [5]
+    );
+    assert!(second.next_cursor.is_none());
+    assert_eq!(
+        query_snapshot(&entries, &keyring, request(None), || Err(
+            AuditExportError::Unauthorized
+        )),
+        Err(AuditExportError::Unauthorized)
+    );
+    assert!(
+        query_snapshot(
+            &entries,
+            &keyring,
+            AuditQueryRequest {
+                authorized: false,
+                ..request(None)
+            },
+            || panic!("barrier must not run")
+        )
+        .is_err()
+    );
+    assert!(
+        query_snapshot(
+            &entries,
+            &keyring,
+            AuditQueryRequest {
+                limit: MAX_QUERY_PAGE + 1,
+                ..request(None)
+            },
+            || Ok(())
+        )
+        .is_err()
+    );
+    let mut forged_cursor = first.next_cursor.clone().unwrap();
+    forged_cursor.after_sequence += 1;
+    assert!(query_snapshot(&entries, &keyring, request(Some(&forged_cursor)), || Ok(())).is_err());
+}
+
+#[test]
+fn recipient_catalog_is_distinct_bounded_cas_and_final_barrier_gated() {
+    let first = x25519::Identity::generate().to_public();
+    let second = x25519::Identity::generate().to_public();
+    let mut catalog = AuditExportRecipientCatalog::new(1, vec![first.clone()]).unwrap();
+    let reason = "scheduled auditor rotation";
+    let blast = "all future audit exports";
+    let confirmation = recipient_confirmation(1, std::slice::from_ref(&second), reason, blast);
+    assert_eq!(
+        catalog
+            .replace(
+                RecipientMutation {
+                    expected_generation: 1,
+                    recipients: vec![second.clone()],
+                    reason,
+                    blast_radius: blast,
+                    confirmation,
+                    authorized: true,
+                },
+                || Ok(())
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(catalog.fingerprints().len(), 1);
+    assert!(
+        catalog
+            .replace(
+                RecipientMutation {
+                    expected_generation: 1,
+                    recipients: vec![first.clone()],
+                    reason,
+                    blast_radius: blast,
+                    confirmation,
+                    authorized: true,
+                },
+                || Ok(())
+            )
+            .is_err()
+    );
+    assert!(AuditExportRecipientCatalog::new(1, Vec::new()).is_err());
+    assert!(AuditExportRecipientCatalog::new(1, vec![first.clone(), first]).is_err());
+    let too_many = (0..=MAX_EXPORT_RECIPIENTS)
+        .map(|_| x25519::Identity::generate().to_public())
+        .collect();
+    assert!(AuditExportRecipientCatalog::new(1, too_many).is_err());
+    let current = catalog.fingerprints();
+    let third = x25519::Identity::generate().to_public();
+    let confirmation = recipient_confirmation(2, std::slice::from_ref(&third), reason, blast);
+    assert!(
+        catalog
+            .replace(
+                RecipientMutation {
+                    expected_generation: 2,
+                    recipients: vec![third],
+                    reason,
+                    blast_radius: blast,
+                    confirmation,
+                    authorized: true,
+                },
+                || Err(AuditExportError::Unauthorized),
+            )
+            .is_err()
+    );
+    assert_eq!(catalog.fingerprints(), current);
+}
+
+#[test]
+fn encrypted_signed_export_binds_original_views_evidence_and_lineage() {
+    let (keyring, entries) = audit_corpus(3);
+    let right = x25519::Identity::generate();
+    let wrong = x25519::Identity::generate();
+    let recipients = AuditExportRecipientCatalog::new(4, vec![right.to_public()]).unwrap();
+    let filter = AuditFilter::default();
+    let evidence = vec![ExportEvidence {
+        epoch: [9; 16],
+        kind: EvidenceKind::Checkpoint,
+        bytes: b"public-checkpoint-fixture".to_vec(),
+    }];
+    let created = create_export(
+        &entries,
+        &keyring,
+        AuditExportCreateRequest {
+            bundle_id: [21; 16],
+            store_incarnation_id: [22; 16],
+            minimum_sequence: 1,
+            maximum_sequence: 3,
+            filter: &filter,
+            recipients: &recipients,
+            signing_key_id: [23; 16],
+            signing_lineage_generation: 8,
+            signing_transition_digest: [24; 32],
+            evidence,
+            authorized: true,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let encoded = created.container.encode().unwrap();
+    for canary in [
+        b"kv/apps/canvas/api-key".as_slice(),
+        b"public-checkpoint-fixture".as_slice(),
+    ] {
+        assert!(!encoded.windows(canary.len()).any(|window| window == canary));
+    }
+    let payload = decrypt_export(&created.container, &right).unwrap();
+    assert_eq!(payload.members.len(), 3);
+    assert_eq!(payload.manifest.anchored_epochs, vec![[9; 16]]);
+    assert!(decrypt_export(&created.container, &wrong).is_err());
+
+    let signing = SigningKey::from_bytes(&[31; 32]);
+    let public = *signing.verifying_key().as_bytes();
+    let mut private = [31; 32];
+    let signature = sign_export(&created.container, &public, &mut private).unwrap();
+    assert_eq!(private, [0; 32]);
+    verify_export(
+        &created.container,
+        Some(&signature),
+        &public,
+        [23; 16],
+        8,
+        None,
+    )
+    .unwrap();
+    assert!(verify_export(&created.container, None, &public, [23; 16], 8, None).is_err());
+    assert!(
+        verify_export(
+            &created.container,
+            Some(&signature),
+            &public,
+            [99; 16],
+            8,
+            None
+        )
+        .is_err()
+    );
+    let mut bad_signature = signature.clone();
+    bad_signature.signature[0] ^= 1;
+    assert!(
+        verify_export(
+            &created.container,
+            Some(&bad_signature),
+            &public,
+            [23; 16],
+            8,
+            None
+        )
+        .is_err()
+    );
+    let mut tampered = created.container.clone();
+    tampered.encrypted_payload[0] ^= 1;
+    assert!(decrypt_export(&tampered, &right).is_err());
+}
+
+#[test]
+fn export_catalog_recovers_lost_reply_and_refuses_substitution_or_rollover() {
+    let (keyring, entries) = audit_corpus(1);
+    let recipient = x25519::Identity::generate();
+    let recipients = AuditExportRecipientCatalog::new(1, vec![recipient.to_public()]).unwrap();
+    let created = create_export(
+        &entries,
+        &keyring,
+        AuditExportCreateRequest {
+            bundle_id: [41; 16],
+            store_incarnation_id: [42; 16],
+            minimum_sequence: 1,
+            maximum_sequence: 1,
+            filter: &AuditFilter::default(),
+            recipients: &recipients,
+            signing_key_id: [43; 16],
+            signing_lineage_generation: 2,
+            signing_transition_digest: [44; 32],
+            evidence: Vec::new(),
+            authorized: true,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let mut catalog = AuditExportCatalog::default();
+    let record = AuditExportRecord {
+        artifact_digest: created.artifact_digest,
+        inner_manifest_digest: created.container.header.inner_manifest_digest,
+        output_id: [45; 16],
+        owner_id: [46; 16],
+        target_identity_digest: [47; 32],
+        content_digest: *blake3::hash(&created.container.encode().unwrap()).as_bytes(),
+        minimum_sequence: 1,
+        maximum_sequence: 1,
+        signing_key_id: [43; 16],
+        signing_lineage_generation: 2,
+        recipient_generation: 1,
+        publication: PublicationState::Publishing,
+        signature_registered: false,
+    };
+    catalog.reserve(record.clone(), true).unwrap();
+    catalog.reserve(record, true).unwrap();
+    assert_eq!(
+        catalog
+            .list(None, 100, AuditExportCatalogFilter::default())
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        catalog
+            .resume(
+                created.artifact_digest,
+                ObservedPublication::ExactFinal,
+                true
+            )
+            .unwrap(),
+        PublicationState::Published
+    );
+    assert_eq!(
+        catalog
+            .resume(
+                created.artifact_digest,
+                ObservedPublication::ExactFinal,
+                true
+            )
+            .unwrap(),
+        PublicationState::Published
+    );
+    let signing = SigningKey::from_bytes(&[51; 32]);
+    let public = *signing.verifying_key().as_bytes();
+    let mut private = [51; 32];
+    let signature = sign_export(&created.container, &public, &mut private).unwrap();
+    assert!(
+        catalog
+            .register_signature(ExportSignatureRegistration {
+                digest: created.artifact_digest,
+                container: &created.container,
+                signature: &signature,
+                public_key: &public,
+                current_key_id: [43; 16],
+                current_generation: 3,
+                authorized: true,
+            })
+            .is_err()
+    );
+    catalog
+        .register_signature(ExportSignatureRegistration {
+            digest: created.artifact_digest,
+            container: &created.container,
+            signature: &signature,
+            public_key: &public,
+            current_key_id: [43; 16],
+            current_generation: 2,
+            authorized: true,
+        })
+        .unwrap();
+    catalog
+        .register_signature(ExportSignatureRegistration {
+            digest: created.artifact_digest,
+            container: &created.container,
+            signature: &signature,
+            public_key: &public,
+            current_key_id: [43; 16],
+            current_generation: 2,
+            authorized: true,
+        })
+        .unwrap();
+    assert_eq!(
+        catalog.show(created.artifact_digest).unwrap().publication,
+        PublicationState::Registered
+    );
+
+    let digest = [61; 32];
+    let mut abandoned = AuditExportCatalog::default();
+    let mut record = catalog.show(created.artifact_digest).unwrap().clone();
+    record.artifact_digest = digest;
+    record.publication = PublicationState::Publishing;
+    record.signature_registered = false;
+    abandoned.reserve(record, true).unwrap();
+    let confirmation = abandon_confirmation(digest, 2, "owned bytes missing");
+    abandoned
+        .abandon(digest, 2, "owned bytes missing", confirmation, true)
+        .unwrap();
+    abandoned
+        .abandon(digest, 2, "owned bytes missing", confirmation, true)
+        .unwrap();
+    assert_eq!(
+        abandoned.show(digest).unwrap().publication,
+        PublicationState::Abandoned
+    );
 }
 
 #[test]
