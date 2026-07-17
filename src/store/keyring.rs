@@ -457,6 +457,36 @@ impl Keyring {
         Ok(id)
     }
 
+    /// Forward-only audit-payload generation rotation (U8.6). Historical
+    /// generations remain decrypt-only; none are removed in v0.1.
+    pub fn rotate_audit_payload_key(
+        &mut self,
+        expected_generation: u64,
+        random: &mut impl RandomSource,
+    ) -> Result<KeyId, KeyringError> {
+        self.append_audit_payload_key(expected_generation, random)
+    }
+
+    /// Mint a replacement metadata-integrity key id for an offline re-MAC job
+    /// (U8.5). The caller must re-seal clear records under the new key before
+    /// the keyring is installed; this only advances keyring generation.
+    pub fn rotate_metadata_integrity_key(
+        &mut self,
+        expected_generation: u64,
+        random: &mut impl RandomSource,
+    ) -> Result<(KeyId, KeyId), KeyringError> {
+        if self.generation != expected_generation {
+            return Err(KeyringError::GenerationMismatch);
+        }
+        let old = self.metadata_integrity.id();
+        let mut ids = self.all_keys().map(PurposeKey::id).collect::<BTreeSet<_>>();
+        let key = generate_key(random, &mut ids)?;
+        let new_id = key.id();
+        self.metadata_integrity = key;
+        self.generation = self.generation.checked_add(1).ok_or(KeyringError::Limit)?;
+        Ok((old, new_id))
+    }
+
     pub(crate) fn metadata_integrity_key(&self) -> &[u8; 32] {
         self.metadata_integrity.expose()
     }

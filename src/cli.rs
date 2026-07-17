@@ -1104,6 +1104,45 @@ enum KeyCommand {
         #[command(subcommand)]
         command: RecordKeyCommand,
     },
+    /// Offline metadata-integrity key rotation (re-MAC job)
+    Metadata {
+        #[command(subcommand)]
+        command: MetadataKeyCommand,
+    },
+    /// Forward-only audit-payload key generation rotation
+    #[command(name = "audit-payload")]
+    AuditPayload {
+        #[command(subcommand)]
+        command: AuditPayloadKeyCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MetadataKeyCommand {
+    Rotate {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
+    Abort {
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditPayloadKeyCommand {
+    Rotate {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -1600,6 +1639,13 @@ pub fn run() -> Result<(), String> {
             }
             Command::Backup { .. } => {
                 return Err("backup_refused code=live_control_adapter_pending artifact_bytes_unchanged=true remediation='retry after authenticated backup control adapter is available'".into());
+            }
+            Command::Key {
+                command: KeyCommand::Metadata { .. } | KeyCommand::AuditPayload { .. },
+            } => {
+                return Err(
+                    "key_rotation_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete control-plane key rotation adapter'".into(),
+                );
             }
             Command::Restore { .. } => unreachable!("offline restore handled before config"),
         }

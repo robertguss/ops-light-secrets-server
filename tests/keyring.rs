@@ -416,3 +416,70 @@ fn unknown_purpose_rng_unsafe_sink_and_short_write_have_stable_outcomes() {
         AgeIdentityError::Disclosure
     );
 }
+
+
+#[test]
+fn audit_payload_rotation_is_forward_only_and_limits_hard() {
+    use ops_light_secrets_server::store::keyring::{Keyring, RecipientSet};
+    let mut keyring = Keyring::generate(
+        StoreId([1; 16]),
+        1,
+        RecipientSet::new(
+            &x25519::Identity::from_str(ACTIVE_IDENTITY)
+                .unwrap()
+                .to_public(),
+            None,
+        )
+        .unwrap(),
+        &mut Counter(1),
+    )
+    .unwrap();
+    let start = keyring.generation();
+    assert_eq!(keyring.audit_payload_generations(), 1);
+    keyring
+        .rotate_audit_payload_key(start, &mut Counter(3))
+        .unwrap();
+    assert_eq!(keyring.audit_payload_generations(), 2);
+    assert_eq!(keyring.generation(), start + 1);
+    // Stale generation refused (CAS).
+    assert!(keyring.rotate_audit_payload_key(start, &mut Counter(4)).is_err());
+}
+
+#[test]
+fn metadata_integrity_key_rotation_advances_generation() {
+    use ops_light_secrets_server::store::keyring::{Keyring, RecipientSet};
+    let mut keyring = Keyring::generate(
+        StoreId([2; 16]),
+        1,
+        RecipientSet::new(
+            &x25519::Identity::from_str(ACTIVE_IDENTITY)
+                .unwrap()
+                .to_public(),
+            None,
+        )
+        .unwrap(),
+        &mut Counter(2),
+    )
+    .unwrap();
+    let old_id = keyring.metadata_integrity_key_id();
+    let generation = keyring.generation();
+    let (prev, next) = keyring
+        .rotate_metadata_integrity_key(generation, &mut Counter(4))
+        .unwrap();
+    assert_eq!(prev, old_id);
+    assert_ne!(next, old_id);
+    assert_eq!(keyring.metadata_integrity_key_id(), next);
+    assert_eq!(keyring.generation(), generation + 1);
+    assert!(keyring.rotate_metadata_integrity_key(generation, &mut Counter(5)).is_err());
+}
+
+#[test]
+fn key_cli_exposes_metadata_and_audit_payload_rotation() {
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+        .args(["key", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("metadata"));
+    assert!(text.contains("audit-payload"));
+}
