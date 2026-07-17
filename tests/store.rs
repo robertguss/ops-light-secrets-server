@@ -7,6 +7,7 @@ use ops_light_secrets_server::store::{
 };
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
+use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
 
 const SECRET_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secret_meta");
 
@@ -494,4 +495,109 @@ fn pending_anchor_mac_binds_store_and_rejects_edits() {
             .verify_pending_anchor(&key)
             .is_err()
     );
+}
+
+#[test]
+fn u2_scenario_ledger_is_complete_source_checked_and_harness_logged() {
+    const CASES: [&str; 20] = [
+        "write-read-ciphertext",
+        "version-retention-latest",
+        "wrong-absent-identity",
+        "aad-transplant",
+        "fresh-nonce",
+        "cross-architecture-vectors",
+        "clear-record-edit",
+        "clear-record-transplant",
+        "state-tail-rollback",
+        "metadata-no-decrypt",
+        "zeroize-contract",
+        "unknown-store-format",
+        "bounded-executor-lanes",
+        "cross-store-envelope",
+        "corrupt-envelope",
+        "no-plaintext-cache",
+        "keyring-metadata-mismatch",
+        "provisional-meta-reverify",
+        "single-envelope-decrypt",
+        "version-summary-generation",
+    ];
+    let ledger: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/u2-store-scenarios-v1.json")).unwrap();
+    let scenarios = ledger["scenarios"].as_array().unwrap();
+    assert_eq!(ledger["schema"], 1);
+    assert_eq!(scenarios.len(), CASES.len());
+    let harness = Harness::builder("u2-store-suite")
+        .register_canary(b"u2-store-secret-canary")
+        .build()
+        .unwrap();
+    for (index, (entry, case)) in scenarios.iter().zip(CASES).enumerate() {
+        assert_eq!(entry["id"], index + 1);
+        assert_eq!(entry["case"], case);
+        let source = entry["source"].as_str().unwrap();
+        let test = entry["test"].as_str().unwrap();
+        let contents =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(source))
+                .unwrap();
+        assert!(
+            contents.contains(&format!("fn {test}(")),
+            "missing {source}::{test}"
+        );
+        let status = entry["status"].as_str().unwrap();
+        assert!(matches!(status, "active" | "deferred"));
+        assert_eq!(status == "deferred", matches!(index + 1, 9 | 13));
+        let status = if status == "active" {
+            "active"
+        } else {
+            "deferred"
+        };
+        let owner = if entry["owner"] == "U2.8" {
+            "U2.8"
+        } else {
+            assert_eq!(entry["owner"], "U6.6");
+            "U6.6"
+        };
+        let mut scenario = harness.scenario_case("u2-store", case, 1).unwrap();
+        scenario
+            .step(
+                "coverage",
+                SafeSummary::new()
+                    .field("scenario", SafeValue::Unsigned((index + 1) as u64))
+                    .field("status", SafeValue::StaticKind(status))
+                    .field("owner", SafeValue::StaticKind(owner))
+                    .field("seed", SafeValue::Unsigned(0)),
+                ExpectedOutcome::Success,
+                ActualOutcome::Success,
+            )
+            .unwrap();
+        scenario.finish_success().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "U6.6 owns signed-checkpoint/offline-tail integration"]
+fn state_tail_checkpoint_rejects_rollback() {
+    use ops_light_secrets_server::store::{
+        EncryptedTable, StateDelta, StateDeltaSet, StateDigest, StateTuple,
+    };
+    use std::collections::BTreeSet;
+
+    let old = StateTuple::encrypted(EncryptedTable::Secrets, b"key", b"old").unwrap();
+    let new = StateTuple::encrypted(EncryptedTable::Secrets, b"key", b"new").unwrap();
+    let anchored = StateDigest::compute([old.clone()]).unwrap();
+    let tail = StateDeltaSet::new([StateDelta::replace(old, new.clone()).unwrap()]).unwrap();
+    assert_eq!(
+        StateDigest::compute(tail.reverse_apply(&BTreeSet::from([new])).unwrap()).unwrap(),
+        anchored
+    );
+    assert!(tail.reverse_apply(&BTreeSet::new()).is_err());
+}
+
+#[test]
+#[ignore = "U6.6 owns final cross-suite executor evidence"]
+fn executor_saturation_preserves_reserved_lane() {
+    let source = include_str!("storage_executor.rs");
+    assert!(
+        source.contains("bounded_lanes_emit_safe_observability_and_reject_before_payload_work")
+    );
+    assert!(!source.contains("#[ignore"));
 }

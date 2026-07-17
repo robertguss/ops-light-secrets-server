@@ -271,6 +271,29 @@ fn transplanted_envelope_refuses_on_store_id_before_metadata() {
     );
 }
 
+#[test]
+fn corrupt_and_truncated_envelopes_fail_closed_without_secret_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = create_store(&directory.path().join("store.redb"), 7);
+    let metadata = store.keyring_metadata().unwrap().unwrap();
+    let identity: x25519::Identity = ACTIVE_IDENTITY.parse().unwrap();
+    let envelope = store.keyring().unwrap().unwrap();
+    let mut edited = envelope.clone();
+    let last = edited.0.len() - 1;
+    edited.0[last] ^= 1;
+    let truncated = ops_light_secrets_server::store::KeyringEnvelope(
+        envelope.0[..envelope.0.len() - 1].to_vec(),
+    );
+    for candidate in [&edited, &truncated] {
+        let error = KeyringOpener::default()
+            .open(StoreId([7; 16]), candidate, &metadata, &identity)
+            .err()
+            .unwrap();
+        assert_eq!(error, KeyringError::Decrypt);
+        assert!(!error.to_string().contains(ACTIVE_IDENTITY));
+    }
+}
+
 struct FailingRandom {
     calls: usize,
 }

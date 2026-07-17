@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "scenarios": [
+    {"id":1,"case":"write-read-ciphertext","source":"src/store/versioned_secrets_tests.rs","test":"two_appends_round_trip_both_versions_latest_and_disk_has_no_plaintext","owner":"U2.8","status":"active"},
+    {"id":2,"case":"version-retention-latest","source":"src/store/versioned_secrets_tests.rs","test":"two_appends_round_trip_both_versions_latest_and_disk_has_no_plaintext","owner":"U2.8","status":"active"},
+    {"id":3,"case":"wrong-absent-identity","source":"tests/keyring.rs","test":"every_typed_source_reaches_real_decrypt_and_failures_are_closed","owner":"U2.8","status":"active"},
+    {"id":4,"case":"aad-transplant","source":"tests/record_aead.rs","test":"every_bound_field_and_cross_store_transplant_fails_closed","owner":"U2.8","status":"active"},
+    {"id":5,"case":"fresh-nonce","source":"tests/record_aead.rs","test":"round_trip_and_every_identical_rewrite_draws_a_fresh_192_bit_nonce","owner":"U2.8","status":"active"},
+    {"id":6,"case":"cross-architecture-vectors","source":"tests/crypto_fixtures.rs","test":"frozen_header_encrypted_record_and_clear_mac_decode_and_verify","owner":"U2.8","status":"active"},
+    {"id":7,"case":"clear-record-edit","source":"tests/integrity.rs","test":"runtime_tamper_flips_readiness_and_only_recovery_matrix_remains","owner":"U2.8","status":"active"},
+    {"id":8,"case":"clear-record-transplant","source":"tests/store.rs","test":"clear_record_mac_rejects_wrong_key_store_path_and_offline_edit","owner":"U2.8","status":"active"},
+    {"id":9,"case":"state-tail-rollback","source":"tests/store.rs","test":"state_tail_checkpoint_rejects_rollback","owner":"U6.6","status":"deferred"},
+    {"id":10,"case":"metadata-no-decrypt","source":"src/store/versioned_secrets_tests.rs","test":"metadata_queries_never_decrypt_and_each_value_read_decrypts_again","owner":"U2.8","status":"active"},
+    {"id":11,"case":"zeroize-contract","source":"src/store/versioned_secrets_tests.rs","test":"plaintext_owner_explicit_zeroize_erases_in_place","owner":"U2.8","status":"active"},
+    {"id":12,"case":"unknown-store-format","source":"tests/store.rs","test":"lifecycle_and_high_water_are_readable_before_keyring_and_unknown_format_refuses","owner":"U2.8","status":"active"},
+    {"id":13,"case":"bounded-executor-lanes","source":"tests/store.rs","test":"executor_saturation_preserves_reserved_lane","owner":"U6.6","status":"deferred"},
+    {"id":14,"case":"cross-store-envelope","source":"tests/keyring.rs","test":"transplanted_envelope_refuses_on_store_id_before_metadata","owner":"U2.8","status":"active"},
+    {"id":15,"case":"corrupt-envelope","source":"tests/keyring.rs","test":"corrupt_and_truncated_envelopes_fail_closed_without_secret_output","owner":"U2.8","status":"active"},
+    {"id":16,"case":"no-plaintext-cache","source":"src/store/versioned_secrets_tests.rs","test":"metadata_queries_never_decrypt_and_each_value_read_decrypts_again","owner":"U2.8","status":"active"},
+    {"id":17,"case":"keyring-metadata-mismatch","source":"tests/integrity.rs","test":"keyring_metadata_mac_failure_flips_readiness_after_single_decrypt","owner":"U2.8","status":"active"},
+    {"id":18,"case":"provisional-meta-reverify","source":"tests/integrity.rs","test":"provisional_meta_is_reverified_immediately_after_keyring_open","owner":"U2.8","status":"active"},
+    {"id":19,"case":"single-envelope-decrypt","source":"tests/keyring.rs","test":"init_commits_envelope_and_metadata_atomically_then_boot_opens_once","owner":"U2.8","status":"active"},
+    {"id":20,"case":"version-summary-generation","source":"tests/store.rs","test":"version_summary_generation_bumps_for_every_state_change","owner":"U2.8","status":"active"}
+  ]
+}
