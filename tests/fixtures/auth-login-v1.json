@@ -1,0 +1,1 @@
+{"auth":{"accessor":"<accessor>","client_token":"<token>","entity_id":"02020202020202020202020202020202","lease_duration":600,"metadata":{"role_name":"payments"},"mfa_requirement":null,"num_uses":0,"orphan":true,"policies":[],"renewable":false,"token_policies":[],"token_type":"service"}}

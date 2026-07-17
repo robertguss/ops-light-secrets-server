@@ -115,6 +115,11 @@
       "contract": "transport.reload_audit_and_final_adapter_verdict",
       "owner": "olss-charter-qul.8.4",
       "verification": "Back U9.1's fingerprint commit hook with reauthorization plus atomic audit/expected-fingerprint persistence, bind the authenticated control trigger to the same primitive, exercise crash reconciliation, and record the final axum-server adopt/fallback verdict after drain/barrier tests."
+    },
+    {
+      "contract": "auth.approle_durable_coordinator",
+      "owner": "olss-charter-qul.6.5",
+      "verification": "Persist U4.2 AppRole roles and secret-id usage records from U4.5's lifecycle commands, hydrate AuthCatalog at serve startup, and adapt login so the usage CAS, token verifier insertion, canonical audit append, and reply commit through one real redb coordinator transaction."
     }
   ]
 }

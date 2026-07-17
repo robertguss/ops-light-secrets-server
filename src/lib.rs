@@ -1,5 +1,6 @@
 //! Shared implementation for the `ops-light-secrets-server` binary.
 
+pub mod auth;
 pub mod clock;
 pub mod config;
 pub mod control;

@@ -23,6 +23,14 @@ pub fn data_router() -> Router {
     Router::new().route("/v1/sys/health", get(health))
 }
 
+/// Remote router with the declared v0.1 authentication surface installed.
+pub fn data_router_with_auth(
+    service: crate::auth::AuthService,
+    hygiene: crate::input_hygiene::InputHygieneState,
+) -> Router {
+    data_router().merge(crate::auth::auth_router(service, hygiene))
+}
+
 /// Router reachable only through the owner control socket.
 pub fn control_router() -> Router {
     Router::new()

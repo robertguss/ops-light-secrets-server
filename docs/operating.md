@@ -357,6 +357,30 @@ Control audience, owner UID, active credential, active identity, current grants,
 operation, and audit outcome are evaluated at the final coordinator barrier.
 The remote data router contains none of these routes.
 
+### Token and AppRole authentication
+
+The remote authentication surface is deliberately limited to
+`PUT|POST /v1/auth/approle/login`, `GET /v1/auth/token/lookup-self`, and
+`PUT|POST /v1/auth/token/renew-self`. Login accepts only the exact `role_id`
+and `secret_id` JSON fields through the duplicate-key-rejecting input boundary.
+Invalid secret IDs, wrong but existing roles, missing roles, exhausted uses,
+expired secret IDs, and deleted roles share one 400-class Vault error envelope.
+
+Role token TTL uses the frozen 60-second minimum, 1-hour default, and 24-hour
+maximum. Secret-ID use count is finite; zero is invalid. Login verifies the
+secret-ID audience and role binding, decrements a use, issues the data token,
+and records the audit intent under one linearization lock. A one-use secret ID
+therefore succeeds once under concurrency. Role deletion rejects later logins
+without changing independently issued token TTL/revocation/identity/epoch
+semantics.
+
+`lookup-self` reports immutable accessor metadata, creation/expiry, and TTL
+remaining but intentionally omits Vault's raw `data.id`. Tokens are
+non-renewable and login advertises `renewable:false`; `renew-self` returns the
+explicit Vault error `token renewal is not supported`. `X-Vault-Token` is
+extracted once by the hygiene layer, and data/control listener middleware uses
+cryptographically separate audience checks. No network bootstrap route exists.
+
 ## TLS files and live reload
 
 Configure the certificate and private key as a pair with `[tls].certificate`

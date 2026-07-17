@@ -79,13 +79,25 @@ impl CredentialAudience {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CredentialAccessor(pub [u8; ACCESSOR_BYTES]);
+
+impl CredentialAccessor {
+    pub fn encode(self) -> String {
+        Base64UrlUnpadded::encode_string(&self.0)
+    }
+}
 
 impl fmt::Display for CredentialAccessor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let encoded = Base64UrlUnpadded::encode_string(&self.0);
         write!(formatter, "{}…", &encoded[..8])
+    }
+}
+
+impl fmt::Debug for CredentialAccessor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
     }
 }
 
