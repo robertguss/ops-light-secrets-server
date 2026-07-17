@@ -811,6 +811,30 @@ synthetic v0-to-v1 adjacent fixture exactly once. Starting with the next release
 the committed fixture and actual prior released binary are mandatory migration
 and prior-binary-refusal evidence.
 
+## Offline store compaction
+
+Compaction is an explicit physical rewrite, never a startup, migration, backup,
+destroy, or purge side effect. Run `store compact plan` to measure the current
+file, complete the same signed and recovery-rehearsed fresh-backup sequence used
+for migration, stop cleanly and lock the parent/store without following links,
+then run `store compact plan --offline-final`. Only that audited final token is
+accepted by `store compact apply`; `store compact abort` is available only while
+the original file remains authoritative before replacement.
+
+The compacted sibling contains every logical record in the authoritative codec
+registry byte-for-byte, including encrypted nonces/ciphertexts, MAC'd metadata,
+soft-deleted versions and tombstones, audit history, checkpoints, signing trust,
+and backup/recovery evidence. Only redb free and superseded physical pages are
+left behind. A dense-store plan warns when predicted benefit is below 10%; it
+does not invent reclamation. Capacity is rechecked after `recovery.reserve` at
+the exact final barrier. After atomic install, complete a new external checkpoint
+and passing state verification to clear `pending_anchor=compaction`.
+
+Compaction is not secure deletion. Filesystem journals/snapshots, SSD remapping,
+backups, old copies, and retained authenticated history can preserve ciphertext.
+v0.1 makes no per-secret cryptographic-erasure claim; disposal remains an
+external media, backup, and key-custody procedure.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in

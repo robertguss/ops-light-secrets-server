@@ -6,6 +6,7 @@ pub mod backup_format;
 pub mod backup_verify;
 pub mod capacity;
 pub mod clock;
+pub mod compaction;
 pub mod config;
 pub mod control;
 pub mod credential;

@@ -267,6 +267,11 @@ pub fn transform_frames(
     frames: &[ArchiveFrame],
 ) -> Result<Vec<ArchiveFrame>, MigrationError> {
     registered_path(from, to)?;
+    validate_frames(frames)?;
+    Ok(frames.to_vec())
+}
+
+pub fn validate_frames(frames: &[ArchiveFrame]) -> Result<(), MigrationError> {
     let registry: BTreeMap<_, _> = ARCHIVE_REGISTRY
         .iter()
         .map(|codec| (codec.id, codec))
@@ -293,7 +298,7 @@ pub fn transform_frames(
     {
         return Err(MigrationError::InvalidFrames);
     }
-    Ok(frames.to_vec())
+    Ok(())
 }
 
 pub fn anchored_history_unchanged(

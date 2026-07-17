@@ -383,6 +383,46 @@ enum StoreCommand {
         #[command(subcommand)]
         command: StoreMigrateCommand,
     },
+    /// Plan, apply, or abort an offline physical compaction
+    Compact {
+        #[command(subcommand)]
+        command: StoreCompactCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreCompactCommand {
+    /// Measure reclaimable space and produce a preliminary or offline-final plan
+    Plan {
+        #[arg(long)]
+        archive: Option<PathBuf>,
+        #[arg(long)]
+        recovery_receipt: Option<PathBuf>,
+        #[arg(long)]
+        offline_final: bool,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Verify the final plan and atomically install the compacted sibling
+    Apply {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        recovery_receipt: PathBuf,
+        #[arg(long)]
+        confirm: String,
+    },
+    /// Abort a verified pre-replacement compaction job
+    Abort {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
