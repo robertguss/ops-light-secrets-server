@@ -14,7 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::auth::{AuthService, AuthenticatedToken, token_auth_guard};
 use crate::identity::{AuthorizationRequest, GrantRecord, SecretAction, authorize};
 use crate::input_hygiene::{InputHygieneState, StrictJsonBody, input_hygiene_guard};
-use crate::raw_target::{EndpointKind, EndpointRequest, raw_target_guard};
+use crate::raw_target::{EndpointKind, EndpointRequest, Resource, raw_target_guard};
 use crate::store::VersionState;
 
 pub const SECRET_MOUNT: &str = "secret";
@@ -73,6 +73,7 @@ pub enum KvAuditOperation {
     Destroy,
     RotationCutover,
     RotationRollback,
+    Purge,
 }
 
 /// Secret-safe operation evidence. Values and request bodies have no field here.
@@ -83,7 +84,7 @@ pub struct KvAuditEvent {
     pub operation: KvAuditOperation,
     pub outcome: KvAuditOutcome,
     pub version: Option<u64>,
-    pub reason: Option<&'static str>,
+    pub reason: Option<String>,
 }
 
 struct VersionValue {
@@ -94,11 +95,13 @@ struct VersionValue {
 }
 
 struct Entry {
+    metadata_generation: u64,
     current_version: u64,
     versions: BTreeMap<u64, VersionValue>,
     cas_required: Option<bool>,
     max_versions: Option<u16>,
     protected_version: Option<u64>,
+    protection_known: bool,
     retention_deferred: bool,
     custom_metadata: BTreeMap<String, String>,
 }
@@ -106,11 +109,13 @@ struct Entry {
 impl Entry {
     fn new(cas_required: Option<bool>) -> Self {
         Self {
+            metadata_generation: 1,
             current_version: 0,
             versions: BTreeMap::new(),
             cas_required,
             max_versions: None,
             protected_version: None,
+            protection_known: true,
             retention_deferred: false,
             custom_metadata: BTreeMap::new(),
         }
@@ -126,6 +131,7 @@ pub struct KvCatalog {
     grants: Vec<GrantRecord>,
     audit: Vec<KvAuditEvent>,
     fail_next_read_audit_commit: bool,
+    fail_next_purge_audit_commit: bool,
 }
 
 impl KvCatalog {
@@ -138,6 +144,7 @@ impl KvCatalog {
             grants: Vec::new(),
             audit: Vec::new(),
             fail_next_read_audit_commit: false,
+            fail_next_purge_audit_commit: false,
         }
     }
 
@@ -189,7 +196,19 @@ impl KvCatalog {
             return Err(KvError::NotFound);
         }
         entry.protected_version = version;
+        entry.protection_known = true;
+        entry.metadata_generation = entry
+            .metadata_generation
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
         self.prune(path)
+    }
+
+    #[doc(hidden)]
+    pub fn set_unknown_rotation_protection(&mut self, path: &str) -> Result<(), KvError> {
+        let entry = self.entries.get_mut(path).ok_or(KvError::NotFound)?;
+        entry.protection_known = false;
+        Ok(())
     }
 
     pub fn retention_deferred_by_rotation(&self, path: &str) -> bool {
@@ -251,6 +270,11 @@ impl KvCatalog {
     #[doc(hidden)]
     pub fn fail_next_read_audit_commit(&mut self) {
         self.fail_next_read_audit_commit = true;
+    }
+
+    #[doc(hidden)]
+    pub fn fail_next_purge_audit_commit(&mut self) {
+        self.fail_next_purge_audit_commit = true;
     }
 
     fn prune(&mut self, path: &str) -> Result<(), KvError> {
@@ -339,13 +363,23 @@ impl KvService {
                 });
             }
             entry.protected_version = Some(expected_current);
+            entry.protection_known = true;
         } else {
             if entry.protected_version != Some(expected_current) {
                 return Err(KvError::CasConflict);
             }
             entry.protected_version = None;
+            entry.metadata_generation = entry
+                .metadata_generation
+                .checked_add(1)
+                .ok_or(KvError::Internal)?;
             catalog.prune(&path)?;
+            return Ok(());
         }
+        entry.metadata_generation = entry
+            .metadata_generation
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
         Ok(())
     }
 
@@ -438,6 +472,10 @@ impl KvService {
             .checked_add(1)
             .ok_or(KvError::Internal)?;
         entry.current_version = version;
+        entry.metadata_generation = entry
+            .metadata_generation
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
         entry.versions.insert(
             version,
             VersionValue {
@@ -506,6 +544,10 @@ impl KvService {
             .checked_add(1)
             .ok_or(KvError::Internal)?;
         entry.current_version = version;
+        entry.metadata_generation = entry
+            .metadata_generation
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
         entry.versions.insert(
             version,
             VersionValue {
@@ -784,6 +826,10 @@ impl KvService {
         if let Some(custom) = update.custom_metadata {
             entry.custom_metadata = custom;
         }
+        entry.metadata_generation = entry
+            .metadata_generation
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
         catalog.audit.push(audit_event(
             identity_id,
             &path,
@@ -794,6 +840,152 @@ impl KvService {
         ));
         Ok(())
     }
+
+    pub fn purge_preflight(
+        &self,
+        identity_id: [u8; 16],
+        resource: &Resource,
+    ) -> Result<PurgePreflight, KvError> {
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        authorize_destroy_all(&mut catalog, identity_id, resource)?;
+        let path = resource.canonical_segments.join("/");
+        let entry = catalog.entries.get(&path).ok_or(KvError::NotFound)?;
+        if !entry.protection_known {
+            return Err(KvError::UnknownRotationProtection);
+        }
+        if entry.protected_version.is_some() {
+            return Err(KvError::RotationProtected);
+        }
+        Ok(PurgePreflight {
+            canonical_resource: canonical_resource(resource),
+            metadata_generation: entry.metadata_generation,
+            version_count: entry.versions.len() as u64,
+        })
+    }
+
+    /// Rechecks authorization, exact target, generation, count, protection, and
+    /// confirmation while holding the one catalog transaction boundary. The
+    /// success audit is appended before the mutation becomes observable.
+    pub fn purge(
+        &self,
+        identity_id: [u8; 16],
+        expected_resource: &Resource,
+        request: PurgeRequest<'_>,
+    ) -> Result<PurgeResult, KvError> {
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        let path = expected_resource.canonical_segments.join("/");
+        let audit_failure = |catalog: &mut KvCatalog, reason: &'static str| {
+            catalog.audit.push(audit_event(
+                identity_id,
+                &path,
+                KvAuditOperation::Purge,
+                KvAuditOutcome::Failed,
+                None,
+                Some(reason),
+            ));
+        };
+        if request.resource != expected_resource {
+            audit_failure(&mut catalog, "resource-mismatch");
+            return Err(KvError::ResourceMismatch);
+        }
+        if request.reason.is_empty()
+            || request.reason.len() > 1024
+            || request.reason.chars().any(char::is_control)
+        {
+            audit_failure(&mut catalog, "reason-required");
+            return Err(KvError::ReasonRequired);
+        }
+        authorize_destroy_all(&mut catalog, identity_id, request.resource)?;
+        let Some(entry) = catalog.entries.get(&path) else {
+            audit_failure(&mut catalog, "not-found");
+            return Err(KvError::NotFound);
+        };
+        if !entry.protection_known {
+            audit_failure(&mut catalog, "unknown-rotation-protection");
+            return Err(KvError::UnknownRotationProtection);
+        }
+        if entry.protected_version.is_some() {
+            audit_failure(&mut catalog, "rotation-protected");
+            return Err(KvError::RotationProtected);
+        }
+        let version_count = entry.versions.len() as u64;
+        if entry.metadata_generation != request.expected_metadata_generation
+            || version_count != request.expected_version_count
+        {
+            audit_failure(&mut catalog, "stale-ceremony");
+            return Err(KvError::StaleCeremony);
+        }
+        let expected_confirmation = purge_confirmation(
+            request.resource,
+            request.expected_metadata_generation,
+            request.expected_version_count,
+            request.reason,
+        );
+        if request.confirmation != Some(expected_confirmation) {
+            audit_failure(&mut catalog, "confirmation-required");
+            return Err(KvError::ConfirmationRequired);
+        }
+        if catalog.fail_next_purge_audit_commit {
+            catalog.fail_next_purge_audit_commit = false;
+            return Err(KvError::Internal);
+        }
+        catalog.audit.push(audit_event(
+            identity_id,
+            &path,
+            KvAuditOperation::Purge,
+            KvAuditOutcome::Succeeded,
+            None,
+            Some(request.reason),
+        ));
+        let removed = catalog.entries.remove(&path).ok_or(KvError::Internal)?;
+        Ok(PurgeResult {
+            metadata_generation: removed.metadata_generation,
+            version_count,
+            logical_destruction_only: true,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PurgePreflight {
+    pub canonical_resource: String,
+    pub metadata_generation: u64,
+    pub version_count: u64,
+}
+
+pub struct PurgeRequest<'a> {
+    pub resource: &'a Resource,
+    pub expected_metadata_generation: u64,
+    pub expected_version_count: u64,
+    pub reason: &'a str,
+    pub confirmation: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PurgeResult {
+    pub metadata_generation: u64,
+    pub version_count: u64,
+    /// Active metadata/ciphertext references are gone; backups and storage
+    /// remnants are outside this logical operation's erasure boundary.
+    pub logical_destruction_only: bool,
+}
+
+pub fn purge_confirmation(
+    resource: &Resource,
+    metadata_generation: u64,
+    version_count: u64,
+    reason: &str,
+) -> [u8; 32] {
+    let canonical = canonical_resource(resource);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ops-light-secrets-server.secret-purge.v1\0");
+    hasher.update(&(canonical.len() as u64).to_be_bytes());
+    hasher.update(canonical.as_bytes());
+    hasher.update(&metadata_generation.to_be_bytes());
+    hasher.update(&version_count.to_be_bytes());
+    hasher.update(&(reason.len() as u64).to_be_bytes());
+    hasher.update(reason.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 fn mutate_versions_locked(
@@ -838,6 +1030,10 @@ fn mutate_versions_locked(
             _ => return Err(KvError::Invalid),
         }
     }
+    entry.metadata_generation = entry
+        .metadata_generation
+        .checked_add(1)
+        .ok_or(KvError::Internal)?;
     let operation = match action {
         SecretAction::SoftDelete => KvAuditOperation::SoftDelete,
         SecretAction::Undelete => KvAuditOperation::Undelete,
@@ -895,6 +1091,12 @@ pub enum KvError {
     },
     UnsupportedField,
     BoundExceeded(&'static str),
+    ResourceMismatch,
+    ReasonRequired,
+    ConfirmationRequired,
+    StaleCeremony,
+    RotationProtected,
+    UnknownRotationProtection,
     Internal,
 }
 
@@ -1002,6 +1204,46 @@ fn authorize_operation(
     Err(KvError::PermissionDenied)
 }
 
+fn authorize_destroy_all(
+    catalog: &mut KvCatalog,
+    identity_id: [u8; 16],
+    resource: &Resource,
+) -> Result<(), KvError> {
+    let request =
+        AuthorizationRequest::local_destroy_all(resource).map_err(|_| KvError::Invalid)?;
+    let decision = authorize(
+        &request,
+        catalog
+            .grants
+            .iter()
+            .filter(|grant| grant.owner_identity_id == identity_id),
+    );
+    if decision.allow {
+        return Ok(());
+    }
+    catalog.audit.push(audit_event(
+        identity_id,
+        &resource.canonical_segments.join("/"),
+        KvAuditOperation::Purge,
+        KvAuditOutcome::Denied,
+        None,
+        Some("permission-denied"),
+    ));
+    Err(KvError::PermissionDenied)
+}
+
+fn canonical_resource(resource: &Resource) -> String {
+    if resource.canonical_segments.is_empty() {
+        resource.mount.clone()
+    } else {
+        format!(
+            "{}/{}",
+            resource.mount,
+            resource.canonical_segments.join("/")
+        )
+    }
+}
+
 fn logical_path(endpoint: &EndpointRequest) -> String {
     endpoint.resource.canonical_segments.join("/")
 }
@@ -1012,7 +1254,7 @@ fn audit_event(
     operation: KvAuditOperation,
     outcome: KvAuditOutcome,
     version: Option<u64>,
-    reason: Option<&'static str>,
+    reason: Option<&str>,
 ) -> KvAuditEvent {
     KvAuditEvent {
         identity_id,
@@ -1020,7 +1262,7 @@ fn audit_event(
         operation,
         outcome,
         version,
-        reason,
+        reason: reason.map(str::to_owned),
     }
 }
 
@@ -1340,6 +1582,18 @@ fn error_response(error: KvError, method: &Method, kind: EndpointKind) -> Respon
             "delete_version_after is not supported",
         ),
         KvError::BoundExceeded(id) => bounded_error(id),
+        KvError::ResourceMismatch => vault_error(StatusCode::BAD_REQUEST, "resource mismatch"),
+        KvError::ReasonRequired => vault_error(StatusCode::BAD_REQUEST, "reason required"),
+        KvError::ConfirmationRequired => {
+            vault_error(StatusCode::BAD_REQUEST, "confirmation required")
+        }
+        KvError::StaleCeremony => vault_error(StatusCode::CONFLICT, "purge ceremony stale"),
+        KvError::RotationProtected => {
+            vault_error(StatusCode::CONFLICT, "secret rotation protected")
+        }
+        KvError::UnknownRotationProtection => {
+            vault_error(StatusCode::CONFLICT, "rotation protection unknown")
+        }
         KvError::Internal => vault_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }

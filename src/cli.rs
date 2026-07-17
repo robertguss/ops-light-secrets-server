@@ -122,6 +122,13 @@ enum Command {
         #[command(subcommand)]
         command: RotationCommand,
     },
+    /// Local-only secret lifecycle operations
+    Secret {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
     /// Explain an authorization decision through the owner-only control socket
     Authz {
         #[command(flatten)]
@@ -202,6 +209,25 @@ enum CredentialCommand {
     Epoch {
         #[command(subcommand)]
         command: CredentialEpochCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretCommand {
+    /// Logically remove one secret's active metadata and every version
+    Purge {
+        /// Exact canonical resource, including mount (for example secret/apps/key)
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        expected_metadata_generation: u64,
+        #[arg(long)]
+        expected_version_count: u64,
+        #[arg(long)]
+        reason: String,
+        /// Digest-bound confirmation printed by purge preflight
+        #[arg(long)]
+        confirm: String,
     },
 }
 
@@ -1496,6 +1522,7 @@ pub fn run() -> Result<(), String> {
             | Command::Grant { .. }
             | Command::Consumer { .. }
             | Command::Rotation { .. }
+            | Command::Secret { .. }
             | Command::Authz { .. }
             | Command::Token { .. }
             | Command::Approle { .. }

@@ -21,6 +21,10 @@ use ops_light_secrets_server::identity::{
     AuthorizationRequest, Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
     SecretAction,
 };
+use ops_light_secrets_server::kv::{
+    KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService, PurgeRequest,
+    purge_confirmation,
+};
 use ops_light_secrets_server::raw_target::parse_raw_target;
 use ops_light_secrets_server::store::StoreId;
 use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
@@ -440,6 +444,32 @@ fn actual_binary_freezes_control_cli_surface_without_argv_bearers() {
             )
             .unwrap();
     }
+    let output = Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+        .args(["secret", "purge", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for required in [
+        "--resource",
+        "--expected-metadata-generation",
+        "--expected-version-count",
+        "--reason",
+        "--confirm",
+        "--control-socket",
+        "--control-credential-source",
+    ] {
+        assert!(stdout.contains(required), "missing {required}");
+    }
+    assert!(!stdout.contains("--value"));
+    scenario
+        .step(
+            "secret-purge-help",
+            SafeSummary::new(),
+            ExpectedOutcome::Success,
+            ActualOutcome::Success,
+        )
+        .unwrap();
     assert!(scenario.finish_success().unwrap().scan_attestation.clean);
 }
 
@@ -453,6 +483,7 @@ async fn remote_router_has_no_identity_grant_or_explain_routes() {
         "/v1/sys/tokens",
         "/v1/sys/approle/roles",
         "/v1/sys/approle/secret-ids",
+        "/v1/sys/secret/purge",
     ] {
         let response = data_router()
             .oneshot(Request::post(path).body(Body::empty()).unwrap())
@@ -460,6 +491,205 @@ async fn remote_router_has_no_identity_grant_or_explain_routes() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+}
+
+#[test]
+fn secret_purge_is_exact_capability_gated_rotation_safe_atomic_and_audited() {
+    let resource = parse_raw_target(&Method::POST, "/v1/secret/data/apps/key")
+        .unwrap()
+        .resource;
+    let other = parse_raw_target(&Method::POST, "/v1/secret/data/apps/other")
+        .unwrap()
+        .resource;
+    let purge_grant = GrantRecord::new(
+        [71; 16],
+        [1; 16],
+        "secret".into(),
+        GrantScope::Exact,
+        vec!["apps".into(), "key".into()],
+        capabilities(&[Capability::SecretWrite, Capability::SecretDestroyAll]),
+    )
+    .unwrap();
+    let write_only = GrantRecord::new(
+        [72; 16],
+        [1; 16],
+        "secret".into(),
+        GrantScope::Exact,
+        vec!["apps".into(), "key".into()],
+        capabilities(&[Capability::SecretWrite]),
+    )
+    .unwrap();
+    let service = KvService::new(KvCatalog::new(false, 100));
+    service.with_catalog(|catalog| catalog.replace_grants(vec![purge_grant.clone()]));
+    let endpoint = parse_raw_target(&Method::POST, "/v1/secret/data/apps/key").unwrap();
+    service
+        .write(
+            [1; 16],
+            &endpoint,
+            serde_json::from_value(serde_json::json!({"canary-field": "purge-secret-canary"}))
+                .unwrap(),
+            Some(0),
+        )
+        .unwrap();
+    let initial = service.purge_preflight([1; 16], &resource).unwrap();
+    assert_eq!(initial.canonical_resource, "secret/apps/key");
+    assert_eq!(initial.version_count, 1);
+
+    service.with_catalog(|catalog| catalog.replace_grants(vec![write_only]));
+    assert_eq!(
+        service.purge(
+            [1; 16],
+            &resource,
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: initial.metadata_generation,
+                expected_version_count: initial.version_count,
+                reason: "retired integration",
+                confirmation: Some(purge_confirmation(
+                    &resource,
+                    initial.metadata_generation,
+                    initial.version_count,
+                    "retired integration"
+                )),
+            }
+        ),
+        Err(KvError::PermissionDenied)
+    );
+    service.with_catalog(|catalog| catalog.replace_grants(vec![purge_grant]));
+    for (request, expected) in [
+        (
+            PurgeRequest {
+                resource: &other,
+                expected_metadata_generation: initial.metadata_generation,
+                expected_version_count: initial.version_count,
+                reason: "retired integration",
+                confirmation: None,
+            },
+            KvError::ResourceMismatch,
+        ),
+        (
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: initial.metadata_generation,
+                expected_version_count: initial.version_count,
+                reason: "",
+                confirmation: None,
+            },
+            KvError::ReasonRequired,
+        ),
+        (
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: initial.metadata_generation,
+                expected_version_count: initial.version_count,
+                reason: "retired integration",
+                confirmation: None,
+            },
+            KvError::ConfirmationRequired,
+        ),
+    ] {
+        assert_eq!(service.purge([1; 16], &resource, request), Err(expected));
+    }
+
+    service
+        .write(
+            [1; 16],
+            &endpoint,
+            serde_json::from_value(serde_json::json!({"next": "value"})).unwrap(),
+            Some(1),
+        )
+        .unwrap();
+    assert_eq!(
+        service.purge(
+            [1; 16],
+            &resource,
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: initial.metadata_generation,
+                expected_version_count: initial.version_count,
+                reason: "retired integration",
+                confirmation: Some(purge_confirmation(
+                    &resource,
+                    initial.metadata_generation,
+                    initial.version_count,
+                    "retired integration"
+                )),
+            }
+        ),
+        Err(KvError::StaleCeremony)
+    );
+    service.with_catalog(|catalog| {
+        catalog
+            .set_rotation_protection("apps/key", Some(1))
+            .unwrap()
+    });
+    assert_eq!(
+        service.purge_preflight([1; 16], &resource),
+        Err(KvError::RotationProtected)
+    );
+    service.with_catalog(|catalog| catalog.set_rotation_protection("apps/key", None).unwrap());
+    service.with_catalog(|catalog| catalog.set_unknown_rotation_protection("apps/key").unwrap());
+    assert_eq!(
+        service.purge_preflight([1; 16], &resource),
+        Err(KvError::UnknownRotationProtection)
+    );
+    service.with_catalog(|catalog| catalog.set_rotation_protection("apps/key", None).unwrap());
+    let current = service.purge_preflight([1; 16], &resource).unwrap();
+    let confirmation = purge_confirmation(
+        &resource,
+        current.metadata_generation,
+        current.version_count,
+        "retired integration",
+    );
+    service.with_catalog(|catalog| catalog.fail_next_purge_audit_commit());
+    assert_eq!(
+        service.purge(
+            [1; 16],
+            &resource,
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: current.metadata_generation,
+                expected_version_count: current.version_count,
+                reason: "retired integration",
+                confirmation: Some(confirmation),
+            }
+        ),
+        Err(KvError::Internal)
+    );
+    assert!(service.purge_preflight([1; 16], &resource).is_ok());
+    let result = service
+        .purge(
+            [1; 16],
+            &resource,
+            PurgeRequest {
+                resource: &resource,
+                expected_metadata_generation: current.metadata_generation,
+                expected_version_count: current.version_count,
+                reason: "retired integration",
+                confirmation: Some(confirmation),
+            },
+        )
+        .unwrap();
+    assert_eq!(result.version_count, 2);
+    assert!(result.logical_destruction_only);
+    service.with_catalog(|catalog| {
+        assert_eq!(catalog.current_version("apps/key"), None);
+        let successes = catalog
+            .audit()
+            .iter()
+            .filter(|event| {
+                event.operation == KvAuditOperation::Purge
+                    && event.outcome == KvAuditOutcome::Succeeded
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(successes.len(), 1);
+        assert_eq!(successes[0].reason.as_deref(), Some("retired integration"));
+        assert!(catalog.audit().len() > 1, "audit history survives purge");
+    });
+    assert_eq!(
+        service.purge_preflight([1; 16], &resource),
+        Err(KvError::NotFound)
+    );
 }
 
 #[test]

@@ -222,7 +222,7 @@ fn cas_matrix_is_monotonic_and_failures_are_audited_without_success() {
     service.with_catalog(|catalog| {
         assert_eq!(catalog.audit().len(), 4);
         assert_eq!(catalog.audit()[1].outcome, KvAuditOutcome::Failed);
-        assert_eq!(catalog.audit()[1].reason, Some("cas-conflict"));
+        assert_eq!(catalog.audit()[1].reason.as_deref(), Some("cas-conflict"));
         assert_eq!(catalog.audit()[2].outcome, KvAuditOutcome::Failed);
         assert_eq!(catalog.audit()[3].outcome, KvAuditOutcome::Succeeded);
     });
@@ -910,7 +910,7 @@ fn kv_depth_metadata_and_list_bounds_are_explicit() {
     service.with_catalog(|catalog| {
         let event = catalog.audit().last().unwrap();
         assert_eq!(event.outcome, KvAuditOutcome::Failed);
-        assert_eq!(event.reason, Some("list-result-limit"));
+        assert_eq!(event.reason.as_deref(), Some("list-result-limit"));
     });
 }
 
