@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "host": "local-smoke",
+  "iterations": 200,
+  "write_ns": {"p50": 582, "p95": 1283, "p99": 2625},
+  "read_ns": {"p50": 491, "p95": 1152, "p99": 5229},
+  "notes": "audited in-process KV path smoke; named-host campaign replaces this"
+}

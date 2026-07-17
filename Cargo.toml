@@ -68,3 +68,7 @@ path = "tests/e2e_recovery_alpha.rs"
 [[test]]
 name = "differential"
 path = "tests/differential/mod.rs"
+
+[[bench]]
+name = "audited_kv"
+harness = false
