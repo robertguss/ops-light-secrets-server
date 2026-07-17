@@ -43,8 +43,8 @@
     },
     {
       "contract": "clock.repair_epoch_credential",
-      "owner": "olss-charter-qul.10.3",
-      "verification": "Back U1.5's validated clock-repair state machine and CLI with U8.3's full R41 primitive: disclose a replacement emergency control credential, atomically bump the credential epoch and repair the exact old mark, authenticate the replacement, and leave old credentials invalid."
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Back U1.5's validated clock-repair state machine and CLI with U8.3's exported prepare_clock_repair_epoch_rotation primitive: disclose one replacement emergency control credential, atomically bump the credential epoch and repair the exact old mark, authenticate the replacement, and leave old credentials invalid."
     },
     {
       "contract": "clock.coordinator_watermark",
@@ -135,6 +135,11 @@
       "contract": "signing_trust.live_coordinator",
       "owner": "olss-charter-qul.12.14",
       "verification": "Persist and hydrate U6.8 SigningLineage, prepared transitions, registered transition digests, and descriptor inventory; bind enroll/prepare/register/list to the owner peer, control-audience audit-checkpoint-manage authorization, reserved coordinator lane, canonical audit events, confirmations, descendant proof, and one activation transaction. Exercise the assembled generate/enroll/A-checkpoint/A-to-B/first-B flow without daemon private-key access."
+    },
+    {
+      "contract": "credential_epoch.live_control_and_interrupted_marker",
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Persist and hydrate U8.3 online nonce/digest disclosure handshakes through the owner socket and reserved coordinator lane; enforce the combined capabilities at the final barrier; atomically persist auth_recovery_stale on authenticated original interrupted jobs; restrict the replacement to owner abort/cleanup; and wire clock-repair meta mutation into the same epoch/identity/grant/credential/audit transaction."
     },
     {
       "contract": "signing_trust.backup_descriptor_inventory",

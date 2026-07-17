@@ -166,6 +166,36 @@ envelope, metadata, and audit together. A recovery identity may be the current
 unwrap source. Retry after a lost final reply with the installed recipient set
 returns a stable `already_installed` no-op. Any other stale generation refuses.
 
+## Emergency credential-epoch rotation
+
+`credential epoch rotate --mode offline` is the daemon-stopped incident route.
+It requires the service owner, exclusive data-directory lock, an approved typed
+age identity source that unwraps the current keyring (active or enrolled
+recovery), an audited reason, expected epoch, and exact confirmation. First omit
+`--confirm`: the command reports bounded active token/secret-id counts, the next
+epoch, one-hour replacement TTL, and that the caller credential dies, with no
+mutation. Repeat with the exact digest and an approved
+`--credential-output-fd`; regular files and block devices are refused.
+
+The shared R41 primitive creates a fresh system recovery identity, versioned
+admin grant, and finite control-only credential. It writes and flushes the raw
+replacement only to the approved sink, then one redb transaction installs the
+identity, grant, credential, incremented epoch, and encrypted audit event. A
+sink failure or pre-commit crash leaves the old epoch authoritative and any
+orphan disclosure unusable. The epoch check invalidates every previous token
+and secret ID even though this operation deliberately leaves the existing
+credential-verifier key unchanged; verifier-key replacement is a separate
+keyring-envelope concern and is never implied.
+
+Online mode is distinct: owner peer credentials plus `key-rotation`,
+identity/grant management, and credential issuance are all required. The daemon
+sends the replacement only over the authenticated owner socket and commits only
+after the CLI flushes its approved sink and ACKs the request nonce plus a
+domain-separated credential digest. A narrow key operator cannot acquire the
+recovery admin bundle. Interrupted authenticated original rewrite/migration/
+compaction states may mint only an abort/cleanup credential and become
+`auth_recovery_stale`; foreign, ambiguous, or post-rename states refuse.
+
 Audit payloads use schema version 1 and are encrypted under the keyring's
 current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct
 `audit-event` record domain. The AAD-bound logical id contains the audit epoch,

@@ -7,6 +7,10 @@ use ops_light_secrets_server::control::management::{
     ControlCommand, ManagementCatalog, ManagementPrincipal,
 };
 use ops_light_secrets_server::credential::{CredentialAudience, CredentialKind};
+use ops_light_secrets_server::credential_epoch::{
+    EpochRotationMode, EpochRotationRequest, InterruptedJobState, plan_epoch_rotation,
+    rotate_credential_epoch,
+};
 use ops_light_secrets_server::startup::DataDirectoryLock;
 use ops_light_secrets_server::startup::validate_serve_shell;
 use ops_light_secrets_server::store::keyring::{
@@ -127,6 +131,49 @@ enum Command {
         #[command(subcommand)]
         command: BackupCommand,
     },
+    /// Incident credential invalidation and emergency control recovery
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialCommand {
+    Epoch {
+        #[command(subcommand)]
+        command: CredentialEpochCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CredentialEpochCommand {
+    Rotate {
+        #[arg(long, value_enum)]
+        mode: EpochModeArg,
+        #[arg(long)]
+        identity_source: Option<SecretSource>,
+        #[arg(long)]
+        control_socket: Option<PathBuf>,
+        #[arg(long)]
+        control_credential_source: Option<SecretSource>,
+        #[arg(long)]
+        expected_epoch: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long, value_parser = parse_private_fd)]
+        credential_output_fd: Option<i32>,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EpochModeArg {
+    Online,
+    Offline,
 }
 
 #[derive(Debug, Subcommand)]
@@ -868,6 +915,37 @@ pub fn run() -> Result<(), String> {
                     },
                 );
             }
+            Command::Credential {
+                command:
+                    CredentialCommand::Epoch {
+                        command:
+                            CredentialEpochCommand::Rotate {
+                                mode,
+                                identity_source,
+                                control_socket,
+                                control_credential_source,
+                                expected_epoch,
+                                reason,
+                                confirm,
+                                credential_output_fd,
+                                output,
+                            },
+                    },
+            } => {
+                return run_credential_epoch_rotate(
+                    &config,
+                    *mode,
+                    identity_source.as_ref(),
+                    control_socket.as_deref(),
+                    control_credential_source.as_ref(),
+                    *expected_epoch,
+                    reason,
+                    confirm.as_deref(),
+                    *credential_output_fd,
+                    *output,
+                    cli.unsafe_dev_secret_env,
+                );
+            }
             Command::Audit { .. } => {
                 return Err("signing_trust_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete live signing-trust persistence adapter'".into());
             }
@@ -885,6 +963,187 @@ pub fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_credential_epoch_rotate(
+    config: &Config,
+    mode: EpochModeArg,
+    identity_source: Option<&SecretSource>,
+    control_socket: Option<&std::path::Path>,
+    control_credential_source: Option<&SecretSource>,
+    expected_epoch: u64,
+    reason: &str,
+    confirmation: Option<&str>,
+    credential_output_fd: Option<i32>,
+    output: OutputFormat,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    if matches!(mode, EpochModeArg::Online) {
+        if control_socket.is_none() || control_credential_source.is_none() {
+            return Err("credential_epoch_refused code=online_connection_required".into());
+        }
+        return Err("credential_epoch_refused code=live_control_adapter_pending remediation='use authenticated online adapter after final assembly or explicitly select offline mode with daemon stopped'".into());
+    }
+    if control_socket.is_some() || control_credential_source.is_some() {
+        return Err("credential_epoch_refused code=mode_authority_confusion".into());
+    }
+    let identity_source = identity_source
+        .ok_or_else(|| "credential_epoch_refused code=identity_source_required".to_owned())?;
+    if matches!(identity_source, SecretSource::UnsafeEnvironment(_)) && !unsafe_environment {
+        return Err("credential_epoch_refused code=unsafe_environment_source".into());
+    }
+    let _lock = DataDirectoryLock::acquire(&config.data_directory)
+        .map_err(|_| "credential_epoch_refused code=daemon_or_lock_active".to_owned())?;
+    let store_path = config.data_directory.join("store.redb");
+    let metadata = std::fs::symlink_metadata(&store_path)
+        .map_err(|_| "credential_epoch_refused code=store_path".to_owned())?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.nlink() != 1
+    {
+        return Err("credential_epoch_refused code=unsafe_store_path".into());
+    }
+    let store = Store::open(&store_path)
+        .map_err(|_| "credential_epoch_refused code=store_open".to_owned())?;
+    let mut input = SystemSecretInput::from_environment();
+    let identity = identity_source
+        .read("credential_epoch.identity_source", &mut input)
+        .map_err(|_| "credential_epoch_refused code=identity_source".to_owned())?;
+    let identity = parse_identity(identity.into_zeroizing())
+        .map_err(|_| "credential_epoch_refused code=identity_invalid".to_owned())?;
+    let keyring = KeyringOpener::default()
+        .open(
+            store
+                .meta()
+                .map_err(|_| "credential_epoch_refused code=meta".to_owned())?
+                .store_id,
+            &store
+                .keyring()
+                .map_err(|_| "credential_epoch_refused code=keyring".to_owned())?
+                .ok_or_else(|| "credential_epoch_refused code=uninitialized".to_owned())?,
+            &store
+                .keyring_metadata()
+                .map_err(|_| "credential_epoch_refused code=keyring_metadata".to_owned())?
+                .ok_or_else(|| "credential_epoch_refused code=uninitialized".to_owned())?,
+            &identity,
+        )
+        .map_err(|_| "credential_epoch_refused code=identity_rejected".to_owned())?;
+    let authority = EpochRotationMode::Offline {
+        service_owner: true,
+        daemon_absent: true,
+        exclusive_lock: true,
+        current_keyring_unwrapped: true,
+    };
+    let plan = plan_epoch_rotation(&store, &keyring, expected_epoch, reason, authority)
+        .map_err(|error| format!("credential_epoch_refused code=plan cause={error}"))?;
+    let Some(confirmation) = confirmation else {
+        return render_epoch_plan(output, &plan);
+    };
+    let confirmation = parse_hex_32(confirmation)
+        .ok_or_else(|| "credential_epoch_refused code=confirmation".to_owned())?;
+    let fd = credential_output_fd
+        .ok_or_else(|| "credential_epoch_refused code=credential_sink_required".to_owned())?;
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err("credential_epoch_refused code=credential_sink".into());
+    }
+    // SAFETY: successful F_DUPFD_CLOEXEC returns a new descriptor owned here.
+    let mut sink = unsafe { std::fs::File::from_raw_fd(duplicate) };
+    let effective_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "credential_epoch_refused code=clock".to_owned())?
+        .as_secs()
+        .max(
+            store
+                .meta()
+                .map_err(|_| "credential_epoch_refused code=meta".to_owned())?
+                .high_water_unix_seconds,
+        );
+    let receipt = rotate_credential_epoch(
+        &store,
+        &keyring,
+        EpochRotationRequest {
+            expected_epoch,
+            effective_seconds,
+            reason,
+            confirmation,
+            mode: authority,
+            interrupted_job: InterruptedJobState::None,
+        },
+        &mut sink,
+        &mut SystemRandom,
+    )
+    .map_err(|error| format!("credential_epoch_refused code=rotate cause={error}"))?;
+    let value = serde_json::json!({
+        "schema": 1,
+        "epoch": receipt.epoch,
+        "credential_accessor": hex(&receipt.credential_accessor),
+        "expires_at_effective_seconds": receipt.expires_at_effective_seconds,
+        "auth_recovery_stale": receipt.auth_recovery_stale,
+        "prior_credentials_invalidated": true,
+    });
+    let rendered = match output {
+        OutputFormat::Json => serde_json::to_string(&value)
+            .map_err(|_| "credential epoch output encoding failed".to_owned())?,
+        OutputFormat::Human => format!(
+            "epoch: {}\ncredential accessor: {}\nexpires: {}\nprior credentials invalidated: true",
+            receipt.epoch,
+            hex(&receipt.credential_accessor),
+            receipt.expires_at_effective_seconds,
+        ),
+    };
+    std::io::stdout()
+        .write_all(rendered.as_bytes())
+        .and_then(|()| std::io::stdout().write_all(b"\n"))
+        .map_err(|_| "credential epoch output failed".to_owned())
+}
+
+fn render_epoch_plan(
+    output: OutputFormat,
+    plan: &ops_light_secrets_server::credential_epoch::EpochRotationPlan,
+) -> Result<(), String> {
+    let value = serde_json::json!({
+        "schema": 1,
+        "current_epoch": plan.current_epoch,
+        "next_epoch": plan.next_epoch,
+        "active_tokens": plan.active_tokens,
+        "active_secret_ids": plan.active_secret_ids,
+        "caller_credential_dies": plan.caller_credential_dies,
+        "replacement_ttl_seconds": plan.replacement_ttl_seconds,
+        "confirmation": hex(&plan.confirmation),
+        "mutation": false,
+    });
+    let rendered = match output {
+        OutputFormat::Json => serde_json::to_string(&value)
+            .map_err(|_| "credential epoch plan encoding failed".to_owned())?,
+        OutputFormat::Human => format!(
+            "current epoch: {}\nnext epoch: {}\nactive tokens: {}\nactive secret ids: {}\ncaller credential dies: true\nconfirmation: {}\nmutation: false",
+            plan.current_epoch,
+            plan.next_epoch,
+            plan.active_tokens,
+            plan.active_secret_ids,
+            hex(&plan.confirmation),
+        ),
+    };
+    std::io::stdout()
+        .write_all(rendered.as_bytes())
+        .and_then(|()| std::io::stdout().write_all(b"\n"))
+        .map_err(|_| "credential epoch plan output failed".to_owned())
+}
+
+fn parse_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut output = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(pair).ok()?;
+        output[index] = u8::from_str_radix(text, 16).ok()?;
+    }
+    Some(output)
 }
 
 fn run_backup_manifest_sign(

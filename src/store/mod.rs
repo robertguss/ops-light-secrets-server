@@ -1916,6 +1916,159 @@ impl Store {
         Ok((epoch, credential))
     }
 
+    pub fn credential_epoch(
+        &self,
+        mac_key: &[u8; 32],
+    ) -> Result<Sealed<crate::credential::CredentialEpoch>, StoreError> {
+        let store_id = self.meta()?.store_id;
+        let bytes = self
+            .get(CREDENTIAL_EPOCH, CREDENTIAL_EPOCH_KEY)?
+            .ok_or(StoreError::Integrity)?;
+        let epoch = Sealed::<crate::credential::CredentialEpoch>::decode(&bytes)?;
+        epoch.verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        if epoch.generation != epoch.value.current {
+            return Err(StoreError::Integrity);
+        }
+        Ok(epoch)
+    }
+
+    pub fn commit_credential_epoch_rotation(
+        &self,
+        prepared: crate::credential_epoch::PreparedEpochRotation,
+        mac_key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        let store_id = self.meta()?.store_id;
+        prepared
+            .expected_epoch
+            .verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        prepared
+            .replacement_epoch
+            .verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        prepared
+            .identity
+            .verify(mac_key, store_id, &prepared.identity.value.id)?;
+        prepared
+            .grant
+            .verify(mac_key, store_id, &prepared.grant.value.id)?;
+        prepared
+            .credential
+            .verify(mac_key, store_id, &prepared.credential.value.accessor.0)?;
+        if prepared.replacement_epoch.value.current
+            != prepared.expected_epoch.value.current.saturating_add(1)
+            || prepared.credential.value.issue_epoch != prepared.replacement_epoch.value.current
+            || prepared.grant.value.owner_identity_id != prepared.identity.value.id
+            || prepared.credential.value.identity_id != prepared.identity.value.id
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let current = {
+            let table = write
+                .open_table(CREDENTIAL_EPOCH)
+                .map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(CREDENTIAL_EPOCH_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<crate::credential::CredentialEpoch>::decode(bytes.value())?
+        };
+        if current != prepared.expected_epoch {
+            return Err(StoreError::Integrity);
+        }
+        let head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            AuditEnvelope::decode(bytes.value())?
+        };
+        if prepared.audit.envelope.audit_epoch != head.audit_epoch
+            || prepared.audit.envelope.epoch_sequence != head.epoch_sequence.saturating_add(1)
+            || prepared.audit.envelope.previous_hash != head.chain_hash()?
+        {
+            return Err(StoreError::Integrity);
+        }
+        let identity_key = prepared.identity.value.id;
+        let grant_key = prepared.grant.value.id;
+        let credential_key = prepared.credential.value.accessor.0;
+        {
+            let mut table = write
+                .open_table(IDENTITIES)
+                .map_err(|_| StoreError::Database)?;
+            if table
+                .get(identity_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(
+                    identity_key.as_slice(),
+                    prepared.identity.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
+        }
+        {
+            let mut table = write.open_table(GRANTS).map_err(|_| StoreError::Database)?;
+            if table
+                .get(grant_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(grant_key.as_slice(), prepared.grant.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        {
+            let mut table = write
+                .open_table(CREDENTIALS)
+                .map_err(|_| StoreError::Database)?;
+            if table
+                .get(credential_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(
+                    credential_key.as_slice(),
+                    prepared.credential.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
+        }
+        write
+            .open_table(CREDENTIAL_EPOCH)
+            .map_err(|_| StoreError::Database)?
+            .insert(
+                CREDENTIAL_EPOCH_KEY,
+                prepared.replacement_epoch.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        let event_key = audit_key(&prepared.audit.envelope);
+        write
+            .open_table(AUDIT_EVENTS)
+            .map_err(|_| StoreError::Database)?
+            .insert(event_key.as_slice(), prepared.audit.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(AUDIT_HEAD)
+            .map_err(|_| StoreError::Database)?
+            .insert(AUDIT_HEAD_KEY, prepared.audit.envelope.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write.commit().map_err(|_| StoreError::Database)
+    }
+
     pub fn credential_records(
         &self,
         mac_key: &[u8; 32],

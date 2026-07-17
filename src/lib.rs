@@ -8,6 +8,7 @@ pub mod clock;
 pub mod config;
 pub mod control;
 pub mod credential;
+pub mod credential_epoch;
 pub mod format_registry;
 pub mod identity;
 pub mod init;

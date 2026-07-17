@@ -259,6 +259,18 @@ impl Keyring {
         store.credential_records(self.metadata_integrity_key())
     }
 
+    pub fn credential_epoch(&self, store: &Store) -> Result<Sealed<CredentialEpoch>, StoreError> {
+        store.credential_epoch(self.metadata_integrity_key())
+    }
+
+    pub fn commit_credential_epoch_rotation(
+        &self,
+        store: &Store,
+        prepared: crate::credential_epoch::PreparedEpochRotation,
+    ) -> Result<(), StoreError> {
+        store.commit_credential_epoch_rotation(prepared, self.metadata_integrity_key())
+    }
+
     pub fn credential_by_issuance_request(
         &self,
         store: &Store,
