@@ -8,6 +8,9 @@ use super::{
     StoreError, StoreId, VersionSetSummary,
 };
 use crate::clock::WatermarkCommand;
+use crate::identity::{
+    BOOTSTRAP_IDENTITY_NAME, GrantRecord, IdentityKind, IdentityRecord, IdentityStatus,
+};
 use age::x25519;
 use age::{Encryptor, Recipient};
 use secrecy::{ExposeSecret, SecretBox};
@@ -222,6 +225,21 @@ impl Keyring {
         }
         .ok_or(RecordCryptoError::KeyUnavailable)?;
         super::aead::decrypt(self.store_id, binding, record, key.expose())
+    }
+
+    pub fn identity_records(
+        &self,
+        store: &Store,
+    ) -> Result<Vec<Sealed<IdentityRecord>>, StoreError> {
+        store.identities(self.metadata_integrity_key())
+    }
+
+    pub fn grant_records(
+        &self,
+        store: &Store,
+        identity_id: [u8; 16],
+    ) -> Result<Vec<Sealed<GrantRecord>>, StoreError> {
+        store.grants_for_identity(identity_id, self.metadata_integrity_key())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -622,6 +640,8 @@ pub struct PreparedKeyring {
     pub metadata: Sealed<KeyringMetadata>,
     pub provisional_meta: Option<Sealed<ProvisionalMetaRecord>>,
     pub audit_genesis: Option<super::StoredAuditEntry>,
+    pub bootstrap_identity: Option<Sealed<IdentityRecord>>,
+    pub bootstrap_grant: Option<Sealed<GrantRecord>>,
 }
 
 pub fn prepare_keyring(
@@ -652,6 +672,8 @@ pub fn prepare_keyring(
         metadata,
         provisional_meta: None,
         audit_genesis: None,
+        bootstrap_identity: None,
+        bootstrap_grant: None,
     })
 }
 
@@ -690,6 +712,28 @@ pub fn prepare_keyring_for_init(
     prepared.audit_genesis = Some(
         super::StoredAuditEntry::prepare(&opened, &event, epoch, 1, [0; 32], random)
             .map_err(|_| KeyringError::Invalid)?,
+    );
+    let mut identity_id = [0; 16];
+    let mut grant_id = [0; 16];
+    random.fill(&mut identity_id)?;
+    random.fill(&mut grant_id)?;
+    if identity_id == [0; 16] || grant_id == [0; 16] || identity_id == grant_id {
+        return Err(KeyringError::Random);
+    }
+    prepared.bootstrap_identity = Some(
+        IdentityRecord {
+            id: identity_id,
+            name: BOOTSTRAP_IDENTITY_NAME.into(),
+            kind: IdentityKind::Human,
+            status: IdentityStatus::Active,
+            generation: 1,
+        }
+        .seal(opened.metadata_integrity_key(), store_id)?,
+    );
+    prepared.bootstrap_grant = Some(
+        GrantRecord::bootstrap_admin(grant_id, identity_id)
+            .map_err(|_| KeyringError::Invalid)?
+            .seal(opened.metadata_integrity_key(), store_id)?,
     );
     Ok(prepared)
 }

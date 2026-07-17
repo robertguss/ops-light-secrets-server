@@ -675,6 +675,7 @@ mod tests {
         for contents in [
             "[mounts.secret]\nunknown = true\n",
             "[mounts.other]\ncas_required = true\n",
+            "[mounts.sys]\ncas_required = true\n",
         ] {
             assert!(deserialize(contents).is_err());
         }

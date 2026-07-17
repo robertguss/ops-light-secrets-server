@@ -21,6 +21,7 @@ pub use audit::{
     FloodAggregate, StoredAuditEntry, genesis_event, verify_chain,
 };
 pub use codec::{Canonical, CodecError};
+pub(crate) use codec::{Decoder, Encoder};
 pub use integrity::{
     BulkTransitionKind, ClearRecord, EncryptedTable, IntegrityDiagnostic, IntegrityOperation,
     IntegrityStatus, MAC_FORMAT_VERSION, MacConformanceReport, MacVerification, RecordClass,
@@ -28,7 +29,6 @@ pub use integrity::{
 };
 
 use crate::clock::WatermarkCommand;
-use codec::{Decoder, Encoder};
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -51,6 +51,8 @@ const SECRET_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secret_
 const SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secrets");
 const AUDIT_EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_events");
 const AUDIT_HEAD: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_head");
+const IDENTITIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("identities");
+const GRANTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("grants");
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
@@ -1263,6 +1265,27 @@ impl Store {
                 .map_err(|_| StoreError::Database)?
                 .insert(AUDIT_HEAD_KEY, head_bytes.as_slice())
                 .map_err(|_| StoreError::Database)?;
+            let identity = prepared
+                .bootstrap_identity
+                .as_ref()
+                .ok_or(StoreError::Integrity)?;
+            let grant = prepared
+                .bootstrap_grant
+                .as_ref()
+                .ok_or(StoreError::Integrity)?;
+            if grant.value.owner_identity_id != identity.value.id {
+                return Err(StoreError::Integrity);
+            }
+            write
+                .open_table(IDENTITIES)
+                .map_err(|_| StoreError::Database)?
+                .insert(identity.value.id.as_slice(), identity.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(GRANTS)
+                .map_err(|_| StoreError::Database)?
+                .insert(grant.value.id.as_slice(), grant.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {
@@ -1305,6 +1328,10 @@ impl Store {
             write
                 .open_table(AUDIT_HEAD)
                 .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(IDENTITIES)
+                .map_err(|_| StoreError::Database)?;
+            write.open_table(GRANTS).map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {
@@ -1494,6 +1521,89 @@ impl Store {
         self.get(META, PROVISIONAL_META_KEY)?
             .map(|bytes| Sealed::decode(&bytes).map_err(StoreError::from))
             .transpose()
+    }
+
+    pub fn identity(
+        &self,
+        id: [u8; 16],
+        mac_key: &[u8; 32],
+    ) -> Result<Option<Sealed<crate::identity::IdentityRecord>>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
+        let Some(bytes) = self.get(IDENTITIES, &id)? else {
+            return Ok(None);
+        };
+        let value = Sealed::<crate::identity::IdentityRecord>::decode(&bytes)?;
+        if value.generation != value.value.generation
+            || value.value.id != id
+            || value.verify(mac_key, self.meta()?.store_id, &id).is_err()
+        {
+            self.integrity.trip(RecordClass::Identity, &id, mac_key);
+            return Err(StoreError::Integrity);
+        }
+        Ok(Some(value))
+    }
+
+    pub(crate) fn identities(
+        &self,
+        mac_key: &[u8; 32],
+    ) -> Result<Vec<Sealed<crate::identity::IdentityRecord>>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
+        let store_id = self.meta()?.store_id;
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let table = read
+            .open_table(IDENTITIES)
+            .map_err(|_| StoreError::Database)?;
+        let mut identities = Vec::new();
+        for row in table.iter().map_err(|_| StoreError::Database)? {
+            let (key, bytes) = row.map_err(|_| StoreError::Database)?;
+            let id: [u8; 16] = key.value().try_into().map_err(|_| StoreError::Integrity)?;
+            let value = Sealed::<crate::identity::IdentityRecord>::decode(bytes.value())?;
+            if value.generation != value.value.generation
+                || value.value.id != id
+                || value.verify(mac_key, store_id, &id).is_err()
+            {
+                self.integrity.trip(RecordClass::Identity, &id, mac_key);
+                return Err(StoreError::Integrity);
+            }
+            identities.push(value);
+        }
+        identities.sort_by_key(|identity| identity.value.id);
+        Ok(identities)
+    }
+
+    pub fn grants_for_identity(
+        &self,
+        identity_id: [u8; 16],
+        mac_key: &[u8; 32],
+    ) -> Result<Vec<Sealed<crate::identity::GrantRecord>>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
+        let store_id = self.meta()?.store_id;
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let table = read.open_table(GRANTS).map_err(|_| StoreError::Database)?;
+        let mut grants = Vec::new();
+        for row in table.iter().map_err(|_| StoreError::Database)? {
+            let (key, bytes) = row.map_err(|_| StoreError::Database)?;
+            let id: [u8; 16] = key.value().try_into().map_err(|_| StoreError::Integrity)?;
+            let value = Sealed::<crate::identity::GrantRecord>::decode(bytes.value())?;
+            if value.generation != value.value.generation
+                || value.value.id != id
+                || value.verify(mac_key, store_id, &id).is_err()
+            {
+                self.integrity.trip(RecordClass::Grant, &id, mac_key);
+                return Err(StoreError::Integrity);
+            }
+            if value.value.owner_identity_id == identity_id {
+                grants.push(value);
+            }
+        }
+        grants.sort_by_key(|grant| grant.value.id);
+        Ok(grants)
     }
 
     pub fn put_secret_metadata(

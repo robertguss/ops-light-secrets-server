@@ -1,0 +1,33 @@
+{
+  "schema": "ops-light-secrets-server.capability-registry.v1",
+  "version": 1,
+  "capabilities": [
+    {"code": 1, "name": "secret-read-current"},
+    {"code": 2, "name": "secret-read-history"},
+    {"code": 3, "name": "secret-list"},
+    {"code": 4, "name": "secret-write"},
+    {"code": 5, "name": "secret-soft-delete"},
+    {"code": 6, "name": "secret-undelete"},
+    {"code": 7, "name": "secret-destroy"},
+    {"code": 8, "name": "secret-destroy-all"},
+    {"code": 101, "name": "identity-grant-manage"},
+    {"code": 102, "name": "credential-issue"},
+    {"code": 103, "name": "credential-revoke"},
+    {"code": 104, "name": "rotation-manage"},
+    {"code": 105, "name": "consumer-enumerate"},
+    {"code": 106, "name": "audit-read"},
+    {"code": 107, "name": "audit-export"},
+    {"code": 108, "name": "audit-export-recipient-manage"},
+    {"code": 109, "name": "audit-checkpoint-manage"},
+    {"code": 110, "name": "backup"},
+    {"code": 111, "name": "backup-recipient-manage"},
+    {"code": 112, "name": "key-rotation"},
+    {"code": 113, "name": "store-maintenance"},
+    {"code": 114, "name": "transport-manage"},
+    {"code": 115, "name": "diagnostics"}
+  ],
+  "aliases": {
+    "admin@v1": [101,102,103,104,105,106,107,108,109,110,111,112,113,114,115],
+    "auditor@v1": [106,107]
+  }
+}

@@ -86,6 +86,28 @@ encrypted event, audit head, and overload snapshot in one writer transaction;
 init-refusal and final-shutdown events use the same audit-only transaction path.
 Golden version-1 event and envelope vectors live under `tests/fixtures/`.
 
+Identity and grant records are schema-versioned, MAC-authenticated clear
+records. Identity and grant ids are immutable opaque 128-bit values; operator
+names are unique forever and cannot be reused after retirement. Identity kind
+(`human` or `workload`) is descriptive in v0.1. Grant removal retains the grant
+id as a tombstone and advances its generation, so stale or wrong-owner updates
+fail closed. Fresh initialization stages one `bootstrap-management` human
+identity and an explicit `admin@v1` capability snapshot in the same redb commit
+as keyring metadata and audit genesis.
+
+Capabilities are the closed version-1 registry frozen in
+`tests/fixtures/capability-registry-v1.json`; bundles expand to concrete members
+when a grant is created and never acquire later capabilities. KV grants contain
+only secret capabilities. Management grants contain only management
+capabilities and have the sole shape `sys`, exact, empty prefix; configuration
+cannot create a KV `sys` mount. Subtree matching is by complete path segment and
+includes equality; an empty subtree prefix covers the mount root. Any explicit
+version query requires `secret-read-history`, even when it names the current
+version. Full-version purge can only be constructed by the local-control request
+API. Authorization returns a structured decision with resource, operation,
+matched immutable grant id, or a distinct no-mount, prefix-boundary, or
+missing-capability reason; unauthorized remote replies consume only `allow`.
+
 Audit query and backup use the internal snapshot service rather than exporting
 raw database handles. It defaults to two named workers, eight queued requests, a
 30-second cursor lifetime, and a 1 MiB buffered-result ceiling. Cursors receive a
