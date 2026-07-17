@@ -52,6 +52,11 @@
       "verification": "Decrypt keyring once, compare embedded and clear store ids, and prove mismatch refuses before listener bind."
     },
     {
+      "contract": "startup.secret_source_consumption",
+      "owner": "olss-charter-qul.3.3",
+      "verification": "Consume stdin, inherited-FD, runtime systemd-credential, and TTY age identities through the real U2.3 keyring-open path; prove readiness only after one successful decrypt and zeroization."
+    },
+    {
       "contract": "clock.repair_epoch_credential",
       "owner": "olss-charter-qul.10.3",
       "verification": "Back U1.5's validated clock-repair state machine and CLI with U8.3's full R41 primitive: disclose a replacement emergency control credential, atomically bump the credential epoch and repair the exact old mark, authenticate the replacement, and leave old credentials invalid."

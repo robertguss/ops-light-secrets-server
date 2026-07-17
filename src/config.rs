@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::env;
 use std::fmt;
 use std::io::{self, Read};
+use std::os::fd::BorrowedFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use zeroize::Zeroizing;
@@ -83,6 +84,12 @@ impl SystemSecretInput {
             credentials_directory: env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from),
         }
     }
+
+    pub fn from_credentials_directory(directory: Option<PathBuf>) -> Self {
+        Self {
+            credentials_directory: directory,
+        }
+    }
 }
 
 impl SecretInput for SystemSecretInput {
@@ -93,7 +100,12 @@ impl SecretInput for SystemSecretInput {
     }
 
     fn read_file_descriptor(&mut self, fd: u32) -> io::Result<Vec<u8>> {
-        let mut file = std::fs::File::open(format!("/proc/self/fd/{fd}"))?;
+        let raw = i32::try_from(fd)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "descriptor out of range"))?;
+        // SAFETY: the typed source parser accepts inherited descriptors only;
+        // borrowing is non-owning and try_clone_to_owned creates our read handle.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw) };
+        let mut file = std::fs::File::from(borrowed.try_clone_to_owned()?);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
@@ -543,6 +555,30 @@ mod tests {
             assert_eq!(secret.expose(), b"sensitive bytes");
             assert_eq!(format!("{secret:?}"), "SecretBytes([REDACTED])");
         }
+    }
+
+    #[test]
+    fn system_input_reads_runtime_credential_directory_and_inherited_socket_fd() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("age-identity"), b"runtime-credential").unwrap();
+        let source: SecretSource = "credential:age-identity".parse().unwrap();
+        let mut input =
+            SystemSecretInput::from_credentials_directory(Some(directory.path().to_path_buf()));
+        let value = source.read("secrets.age_identity", &mut input).unwrap();
+        assert_eq!(value.expose(), b"runtime-credential");
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"inherited-fd-value").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let descriptor = format!("fd:{}", reader.as_raw_fd());
+        let source: SecretSource = descriptor.parse().unwrap();
+        let mut input = SystemSecretInput::from_credentials_directory(None);
+        let value = source.read("secrets.age_identity", &mut input).unwrap();
+        assert_eq!(value.expose(), b"inherited-fd-value");
     }
 
     #[test]
