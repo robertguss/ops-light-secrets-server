@@ -51,6 +51,18 @@ or aborts according to the transaction even if its receiver disappears; an
 undeliverable successful response is zeroized. Worker panic and a missed
 clock-watermark deadline make readiness fail closed.
 
+The transaction coordinator is the handler-facing commit boundary layered on
+that writer. Its type-state protocol fixes the order as: begin one transaction,
+reauthorize against current durable state, apply a mutation or prepare a bounded
+read response, append the operation audit plus pending overload aggregates,
+commit, then release the reply. A denial appends and commits its denial audit
+before returning. Audit/commit failure releases no prepared secret. Prepared
+responses must implement zeroize and zeroize-on-drop, covering commit failure,
+serialization failure, panic unwind, caller disconnect, and receiver loss.
+Handlers receive only typed submissions; neither the coordinator backend nor a
+raw database transaction is exposed. The coordinator owns the reserved 100 ms
+clock-watermark submission path as well as ordinary data and recovery lanes.
+
 Audit query and backup use the internal snapshot service rather than exporting
 raw database handles. It defaults to two named workers, eight queued requests, a
 30-second cursor lifetime, and a 1 MiB buffered-result ceiling. Cursors receive a

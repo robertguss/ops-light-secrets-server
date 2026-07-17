@@ -10,4 +10,5 @@ pub mod raw_target;
 pub mod startup;
 pub mod storage_executor;
 pub mod store;
+pub mod transaction_coordinator;
 pub mod transport;

@@ -36,6 +36,7 @@ impl PlaintextSecret {
         Self(SecretBox::new(Box::new(value)))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_secret_box(value: SecretBox<Vec<u8>>) -> Self {
         Self(value)
     }

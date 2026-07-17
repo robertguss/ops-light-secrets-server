@@ -224,11 +224,13 @@ impl Keyring {
         super::aead::decrypt(self.store_id, binding, record, key.expose())
     }
 
-    pub fn record_decrypt_attempts(&self) -> usize {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn record_decrypt_attempts(&self) -> usize {
         self.record_decrypt_attempts.load(Ordering::Relaxed)
     }
 
-    pub fn write_secret(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn write_secret(
         &self,
         store: &Store,
         mount: &str,
@@ -264,7 +266,8 @@ impl Keyring {
         Ok(version)
     }
 
-    pub fn read_secret(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn read_secret(
         &self,
         store: &Store,
         mount: &str,
@@ -293,7 +296,8 @@ impl Keyring {
         )))
     }
 
-    pub fn secret_metadata_query(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn secret_metadata_query(
         &self,
         store: &Store,
         mount: &str,
@@ -499,10 +503,12 @@ impl Keyring {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn storage_path(mount: &str, path: &LogicalPath) -> Result<LogicalPath, SecretDataError> {
     Ok(LogicalPath::new(format!("{mount}/{}", path.as_str()))?)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn default_secret_metadata() -> SecretMetadata {
     SecretMetadata {
         schema_version: METADATA_SCHEMA_VERSION,

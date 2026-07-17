@@ -4,6 +4,8 @@ mod aead;
 mod codec;
 mod integrity;
 pub mod keyring;
+#[cfg(test)]
+mod versioned_secrets_tests;
 
 pub use aead::{
     CIPHER_SUITE_XCHACHA20_POLY1305, EncryptedRecord, PlaintextSecret, RECORD_FORMAT_VERSION,
@@ -1497,6 +1499,7 @@ impl Store {
         Ok(Some(value))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn commit_encrypted_secret_append(
         &self,
         path: &LogicalPath,
@@ -1582,6 +1585,7 @@ impl Store {
         write.commit().map_err(|_| StoreError::Database)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn encrypted_secret_version(
         &self,
         path: &LogicalPath,

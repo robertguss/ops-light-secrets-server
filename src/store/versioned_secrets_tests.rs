@@ -1,12 +1,10 @@
 use std::io;
 
-use ops_light_secrets_server::config::{SecretInput, SecretSource};
-use ops_light_secrets_server::init::prepare_keyring_init_from_source;
-use ops_light_secrets_server::startup::open_store_keyring;
-use ops_light_secrets_server::store::keyring::{
-    Keyring, KeyringError, KeyringOpener, RandomSource,
-};
-use ops_light_secrets_server::store::{
+use crate::config::{SecretInput, SecretSource};
+use crate::init::prepare_keyring_init_from_source;
+use crate::startup::open_store_keyring;
+use crate::store::keyring::{Keyring, KeyringError, KeyringOpener, RandomSource};
+use crate::store::{
     Canonical, FORMAT_VERSION, IntegrityStatus, Lifecycle, LogicalPath, MetaRecord,
     PlaintextSecret, SecretKey, Store, StoreError, StoreId,
 };
@@ -229,7 +227,7 @@ fn missing_newest_ciphertext_never_falls_back_to_an_older_version() {
         .unwrap();
     assert!(matches!(
         error,
-        ops_light_secrets_server::store::SecretDataError::Store(StoreError::Integrity)
+        crate::store::SecretDataError::Store(StoreError::Integrity)
     ));
     let IntegrityStatus::Failed(diagnostic) = store.integrity_status() else {
         panic!("summary/row mismatch must fail readiness");

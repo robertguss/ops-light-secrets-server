@@ -53,8 +53,8 @@
     },
     {
       "contract": "storage.writer_coordinator_adapter",
-      "owner": "olss-charter-qul.4.2",
-      "verification": "Implement U6.2's typed state-plus-audit backend behind U6.1 StorageBackend so the named writer thread exclusively owns every redb write transaction and persists overload aggregates atomically."
+      "owner": "olss-charter-qul.4.3",
+      "verification": "Implement U6.3's concrete TransactionFactory over the real redb state and canonical encrypted audit tables behind U6.2's type-state StorageBackend adapter, so the named writer exclusively owns every online redb write transaction and persists overload aggregates atomically."
     },
     {
       "contract": "storage.audit_snapshot_adapter",

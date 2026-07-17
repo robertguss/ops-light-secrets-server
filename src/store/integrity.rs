@@ -306,6 +306,7 @@ impl IntegrityMonitor {
         );
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn trip_table(
         &self,
         table: &'static str,
