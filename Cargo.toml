@@ -76,3 +76,7 @@ harness = false
 [[test]]
 name = "key_rotation_suite"
 path = "tests/key_rotation_suite.rs"
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance/mod.rs"
