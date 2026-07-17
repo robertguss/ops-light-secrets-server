@@ -24,6 +24,8 @@ fn descriptor(key_id: [u8; 16]) -> CheckpointDescriptor {
         state_digest: StateDigest([5; 32]),
         effective_timestamp_milliseconds: 1_800_000_000_000,
         signing_key_id: key_id,
+        signing_lineage_generation: 1,
+        signing_transition_digest: None,
         previous_checkpoint_digest: None,
     }
 }
@@ -50,8 +52,8 @@ fn signed(status: CheckpointKeyStatus) -> (CheckpointSignature, CheckpointTrust)
 fn descriptor_vector_freezes_prepare_is_last_encoding() {
     let (checkpoint, _) = signed(CheckpointKeyStatus::Initial);
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/checkpoint-descriptor-v1.json")).unwrap();
-    assert_eq!(fixture["descriptor_version"], 1);
+        serde_json::from_str(include_str!("fixtures/checkpoint-descriptor-v2.json")).unwrap();
+    assert_eq!(fixture["descriptor_version"], 2);
     assert_eq!(fixture["range_end"], 7);
     assert_eq!(fixture["prepare_event_sequence"], fixture["range_end"]);
     assert_eq!(
@@ -63,7 +65,7 @@ fn descriptor_vector_freezes_prepare_is_last_encoding() {
         checkpoint.descriptor
     );
     let mut unknown = checkpoint.descriptor.encode().unwrap();
-    unknown[1..3].copy_from_slice(&2_u16.to_be_bytes());
+    unknown[1..3].copy_from_slice(&3_u16.to_be_bytes());
     assert_eq!(
         CheckpointDescriptor::decode(&unknown),
         Err(CodecError::UnknownVersion)
@@ -330,6 +332,8 @@ fn real_store_prepare_register_and_abandoned_prepare_are_recoverable() {
             state_digest: store.state_digest().unwrap(),
             effective_timestamp_milliseconds: event.effective_timestamp_milliseconds,
             signing_key_id: key_id,
+            signing_lineage_generation: 1,
+            signing_transition_digest: None,
             previous_checkpoint_digest: prior,
         };
         store
@@ -397,6 +401,8 @@ fn real_store_prepare_register_and_abandoned_prepare_are_recoverable() {
         state_digest: store.state_digest().unwrap(),
         effective_timestamp_milliseconds: event.effective_timestamp_milliseconds,
         signing_key_id: key_id,
+        signing_lineage_generation: 1,
+        signing_transition_digest: None,
         previous_checkpoint_digest: Some(checkpoint_digest(&third).unwrap()),
     };
     mismatch.state_digest.0[0] ^= 1;

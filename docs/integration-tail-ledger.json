@@ -130,6 +130,26 @@
       "contract": "limits.live_source_and_aggregate_flush",
       "owner": "olss-charter-qul.8.2",
       "verification": "In the final security-ordered middleware stack, insert U9.3's verified per-request ClientSource before U4.3 limiting; keep missing forwarded configuration on the shared bucket; and drain U4.3's bounded DropAggregate buffer into canonical encrypted aggregate audit events on the next coordinator commit without raw source, identity, path, or credential labels."
+    },
+    {
+      "contract": "signing_trust.live_coordinator",
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Persist and hydrate U6.8 SigningLineage, prepared transitions, registered transition digests, and descriptor inventory; bind enroll/prepare/register/list to the owner peer, control-audience audit-checkpoint-manage authorization, reserved coordinator lane, canonical audit events, confirmations, descendant proof, and one activation transaction. Exercise the assembled generate/enroll/A-checkpoint/A-to-B/first-B flow without daemon private-key access."
+    },
+    {
+      "contract": "signing_trust.backup_descriptor_inventory",
+      "owner": "olss-charter-qul.11.2",
+      "verification": "Make every backup manifest publishing reservation create a signer-bound U6.8 inventory row and resolve it only through registered or owner-audited abandoned terminal disposition; bind lineage generation, transition digest, creator audit position, key id, and backup signature domain."
+    },
+    {
+      "contract": "signing_trust.audit_export_descriptor_inventory",
+      "owner": "olss-charter-qul.4.7",
+      "verification": "Make every audit export publishing reservation create a signer-bound U6.8 inventory row and resolve it only through registered or owner-audited abandoned terminal disposition; bind lineage generation, transition digest, creator audit position, key id, and audit-export signature domain."
+    },
+    {
+      "contract": "signing_trust.restore_and_fork_import",
+      "owner": "olss-charter-qul.11.4",
+      "verification": "Import and authenticate the retained public signing lineage during restore/rollback-fork handling, refuse pruning/reset or inconsistent signer intervals, and prove historical checkpoints and manifests still verify after normal restore and explicit fork recovery."
     }
   ]
 }

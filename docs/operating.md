@@ -232,6 +232,42 @@ detached file with mode 0600 using no-follow, fsync, and atomic rename.
 Registration verifies retained public key and chains to last registered
 checkpoint. Abandoned prepares remain visible but never become previous link.
 
+Signing trust begins with stateless `audit signing-key generate`; 32 raw
+Ed25519 private bytes go only to a validated pre-opened FD, while stdout
+contains public candidate/fingerprint/custody metadata. The daemon never reads
+or stores a signing private key. First enrollment is one-time, requires exact
+fingerprint, non-secret reason, digest-bound confirmation, owner peer plus a
+control credential with `audit-checkpoint-manage`, and an attestation that an
+independently protected off-host private-key copy exists.
+
+Rollover is `audit signing-key rotate prepare|sign|register`. Prepare commits a
+public-only, expiring intent and then binds its resulting audit head into the
+canonical transition statement. Offline sign uses the old private key from a
+typed source. Register rechecks authorization, incarnation/epoch ancestry,
+current generation/key, expiry, signature, and the exact outstanding
+descriptor inventory in the activation transaction. The activation event
+retires A and makes B current; the first checkpoint covering that event must
+use B and binds lineage generation plus transition digest. Until it registers,
+status is `transition_registered_checkpoint_pending`.
+
+All historical public keys remain verification-only and are never silently
+pruned. The lineage holds at most 16 keys and warns at 12; authenticated
+archival/pruning would require a future forward migration. Loss of the current
+private key stops new checkpoints, signed backup/export manifests, receipts,
+and rollover. There is no implicit re-enrollment or trust reset. A retired
+private key must be removed from signing custody: Ed25519 provides no trusted
+signing time, so public-only verification cannot eliminate later compromise
+risk.
+
+Offline detached verification proves signature validity and the descriptor's
+authenticated key interval, not whether the server registered or abandoned
+the artifact. Offline tools report `registration_status=unknown_offline`
+unless supplied authenticated disposition evidence plus its covering
+checkpoint. Unresolved old-key checkpoint, backup, or export descriptors block
+activation; their owning command family must resume, register, supersede, or
+audit-abandon them. Rollover output reports only bounded domain counts and
+digests, never paths or payloads.
+
 Checkpoint freshness is warning, never data-plane readiness failure. Defaults:
 `checkpoint.max_age_seconds = 86400` and
 `checkpoint.max_unanchored_events = 10000`. Environment names are

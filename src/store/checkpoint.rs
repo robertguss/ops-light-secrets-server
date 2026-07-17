@@ -22,7 +22,7 @@ use zeroize::Zeroize;
 
 const PREPARED_KEY_PREFIX: u8 = 1;
 
-pub const CHECKPOINT_DESCRIPTOR_VERSION: u16 = 1;
+pub const CHECKPOINT_DESCRIPTOR_VERSION: u16 = 2;
 pub const CHECKPOINT_FILE_VERSION: u16 = 1;
 const CHECKPOINT_DOMAIN: &[u8] = b"ops-light-secrets-server.audit-checkpoint.v1\0";
 
@@ -37,6 +37,8 @@ pub struct CheckpointDescriptor {
     pub state_digest: StateDigest,
     pub effective_timestamp_milliseconds: u64,
     pub signing_key_id: [u8; 16],
+    pub signing_lineage_generation: u64,
+    pub signing_transition_digest: Option<[u8; 32]>,
     pub previous_checkpoint_digest: Option<[u8; 32]>,
 }
 
@@ -50,6 +52,9 @@ impl CheckpointDescriptor {
             || self.chain_head == [0; 32]
             || self.effective_timestamp_milliseconds == 0
             || self.signing_key_id == [0; 16]
+            || self.signing_lineage_generation == 0
+            || (self.signing_lineage_generation == 1 && self.signing_transition_digest.is_some())
+            || (self.signing_lineage_generation > 1 && self.signing_transition_digest.is_none())
         {
             return Err(CodecError::Invalid);
         }
@@ -71,6 +76,14 @@ impl Canonical for CheckpointDescriptor {
         out.fixed(&self.state_digest.0);
         out.u64(self.effective_timestamp_milliseconds);
         out.fixed(&self.signing_key_id);
+        out.u64(self.signing_lineage_generation);
+        match self.signing_transition_digest {
+            None => out.u8(0),
+            Some(value) => {
+                out.u8(1);
+                out.fixed(&value);
+            }
+        }
         match self.previous_checkpoint_digest {
             None => out.u8(0),
             Some(value) => {
@@ -96,6 +109,12 @@ impl Canonical for CheckpointDescriptor {
             state_digest: StateDigest(input.fixed()?),
             effective_timestamp_milliseconds: input.u64()?,
             signing_key_id: input.fixed()?,
+            signing_lineage_generation: input.u64()?,
+            signing_transition_digest: match input.u8()? {
+                0 => None,
+                1 => Some(input.fixed()?),
+                _ => return Err(CodecError::Invalid),
+            },
             previous_checkpoint_digest: match input.u8()? {
                 0 => None,
                 1 => Some(input.fixed()?),

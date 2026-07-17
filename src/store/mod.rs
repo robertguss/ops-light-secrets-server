@@ -8,6 +8,7 @@ mod codec;
 mod coordinator;
 mod integrity;
 pub mod keyring;
+mod signing_trust;
 #[cfg(test)]
 mod versioned_secrets_tests;
 
@@ -34,6 +35,15 @@ pub use integrity::{
     BulkTransitionKind, ClearRecord, EncryptedTable, IntegrityDiagnostic, IntegrityOperation,
     IntegrityStatus, MAC_FORMAT_VERSION, MacConformanceReport, MacVerification, RecordClass,
     StateDelta, StateDeltaSet, StateDigest, StateTuple, WholeStateTransition, mac_conformance,
+};
+pub use signing_trust::{
+    CHECKPOINT_PUBLIC_KEY_WARNING, DescriptorDisposition, GeneratedSigningKey,
+    MAX_CHECKPOINT_PUBLIC_KEYS, MAX_SIGNING_LINEAGE_BYTES, OutstandingInventory,
+    SignableDescriptor, SignableDomain, SignedSigningTransition, SigningContext,
+    SigningEnrollmentRequest, SigningKeyCandidate, SigningKeyLineageEntry, SigningKeyState,
+    SigningLineage, SigningRotationPrepareRequest, SigningTransition, SigningTrustCatalog,
+    SigningTrustError, enrollment_confirmation, generate_signing_key, sign_signing_transition,
+    verify_signing_transition, write_signed_transition_atomic,
 };
 
 use crate::clock::WatermarkCommand;

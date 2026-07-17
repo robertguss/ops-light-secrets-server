@@ -24,6 +24,8 @@ fn offline_sign_command_uses_typed_source_and_creates_detached_file() {
         state_digest: StateDigest([5; 32]),
         effective_timestamp_milliseconds: 1_800_000_000_000,
         signing_key_id: id,
+        signing_lineage_generation: 1,
+        signing_transition_digest: None,
         previous_checkpoint_digest: None,
     };
     std::fs::write(&descriptor_path, descriptor.encode().unwrap()).unwrap();

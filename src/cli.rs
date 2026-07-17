@@ -6,8 +6,9 @@ use ops_light_secrets_server::store::keyring::{
     AgeIdentityMetadata, IdentityPurpose, SystemRandom, generate_age_identity,
 };
 use ops_light_secrets_server::store::{
-    Canonical, CheckpointDescriptor, CheckpointPublicKey, sign_checkpoint_authorized,
-    write_checkpoint_atomic,
+    Canonical, CheckpointDescriptor, CheckpointPublicKey, SignedSigningTransition,
+    SigningKeyCandidate, SigningTransition, generate_signing_key, sign_checkpoint_authorized,
+    sign_signing_transition, write_checkpoint_atomic, write_signed_transition_atomic,
 };
 use std::ffi::OsString;
 use std::io::Write;
@@ -187,6 +188,88 @@ enum AuditCommand {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+    /// External signing-key trust generation, enrollment, inspection, and rollover
+    SigningKey {
+        #[command(subcommand)]
+        command: SigningKeyCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SigningKeyCommand {
+    /// Generate an Ed25519 key; private bytes go only to the approved FD
+    Generate {
+        #[arg(long, value_parser = parse_private_fd)]
+        private_output_fd: i32,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
+    /// Enroll the first public signing key through the owner control socket
+    Enroll {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        candidate: PathBuf,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirmation: String,
+        #[arg(long)]
+        custody_attested: bool,
+    },
+    /// List current and retired public signing lineage
+    List {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+    },
+    /// Prepare, sign, or register an old-key-authorized rollover
+    Rotate {
+        #[command(subcommand)]
+        command: SigningKeyRotateCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SigningKeyRotateCommand {
+    /// Commit a public-only rollover intent and emit its canonical statement
+    Prepare {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        new_candidate: PathBuf,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        expires_at_milliseconds: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        custody_attested: bool,
+    },
+    /// Sign a prepared transition offline with the old private key
+    Sign {
+        #[arg(long)]
+        transition: PathBuf,
+        #[arg(long)]
+        old_public_key_candidate: PathBuf,
+        #[arg(long)]
+        private_key_source: SecretSource,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Verify and atomically activate a signed transition
+    Register {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        signed_transition: PathBuf,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirmation: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -323,6 +406,43 @@ pub fn run() -> Result<(), String> {
             cli.unsafe_dev_secret_env,
         );
     }
+    if let Some(Command::Audit {
+        command:
+            AuditCommand::SigningKey {
+                command:
+                    SigningKeyCommand::Generate {
+                        private_output_fd,
+                        output,
+                    },
+            },
+    }) = &cli.command
+    {
+        return run_signing_key_generate(*private_output_fd, *output);
+    }
+    if let Some(Command::Audit {
+        command:
+            AuditCommand::SigningKey {
+                command:
+                    SigningKeyCommand::Rotate {
+                        command:
+                            SigningKeyRotateCommand::Sign {
+                                transition,
+                                old_public_key_candidate,
+                                private_key_source,
+                                output,
+                            },
+                    },
+            },
+    }) = &cli.command
+    {
+        return run_signing_key_rotate_sign(
+            transition,
+            old_public_key_candidate,
+            private_key_source,
+            output,
+            cli.unsafe_dev_secret_env,
+        );
+    }
 
     if let Some(command) = &cli.command {
         let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
@@ -390,7 +510,9 @@ pub fn run() -> Result<(), String> {
                 return Err("clock_repair_refused code=integration_pending setting=credential_epoch_replacement remediation='complete U8.3 R41 primitive'".into());
             }
             Command::Key { .. } => unreachable!("stateless key command handled before config"),
-            Command::Audit { .. } => unreachable!("offline audit command handled before config"),
+            Command::Audit { .. } => {
+                return Err("signing_trust_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete live signing-trust persistence adapter'".into());
+            }
             Command::Identity { .. } | Command::Grant { .. } | Command::Authz { .. } => {
                 return Err("control_command_refused code=integration_pending setting=authenticated_request_coordinator remediation='complete U4.2 control-credential middleware and coordinator adapter'".into());
             }
@@ -434,6 +556,75 @@ fn run_checkpoint_sign(
     let checkpoint = sign_checkpoint_authorized(descriptor, &public, &mut private)
         .map_err(|error| error.to_string())?;
     write_checkpoint_atomic(output, &checkpoint).map_err(|error| error.to_string())
+}
+
+fn run_signing_key_generate(private_output_fd: i32, output: OutputFormat) -> Result<(), String> {
+    let duplicate = unsafe { libc::fcntl(private_output_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err("signing key private sink unavailable".into());
+    }
+    // SAFETY: successful F_DUPFD_CLOEXEC returns a new descriptor owned by us.
+    let mut sink = unsafe { std::fs::File::from_raw_fd(duplicate) };
+    let metadata =
+        generate_signing_key(&mut sink, &mut SystemRandom).map_err(|error| error.to_string())?;
+    let rendered = match output {
+        OutputFormat::Json => serde_json::to_string(&metadata)
+            .map_err(|_| "signing key public metadata encoding failed".to_owned())?,
+        OutputFormat::Human => format!(
+            "algorithm: {}\ndomain: {}\nkey id: {}\nfingerprint: {}\npublic key: {}\ncandidate: {}\nsink outcome: {}\ncustody: {}",
+            metadata.algorithm,
+            metadata.domain,
+            metadata.key_id,
+            metadata.fingerprint,
+            metadata.public_key,
+            metadata.candidate,
+            metadata.sink_outcome_id,
+            metadata.custody,
+        ),
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(rendered.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|_| "signing key public metadata write failed".into())
+}
+
+fn run_signing_key_rotate_sign(
+    transition_path: &std::path::Path,
+    old_public_path: &std::path::Path,
+    source: &SecretSource,
+    output: &std::path::Path,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    if matches!(source, SecretSource::UnsafeEnvironment(_)) && !unsafe_environment {
+        return Err("signing key environment source requires --unsafe-dev-secret-env".into());
+    }
+    let transition = std::fs::read(transition_path)
+        .map_err(|_| "signing transition read failed")
+        .and_then(|bytes| {
+            SigningTransition::decode(&bytes).map_err(|_| "signing transition verification failed")
+        })?;
+    let old_public = std::fs::read(old_public_path)
+        .map_err(|_| "old signing public key read failed")
+        .and_then(|bytes| {
+            SigningKeyCandidate::decode(&bytes)
+                .map_err(|_| "old signing public key verification failed")
+        })?;
+    if old_public.id != transition.old_key_id {
+        return Err("old signing public key does not match transition".into());
+    }
+    let mut input = SystemSecretInput::from_environment();
+    let secret = source
+        .read("signing_trust.old_private_key_source", &mut input)
+        .map_err(|_| "old signing private key source failed")?;
+    let mut private: [u8; 32] = secret
+        .expose()
+        .try_into()
+        .map_err(|_| "old signing private key must be exactly 32 raw bytes")?;
+    let signed: SignedSigningTransition =
+        sign_signing_transition(transition, &mut private).map_err(|error| error.to_string())?;
+    write_signed_transition_atomic(output, &signed).map_err(|error| error.to_string())
 }
 
 fn parse_private_fd(value: &str) -> Result<i32, String> {
