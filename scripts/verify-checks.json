@@ -35,61 +35,124 @@
       "id": "fmt",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["fmt", "--check"]
+      "args": [
+        "fmt",
+        "--check"
+      ]
     },
     {
       "id": "clippy",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
+      "args": [
+        "clippy",
+        "--locked",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ]
     },
     {
       "id": "test",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["test", "--locked", "--all-targets"]
+      "args": [
+        "test",
+        "--locked",
+        "--all-targets"
+      ]
     },
     {
       "id": "doc",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["test", "--locked", "--doc"]
+      "args": [
+        "test",
+        "--locked",
+        "--doc"
+      ]
     },
     {
       "id": "msrv-build",
       "toolchain": "1.85.0",
       "program": "cargo",
-      "args": ["+1.85.0", "build", "--locked"]
+      "args": [
+        "+1.85.0",
+        "build",
+        "--locked"
+      ]
     },
     {
       "id": "msrv-test",
       "toolchain": "1.85.0",
       "program": "cargo",
-      "args": ["+1.85.0", "test", "--locked", "--all-targets"]
+      "args": [
+        "+1.85.0",
+        "test",
+        "--locked",
+        "--all-targets"
+      ]
     },
     {
       "id": "harness-clippy",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["clippy", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets", "--", "-D", "warnings"]
+      "args": [
+        "clippy",
+        "--locked",
+        "--manifest-path",
+        "crates/test-support/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ]
     },
     {
       "id": "harness-test",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets"]
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "crates/test-support/Cargo.toml",
+        "--all-targets"
+      ]
     },
     {
       "id": "harness-msrv-test",
       "toolchain": "1.85.0",
       "program": "cargo",
-      "args": ["+1.85.0", "test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "--all-targets"]
+      "args": [
+        "+1.85.0",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "crates/test-support/Cargo.toml",
+        "--all-targets"
+      ]
     },
     {
       "id": "canary-gate",
       "toolchain": "default",
       "program": "cargo",
-      "args": ["test", "--locked", "--manifest-path", "crates/test-support/Cargo.toml", "full_scanner", "--", "--test-threads=1"]
+      "args": [
+        "test",
+        "--locked",
+        "--manifest-path",
+        "crates/test-support/Cargo.toml",
+        "full_scanner",
+        "--",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "id": "deny",
+      "program": "./scripts/check-deny.sh",
+      "args": [],
+      "toolchain": "default"
     }
   ]
 }
