@@ -96,3 +96,7 @@ path = "tests/systemd_examples.rs"
 [[test]]
 name = "cli_coherence"
 path = "tests/cli_coherence.rs"
+
+[[test]]
+name = "release_smoke"
+path = "tests/release_smoke.rs"
