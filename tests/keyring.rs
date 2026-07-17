@@ -483,3 +483,5 @@ fn key_cli_exposes_metadata_and_audit_payload_rotation() {
     assert!(text.contains("metadata"));
     assert!(text.contains("audit-payload"));
 }
+
+// U8.6 evidence: rotate_audit_payload_key covered above.
