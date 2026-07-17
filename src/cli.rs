@@ -115,6 +115,13 @@ enum Command {
         #[command(subcommand)]
         command: ConsumerCommand,
     },
+    /// Manage secret rotation lifecycles through the owner-only control socket
+    Rotation {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: RotationCommand,
+    },
     /// Explain an authorization decision through the owner-only control socket
     Authz {
         #[command(flatten)]
@@ -736,6 +743,78 @@ enum ConsumerInstanceCommand {
         expected_generation: u64,
         #[arg(long)]
         reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RotationCommand {
+    Begin {
+        resource: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    Cutover {
+        rotation_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        /// Pre-opened pipe, socket, TTY, or anonymous-memory FD; value never appears in argv
+        #[arg(long, value_parser = parse_private_fd)]
+        replacement_input_fd: i32,
+        #[arg(long)]
+        request_id: String,
+    },
+    Cancel {
+        rotation_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    Refresh {
+        rotation_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        request_id: String,
+    },
+    Rollback {
+        rotation_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    Complete {
+        rotation_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        request_id: String,
+    },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        prepared_from_unix_seconds: Option<u64>,
+        #[arg(long)]
+        prepared_to_unix_seconds: Option<u64>,
+        #[arg(long)]
+        request_id: String,
+    },
+    Show {
+        rotation_id: String,
+        #[arg(long)]
+        request_id: String,
     },
 }
 
@@ -1416,6 +1495,7 @@ pub fn run() -> Result<(), String> {
             Command::Identity { .. }
             | Command::Grant { .. }
             | Command::Consumer { .. }
+            | Command::Rotation { .. }
             | Command::Authz { .. }
             | Command::Token { .. }
             | Command::Approle { .. }

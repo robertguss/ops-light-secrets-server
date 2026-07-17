@@ -782,6 +782,30 @@ were not recently observed. Flags are a closed ordered set:
 boundary and reports the served version. A missing/corrupt source or unauthentic
 in-window event fails the whole view; no plausible partial list is returned.
 
+## Secret rotation lifecycle
+
+Run `rotation begin <resource>` on the owner-only control socket after checking
+the reconciled consumer view. Begin writes no secret: it creates an immutable
+prepared record and protects the current version for rollback. Only one
+prepared or cutover rotation may exist for a resource. Discover immutable IDs
+with bounded `rotation list` resource, state, and prepared-time filters; all
+later commands and `rotation show` use the ID, never a path shortcut.
+
+Supply cutover JSON through `--replacement-input-fd`; secret values must never
+appear in arguments. Cutover uses the saved CAS. A concurrent ordinary write
+leaves the rotation prepared and makes cutover fail; use `rotation refresh` to
+accept a newly reconciled snapshot, or cancel before cutover. After cutover,
+cancel is forbidden. Use `rotation rollback` to copy the protected old value
+forward inside the server into a new highest version. An ordinary write after
+cutover supersedes the rotation. Cancellation, rollback, and supersession
+release the protected-version retention hold and re-run pruning.
+
+Every lifecycle, catalog, status, due, and interval operation requires
+`rotation-management`, is audited, and is absent from the remote listener.
+Cutover does not require a separate secret-write grant. The upstream old
+credential remains valid until the operator revokes it; this server records but
+cannot perform that upstream action.
+
 ## Fresh-host restore
 
 Restore only into an absent path inside an existing service-owned mode-0700

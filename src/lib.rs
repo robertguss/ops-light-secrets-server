@@ -24,6 +24,7 @@ pub mod raw_target;
 pub mod reconciliation;
 pub mod reencrypt;
 pub mod restore;
+pub mod rotation;
 pub mod startup;
 pub mod storage_executor;
 pub mod store;

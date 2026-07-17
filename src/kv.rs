@@ -71,6 +71,8 @@ pub enum KvAuditOperation {
     SoftDelete,
     Undelete,
     Destroy,
+    RotationCutover,
+    RotationRollback,
 }
 
 /// Secret-safe operation evidence. Values and request bodies have no field here.
@@ -276,6 +278,176 @@ impl KvService {
 
     pub fn with_catalog<T>(&self, f: impl FnOnce(&mut KvCatalog) -> T) -> T {
         f(&mut self.catalog.lock().expect("KV catalog lock poisoned"))
+    }
+
+    pub fn rotation_snapshot(
+        &self,
+        endpoint: &EndpointRequest,
+    ) -> Result<RotationSnapshot, KvError> {
+        validate_endpoint(endpoint, EndpointKind::Data)?;
+        let catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        let path = logical_path(endpoint);
+        let entry = catalog.entries.get(&path).ok_or(KvError::NotFound)?;
+        let current = entry
+            .versions
+            .get(&entry.current_version)
+            .ok_or(KvError::NotFound)?;
+        if current.state != VersionState::Live || current.encoded.is_empty() {
+            return Err(KvError::VersionUnavailable {
+                version: entry.current_version,
+                deletion_time: current.deletion_unix_milliseconds.unwrap_or(0),
+                destroyed: current.state == VersionState::Destroyed,
+            });
+        }
+        Ok(RotationSnapshot {
+            current_version: entry.current_version,
+            protection: entry.protected_version,
+        })
+    }
+
+    pub fn set_rotation_snapshot_protection(
+        &self,
+        endpoint: &EndpointRequest,
+        expected_current: u64,
+        protected: bool,
+    ) -> Result<(), KvError> {
+        validate_endpoint(endpoint, EndpointKind::Data)?;
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        let path = logical_path(endpoint);
+        let entry = catalog.entries.get_mut(&path).ok_or(KvError::NotFound)?;
+        if protected {
+            if entry.current_version != expected_current {
+                return Err(KvError::CasConflict);
+            }
+            let value = entry
+                .versions
+                .get(&expected_current)
+                .ok_or(KvError::NotFound)?;
+            if value.state != VersionState::Live || value.encoded.is_empty() {
+                return Err(KvError::VersionUnavailable {
+                    version: expected_current,
+                    deletion_time: value.deletion_unix_milliseconds.unwrap_or(0),
+                    destroyed: value.state == VersionState::Destroyed,
+                });
+            }
+            entry.protected_version = Some(expected_current);
+        } else {
+            if entry.protected_version != Some(expected_current) {
+                return Err(KvError::CasConflict);
+            }
+            entry.protected_version = None;
+            catalog.prune(&path)?;
+        }
+        Ok(())
+    }
+
+    pub fn rotation_cutover(
+        &self,
+        actor_identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+        data: Map<String, Value>,
+        expected_current: u64,
+    ) -> Result<WriteResult, KvError> {
+        validate_endpoint(endpoint, EndpointKind::Data)?;
+        validate_secret_value(&data)?;
+        let encoded = serde_json::to_vec(&Value::Object(data)).map_err(|_| KvError::Invalid)?;
+        if encoded.len() > MAX_SECRET_ENCODED_BYTES {
+            return Err(KvError::BoundExceeded("secret_encoded_bytes"));
+        }
+        self.rotation_write_encoded(
+            actor_identity_id,
+            endpoint,
+            Zeroizing::new(encoded),
+            expected_current,
+            KvAuditOperation::RotationCutover,
+        )
+    }
+
+    pub fn rotation_rollback_copy_forward(
+        &self,
+        actor_identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+        expected_current: u64,
+        protected_version: u64,
+    ) -> Result<WriteResult, KvError> {
+        validate_endpoint(endpoint, EndpointKind::Data)?;
+        let encoded = {
+            let catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+            let entry = catalog
+                .entries
+                .get(&logical_path(endpoint))
+                .ok_or(KvError::NotFound)?;
+            if entry.current_version != expected_current
+                || entry.protected_version != Some(protected_version)
+            {
+                return Err(KvError::CasConflict);
+            }
+            let value = entry
+                .versions
+                .get(&protected_version)
+                .ok_or(KvError::NotFound)?;
+            if value.state == VersionState::Destroyed || value.encoded.is_empty() {
+                return Err(KvError::VersionUnavailable {
+                    version: protected_version,
+                    deletion_time: value.deletion_unix_milliseconds.unwrap_or(0),
+                    destroyed: value.state == VersionState::Destroyed,
+                });
+            }
+            Zeroizing::new(value.encoded.to_vec())
+        };
+        self.rotation_write_encoded(
+            actor_identity_id,
+            endpoint,
+            encoded,
+            expected_current,
+            KvAuditOperation::RotationRollback,
+        )
+    }
+
+    fn rotation_write_encoded(
+        &self,
+        actor_identity_id: [u8; 16],
+        endpoint: &EndpointRequest,
+        encoded: Zeroizing<Vec<u8>>,
+        expected_current: u64,
+        operation: KvAuditOperation,
+    ) -> Result<WriteResult, KvError> {
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
+        let path = logical_path(endpoint);
+        let created = catalog.effective_unix_milliseconds;
+        let entry = catalog.entries.get_mut(&path).ok_or(KvError::NotFound)?;
+        if entry.current_version != expected_current
+            || entry.protected_version.is_none()
+            || !matches!(
+                operation,
+                KvAuditOperation::RotationCutover | KvAuditOperation::RotationRollback
+            )
+        {
+            return Err(KvError::CasConflict);
+        }
+        let version = entry
+            .current_version
+            .checked_add(1)
+            .ok_or(KvError::Internal)?;
+        entry.current_version = version;
+        entry.versions.insert(
+            version,
+            VersionValue {
+                encoded,
+                created_unix_milliseconds: created,
+                state: VersionState::Live,
+                deletion_unix_milliseconds: None,
+            },
+        );
+        catalog.audit.push(audit_event(
+            actor_identity_id,
+            &path,
+            operation,
+            KvAuditOutcome::Succeeded,
+            Some(version),
+            None,
+        ));
+        Ok(WriteResult { version, created })
     }
 
     pub fn write(
@@ -689,6 +861,12 @@ pub struct ReadResult {
     pub data: Value,
     pub version: u64,
     pub created: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RotationSnapshot {
+    pub current_version: u64,
+    pub protection: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
