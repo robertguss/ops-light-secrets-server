@@ -135,6 +135,8 @@ pub struct PreparedEpochRotation {
     pub(crate) grant: Sealed<GrantRecord>,
     pub(crate) credential: Sealed<crate::credential::CredentialRecord>,
     pub(crate) audit: StoredAuditEntry,
+    pub(crate) event_id: [u8; 16],
+    pub(crate) request_id: [u8; 16],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,6 +238,16 @@ pub fn prepare_epoch_rotation(
     request: EpochRotationRequest<'_>,
     random: &mut impl RandomSource,
 ) -> Result<PreparedEpochRotation, EpochRotationError> {
+    prepare_epoch_rotation_for_lifecycle(store, keyring, request, random, false)
+}
+
+fn prepare_epoch_rotation_for_lifecycle(
+    store: &Store,
+    keyring: &Keyring,
+    request: EpochRotationRequest<'_>,
+    random: &mut impl RandomSource,
+    allow_restoring: bool,
+) -> Result<PreparedEpochRotation, EpochRotationError> {
     let plan = plan_epoch_rotation(
         store,
         keyring,
@@ -251,7 +263,9 @@ pub fn prepare_epoch_rotation(
                 Lifecycle::Reencrypting | Lifecycle::Migrating | Lifecycle::Compacting,
                 InterruptedJobState::AuthenticatedOriginal
             )
-    );
+    ) || (allow_restoring
+        && (lifecycle, request.interrupted_job)
+            == (Lifecycle::Restoring, InterruptedJobState::None));
     if request.confirmation != plan.confirmation
         || request.effective_seconds == 0
         || !lifecycle_allowed
@@ -429,6 +443,8 @@ pub fn prepare_epoch_rotation(
         grant,
         credential,
         audit,
+        event_id,
+        request_id,
     })
 }
 
@@ -452,7 +468,7 @@ pub fn prepare_restore_epoch_rotation(
     request: EpochRotationRequest<'_>,
     random: &mut impl RandomSource,
 ) -> Result<PreparedEpochRotation, EpochRotationError> {
-    prepare_epoch_rotation(store, keyring, request, random)
+    prepare_epoch_rotation_for_lifecycle(store, keyring, request, random, true)
 }
 
 pub fn rotate_credential_epoch<W: Write + AsFd>(

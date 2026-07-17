@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use ed25519_dalek::{Signer, Verifier};
 use ops_light_secrets_server::backup::{sign_backup, write_detached_signature_atomic};
-use ops_light_secrets_server::backup_format::BackupContainer;
+use ops_light_secrets_server::backup_format::{
+    BackupContainer, DetachedBackupSignature, unsigned_confirmation,
+};
 use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
 use ops_light_secrets_server::config::{Config, SecretSource, SystemSecretInput};
 use ops_light_secrets_server::control::management::{
@@ -10,6 +13,9 @@ use ops_light_secrets_server::credential::{CredentialAudience, CredentialKind};
 use ops_light_secrets_server::credential_epoch::{
     EpochRotationMode, EpochRotationRequest, InterruptedJobState, plan_epoch_rotation,
     rotate_credential_epoch,
+};
+use ops_light_secrets_server::restore::{
+    RestoreRequest, RestoreSignature, restore, restore_assertion_confirmation,
 };
 use ops_light_secrets_server::startup::DataDirectoryLock;
 use ops_light_secrets_server::startup::validate_serve_shell;
@@ -130,6 +136,41 @@ enum Command {
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
+    },
+    /// Verify and atomically install a logical backup on a fresh host
+    Restore {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        signature: Option<PathBuf>,
+        #[arg(long)]
+        public_key_candidate: PathBuf,
+        #[arg(long)]
+        signing_private_key_source: SecretSource,
+        #[arg(long)]
+        recovery_identity_source: SecretSource,
+        #[arg(long)]
+        new_active_identity_source: SecretSource,
+        #[arg(long)]
+        keyring_recovery_recipient: Option<String>,
+        #[arg(long)]
+        target: PathBuf,
+        #[arg(long, value_parser = parse_private_fd)]
+        credential_output_fd: i32,
+        #[arg(long)]
+        source_decommissioned: bool,
+        #[arg(long)]
+        actor_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+        #[arg(long)]
+        allow_unsigned_manifest: bool,
+        #[arg(long)]
+        unsigned_confirm: Option<String>,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
     },
     /// Incident credential invalidation and emergency control recovery
     Credential {
@@ -815,6 +856,45 @@ pub fn run() -> Result<(), String> {
             cli.unsafe_dev_secret_env,
         );
     }
+    if let Some(Command::Restore {
+        archive,
+        signature,
+        public_key_candidate,
+        signing_private_key_source,
+        recovery_identity_source,
+        new_active_identity_source,
+        keyring_recovery_recipient,
+        target,
+        credential_output_fd,
+        source_decommissioned,
+        actor_id,
+        reason,
+        confirm,
+        allow_unsigned_manifest,
+        unsigned_confirm,
+        output,
+    }) = &cli.command
+    {
+        return run_restore(RestoreCli {
+            archive,
+            signature: signature.as_deref(),
+            public_key_candidate,
+            signing_private_key_source,
+            recovery_identity_source,
+            new_active_identity_source,
+            keyring_recovery_recipient: keyring_recovery_recipient.as_deref(),
+            target,
+            credential_output_fd: *credential_output_fd,
+            source_decommissioned: *source_decommissioned,
+            actor_id,
+            reason,
+            confirm,
+            allow_unsigned_manifest: *allow_unsigned_manifest,
+            unsigned_confirm: unsigned_confirm.as_deref(),
+            output: *output,
+            unsafe_environment: cli.unsafe_dev_secret_env,
+        });
+    }
 
     if let Some(command) = &cli.command {
         let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
@@ -960,6 +1040,7 @@ pub fn run() -> Result<(), String> {
             Command::Backup { .. } => {
                 return Err("backup_refused code=live_control_adapter_pending artifact_bytes_unchanged=true remediation='retry after authenticated backup control adapter is available'".into());
             }
+            Command::Restore { .. } => unreachable!("offline restore handled before config"),
         }
     }
     Ok(())
@@ -1146,6 +1227,17 @@ fn parse_hex_32(value: &str) -> Option<[u8; 32]> {
     Some(output)
 }
 
+fn parse_hex_16(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32 {
+        return None;
+    }
+    let mut output = [0; 16];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        output[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(output)
+}
+
 fn run_backup_manifest_sign(
     archive_path: &std::path::Path,
     public_key_path: &std::path::Path,
@@ -1183,6 +1275,209 @@ fn run_backup_manifest_sign(
     let signature = sign_backup(&container, &public.verifying_key, &mut private)
         .map_err(|error| error.to_string())?;
     write_detached_signature_atomic(output, &signature).map_err(|error| error.to_string())
+}
+
+struct RestoreCli<'a> {
+    archive: &'a std::path::Path,
+    signature: Option<&'a std::path::Path>,
+    public_key_candidate: &'a std::path::Path,
+    signing_private_key_source: &'a SecretSource,
+    recovery_identity_source: &'a SecretSource,
+    new_active_identity_source: &'a SecretSource,
+    keyring_recovery_recipient: Option<&'a str>,
+    target: &'a std::path::Path,
+    credential_output_fd: i32,
+    source_decommissioned: bool,
+    actor_id: &'a str,
+    reason: &'a str,
+    confirm: &'a str,
+    allow_unsigned_manifest: bool,
+    unsigned_confirm: Option<&'a str>,
+    output: OutputFormat,
+    unsafe_environment: bool,
+}
+
+fn run_restore(request: RestoreCli<'_>) -> Result<(), String> {
+    if !request.unsafe_environment
+        && [
+            request.recovery_identity_source,
+            request.new_active_identity_source,
+            request.signing_private_key_source,
+        ]
+        .into_iter()
+        .any(|source| matches!(source, SecretSource::UnsafeEnvironment(_)))
+    {
+        return Err("restore_refused code=unsafe_environment_source".into());
+    }
+    let bytes = std::fs::read(request.archive)
+        .map_err(|_| "restore_refused code=archive_read".to_owned())?;
+    let container = BackupContainer::decode(&bytes)
+        .map_err(|_| "restore_refused code=outer_archive_verification".to_owned())?;
+    let detached = request
+        .signature
+        .map(|path| {
+            std::fs::read(path)
+                .map_err(|_| "restore_refused code=signature_read".to_owned())
+                .and_then(|bytes| {
+                    DetachedBackupSignature::decode(&bytes)
+                        .map_err(|_| "restore_refused code=signature_decode".to_owned())
+                })
+        })
+        .transpose()?;
+    let public = std::fs::read(request.public_key_candidate)
+        .map_err(|_| "restore_refused code=public_key_candidate_read".to_owned())
+        .and_then(|bytes| {
+            SigningKeyCandidate::decode(&bytes)
+                .map_err(|_| "restore_refused code=public_key_candidate_decode".to_owned())
+        })?;
+    if public.id != container.header.signing_key_id {
+        return Err("restore_refused code=signer_lineage_key_id".into());
+    }
+    let signature = match &detached {
+        Some(detached) => RestoreSignature::Signed {
+            detached,
+            authenticated_public_key: &public.verifying_key,
+        },
+        None => {
+            let confirmation = request
+                .unsigned_confirm
+                .ok_or_else(|| "restore_refused code=unsigned_confirmation_required".to_owned())?;
+            eprintln!("HIGH SEVERITY: unsigned restore authorized; archive digest will be audited");
+            RestoreSignature::Unsigned {
+                allow_unsigned: request.allow_unsigned_manifest,
+                reason: request.reason,
+                confirmation,
+            }
+        }
+    };
+    let mut input = SystemSecretInput::from_environment();
+    let recovery_identity = parse_identity(
+        request
+            .recovery_identity_source
+            .read("restore.recovery_identity_source", &mut input)
+            .map_err(|_| "restore_refused code=recovery_identity_source".to_owned())?
+            .into_zeroizing(),
+    )
+    .map_err(|_| "restore_refused code=recovery_identity_invalid".to_owned())?;
+    let new_active_identity = parse_identity(
+        request
+            .new_active_identity_source
+            .read("restore.new_active_identity_source", &mut input)
+            .map_err(|_| "restore_refused code=new_active_identity_source".to_owned())?
+            .into_zeroizing(),
+    )
+    .map_err(|_| "restore_refused code=new_active_identity_invalid".to_owned())?;
+    let private = request
+        .signing_private_key_source
+        .read("restore.signing_private_key_source", &mut input)
+        .map_err(|_| "restore_refused code=signing_private_key_source".to_owned())?;
+    let private: [u8; 32] = private
+        .expose()
+        .try_into()
+        .map_err(|_| "restore_refused code=signing_private_key_length expected=32".to_owned())?;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&private);
+    if signing.verifying_key().to_bytes() != public.verifying_key {
+        return Err("restore_refused code=signing_private_key_mismatch".into());
+    }
+    let installed_recovery = request
+        .keyring_recovery_recipient
+        .map(str::parse::<age::x25519::Recipient>)
+        .transpose()
+        .map_err(|_| "restore_refused code=keyring_recovery_recipient".to_owned())?;
+    let actor_id = parse_hex_16(request.actor_id)
+        .ok_or_else(|| "restore_refused code=actor_id expected=32_hex".to_owned())?;
+    let assertion = parse_hex_32(request.confirm)
+        .ok_or_else(|| "restore_refused code=confirmation expected=64_hex".to_owned())?;
+    let recovery_recipient = installed_recovery
+        .clone()
+        .unwrap_or_else(|| recovery_identity.to_public());
+    let archive_digest = ops_light_secrets_server::backup::artifact_digest(&container)
+        .map_err(|_| "restore_refused code=archive_digest".to_owned())?;
+    let expected = restore_assertion_confirmation(
+        archive_digest,
+        request.target,
+        &new_active_identity.to_public(),
+        &recovery_recipient,
+        actor_id,
+        request.reason,
+    )
+    .map_err(|_| "restore_refused code=assertion".to_owned())?;
+    if assertion != expected {
+        return Err(format!(
+            "restore_refused code=confirmation_mismatch expected={}",
+            hex(&expected)
+        ));
+    }
+    let mut challenge = blake3::Hasher::new();
+    challenge.update(b"ops-light-secrets-server.restore-signer-custody.v1\0");
+    challenge.update(&archive_digest);
+    challenge.update(&assertion);
+    challenge.update(request.target.as_os_str().as_encoded_bytes());
+    let challenge = challenge.finalize();
+    let challenge_signature = signing.sign(challenge.as_bytes());
+    signing
+        .verifying_key()
+        .verify(challenge.as_bytes(), &challenge_signature)
+        .map_err(|_| "restore_refused code=signer_custody_challenge".to_owned())?;
+    if detached.is_none() {
+        let expected_unsigned = unsigned_confirmation(archive_digest, request.reason);
+        if request.unsigned_confirm != Some(expected_unsigned.as_str()) {
+            return Err(format!(
+                "restore_refused code=unsigned_confirmation_mismatch expected={expected_unsigned}"
+            ));
+        }
+    }
+    let duplicate = unsafe { libc::fcntl(request.credential_output_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err("restore_refused code=credential_sink_unavailable".into());
+    }
+    // SAFETY: successful F_DUPFD_CLOEXEC returns a new descriptor owned here.
+    let mut sink = unsafe { std::fs::File::from_raw_fd(duplicate) };
+    let mut temp_nonce = [0; 16];
+    SystemRandom
+        .fill(&mut temp_nonce)
+        .map_err(|_| "restore_refused code=random".to_owned())?;
+    let receipt = restore(
+        &container,
+        RestoreRequest {
+            target: request.target,
+            recovery_identity: &recovery_identity,
+            new_active_identity: &new_active_identity,
+            installed_recovery_recipient: installed_recovery.as_ref(),
+            signature,
+            source_decommissioned: request.source_decommissioned,
+            actor_id,
+            reason: request.reason,
+            assertion_confirmation: assertion,
+            temp_nonce,
+        },
+        &mut sink,
+        &mut SystemRandom,
+    )
+    .map_err(|error| format!("restore_refused code={error}"))?;
+    let value = serde_json::json!({
+        "schema": 1,
+        "archive_digest": hex(&receipt.archive_digest),
+        "store_id": hex(&receipt.installed_store_id.0),
+        "credential_epoch": receipt.credential_epoch,
+        "credential_accessor": hex(&receipt.credential_accessor),
+        "new_active_fingerprint": hex(&receipt.new_active_fingerprint),
+        "recovery_fingerprint": hex(&receipt.recovery_fingerprint),
+        "pending_anchor": "normal-restore",
+    });
+    let rendered = match request.output {
+        OutputFormat::Json => serde_json::to_string(&value)
+            .map_err(|_| "restore_refused code=output_encoding".to_owned())?,
+        OutputFormat::Human => format!(
+            "restore installed\nstore id: {}\ncredential epoch: {}\npending anchor: normal-restore",
+            hex(&receipt.installed_store_id.0),
+            receipt.credential_epoch,
+        ),
+    };
+    std::io::stdout()
+        .write_all(rendered.as_bytes())
+        .and_then(|()| std::io::stdout().write_all(b"\n"))
+        .map_err(|_| "restore_refused code=output".to_owned())
 }
 
 struct RecipientRewrapCli<'a> {

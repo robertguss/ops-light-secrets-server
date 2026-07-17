@@ -671,6 +671,42 @@ uses one shared bucket: one login flood can therefore rate-limit legitimate
 workload re-logins until the window resets. Operators should treat that mode
 as degraded and configure the verified forwarded-address path.
 
+## Fresh-host restore
+
+Restore only into an absent path inside an existing service-owned mode-0700
+directory. Keep daemon stopped. Generate a new active identity into approved
+custody first; never reuse source-active or backup-recovery identity as routine
+active identity. Supply private identities through typed `stdin`, `fd:N`,
+`credential:NAME`, or `tty` descriptors and supply emergency credential custody
+as a pre-opened TTY, pipe, socket, or anonymous-memory FD.
+
+Use `ops-light-secrets-server restore --help` for exact arguments. Normal signed
+operation requires archive, detached signature, authenticated public-key
+candidate, backup recovery identity source, new active identity source, target,
+source-decommissioned assertion, actor, reason, digest-bound confirmation, and
+credential output FD. An absent signature additionally requires
+`--allow-unsigned-manifest` and exact `--unsigned-confirm`; a present invalid
+signature is never downgraded to unsigned mode.
+
+Restore verifies outer container/signature before age unwrap, reconstructs a
+new redb database from logical frames, checks archived state digest and complete
+audit chain, validates authenticated identity/grant/credential records, installs
+exactly new active plus confirmed recovery recipient, and invokes shared
+credential-epoch recovery preparation. Recipient replacement, epoch bump,
+finite emergency principal, `restore_activation` whole-state audit entry,
+fresh incarnation, and `pending_anchor=normal-restore` commit in one redb
+transaction. Emergency credential bytes flush before that transaction; any
+earlier failure removes temporary sibling and leaves target absent. Final file
+uses mode 0600 and is installed by sibling rename followed by parent fsync.
+
+Successful restore remains explicitly unanchored. Use disclosed emergency
+credential to issue finite normal admin token, authenticate it on named command,
+revoke emergency accessor, then complete external checkpoint prepare/sign/register
+and passing state verification. Until pending marker clears, ordinary service
+warns and bulk rewrite, migration, compaction, another restore, and key jobs
+remain refused. Preserve archive, signature, authenticated signing lineage,
+off-host checkpoint, and restore receipt as recovery evidence.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in

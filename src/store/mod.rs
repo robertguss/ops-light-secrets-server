@@ -1262,7 +1262,355 @@ pub struct LogicalStoreSnapshot {
     pub tables: Vec<LogicalTableSnapshot>,
 }
 
+pub(crate) struct NormalRestoreActivation {
+    pub rewrap: keyring::PreparedRecipientRewrap,
+    pub epoch: crate::credential_epoch::PreparedEpochRotation,
+    pub archived_state_digest: StateDigest,
+    pub assertion_digest: [u8; 32],
+    pub restore_incarnation: [u8; 16],
+    pub event_resource: String,
+    pub effective_timestamp_milliseconds: u64,
+}
+
 impl Store {
+    pub fn create_from_archive_frames(
+        path: impl AsRef<Path>,
+        frames: &[crate::backup_format::ArchiveFrame],
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if path.exists() {
+            return Err(StoreError::AlreadyInitialized);
+        }
+        let database = Database::create(path).map_err(|_| StoreError::Database)?;
+        std::fs::set_permissions(path, Permissions::from_mode(0o600))
+            .map_err(|_| StoreError::Database)?;
+        let write = database.begin_write().map_err(|_| StoreError::Database)?;
+        fn install(
+            write: &redb::WriteTransaction,
+            definition: TableDefinition<&[u8], &[u8]>,
+            frame: &crate::backup_format::ArchiveFrame,
+        ) -> Result<(), StoreError> {
+            let mut table = write
+                .open_table(definition)
+                .map_err(|_| StoreError::Database)?;
+            for entry in &frame.entries {
+                table
+                    .insert(entry.key.as_slice(), entry.value.as_slice())
+                    .map_err(|_| StoreError::Database)?;
+            }
+            Ok(())
+        }
+        for (id, definition) in [
+            (1, META),
+            (2, SYSTEM_KEYRING),
+            (3, SECRET_META),
+            (4, SECRETS),
+            (5, AUDIT_EVENTS),
+            (6, AUDIT_HEAD),
+            (7, IDENTITIES),
+            (8, GRANTS),
+            (9, CREDENTIALS),
+            (10, CREDENTIAL_EPOCH),
+            (11, CHECKPOINT_PREPARED),
+            (12, CHECKPOINT_REGISTERED),
+        ] {
+            let frame = frames
+                .iter()
+                .find(|frame| frame.table_id == id)
+                .ok_or(StoreError::Integrity)?;
+            install(&write, definition, frame)?;
+        }
+        write.commit().map_err(|_| StoreError::Database)?;
+        drop(database);
+        Self::open(path)
+    }
+
+    pub(crate) fn enter_restore_build(&self, keyring: &keyring::Keyring) -> Result<(), StoreError> {
+        let current = self.meta()?;
+        if current.lifecycle != Lifecycle::Ready || current.pending_anchor.is_some() {
+            return Err(StoreError::Integrity);
+        }
+        let mut replacement = current.clone();
+        replacement.lifecycle = Lifecycle::Restoring;
+        self.set_meta_authenticated(&current, &replacement, keyring.metadata_integrity_key())
+    }
+
+    pub(crate) fn commit_normal_restore_activation(
+        &self,
+        activation: NormalRestoreActivation,
+        random: &mut impl keyring::RandomSource,
+    ) -> Result<(keyring::Keyring, StateDigest), StoreError> {
+        let NormalRestoreActivation {
+            rewrap,
+            epoch,
+            archived_state_digest,
+            assertion_digest,
+            restore_incarnation,
+            event_resource,
+            effective_timestamp_milliseconds,
+        } = activation;
+        if restore_incarnation == [0; 16] || assertion_digest == [0; 32] {
+            return Err(StoreError::Integrity);
+        }
+        let store_id = self.meta()?.store_id;
+        let mac_key = rewrap.keyring.metadata_integrity_key();
+        epoch
+            .expected_epoch
+            .verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        epoch
+            .replacement_epoch
+            .verify(mac_key, store_id, CREDENTIAL_EPOCH_KEY)?;
+        epoch
+            .identity
+            .verify(mac_key, store_id, &epoch.identity.value.id)?;
+        epoch
+            .grant
+            .verify(mac_key, store_id, &epoch.grant.value.id)?;
+        epoch
+            .credential
+            .verify(mac_key, store_id, &epoch.credential.value.accessor.0)?;
+        if epoch.replacement_epoch.value.current
+            != epoch.expected_epoch.value.current.saturating_add(1)
+            || epoch.credential.value.issue_epoch != epoch.replacement_epoch.value.current
+            || epoch.grant.value.owner_identity_id != epoch.identity.value.id
+            || epoch.credential.value.identity_id != epoch.identity.value.id
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let mut meta = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            MetaRecord::decode(value.value())?
+        };
+        if meta.lifecycle != Lifecycle::Restoring || meta.pending_anchor.is_some() {
+            return Err(StoreError::Integrity);
+        }
+        let current_metadata = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(KEYRING_METADATA_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<keyring::KeyringMetadata>::decode(value.value())?
+        };
+        let current_provisional = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(PROVISIONAL_META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<ProvisionalMetaRecord>::decode(value.value())?
+        };
+        let current_epoch = {
+            let table = write
+                .open_table(CREDENTIAL_EPOCH)
+                .map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(CREDENTIAL_EPOCH_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<crate::credential::CredentialEpoch>::decode(value.value())?
+        };
+        let head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            AuditEnvelope::decode(value.value())?
+        };
+        let sequence = head
+            .epoch_sequence
+            .checked_add(1)
+            .ok_or(StoreError::Integrity)?;
+        current_metadata.verify(mac_key, store_id, KEYRING_METADATA_KEY)?;
+        current_provisional.verify(mac_key, store_id, PROVISIONAL_META_KEY)?;
+        rewrap
+            .metadata
+            .verify(mac_key, store_id, KEYRING_METADATA_KEY)?;
+        if current_metadata.value.generation + 1 != rewrap.keyring.generation()
+            || current_metadata.value.recipients != rewrap.old_recipients
+            || rewrap.metadata.value.recipients != rewrap.new_recipients
+            || rewrap.metadata.value.last_rewrap_audit_sequence != sequence
+            || current_epoch != epoch.expected_epoch
+            || effective_timestamp_milliseconds < head.effective_timestamp_milliseconds
+        {
+            return Err(StoreError::Integrity);
+        }
+        let identity_key = epoch.identity.value.id;
+        let grant_key = epoch.grant.value.id;
+        let credential_key = epoch.credential.value.accessor.0;
+        {
+            let mut table = write
+                .open_table(IDENTITIES)
+                .map_err(|_| StoreError::Database)?;
+            if table
+                .get(identity_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(identity_key.as_slice(), epoch.identity.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        {
+            let mut table = write.open_table(GRANTS).map_err(|_| StoreError::Database)?;
+            if table
+                .get(grant_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(grant_key.as_slice(), epoch.grant.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        {
+            let mut table = write
+                .open_table(CREDENTIALS)
+                .map_err(|_| StoreError::Database)?;
+            if table
+                .get(credential_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(
+                    credential_key.as_slice(),
+                    epoch.credential.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
+        }
+        write
+            .open_table(CREDENTIAL_EPOCH)
+            .map_err(|_| StoreError::Database)?
+            .insert(
+                CREDENTIAL_EPOCH_KEY,
+                epoch.replacement_epoch.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(SYSTEM_KEYRING)
+            .map_err(|_| StoreError::Database)?
+            .insert(KEYRING_KEY, rewrap.envelope.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(META)
+            .map_err(|_| StoreError::Database)?
+            .insert(KEYRING_METADATA_KEY, rewrap.metadata.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        meta.lifecycle = Lifecycle::Ready;
+        let replacement_provisional = Sealed::seal(
+            ProvisionalMetaRecord::from_meta(&meta),
+            current_provisional
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?,
+            mac_key,
+            store_id,
+            PROVISIONAL_META_KEY,
+        )?;
+        write
+            .open_table(META)
+            .map_err(|_| StoreError::Database)?
+            .insert(META_KEY, meta.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(META)
+            .map_err(|_| StoreError::Database)?
+            .insert(
+                PROVISIONAL_META_KEY,
+                replacement_provisional.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        let installed_state_digest = checkpoint::state_digest_in_write(&write)?;
+        meta.seal_pending_anchor(
+            PendingAnchor {
+                kind: PendingAnchorKind::NormalRestore,
+                operation_id: restore_incarnation.to_vec(),
+                plan_or_activation_digest: assertion_digest,
+                installed_state: AnchorInstalledState::Incarnation(restore_incarnation),
+                post_state_digest: installed_state_digest.0,
+                status: PendingAnchorStatus::Installed,
+            },
+            sequence,
+            mac_key,
+        )?;
+        write
+            .open_table(META)
+            .map_err(|_| StoreError::Database)?
+            .insert(META_KEY, meta.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        let event = AuditEvent {
+            event_id: epoch.event_id,
+            request_id: epoch.request_id,
+            authentication: AuditAuthentication {
+                method: AuditAuthMethod::Recovery,
+                identity_id: None,
+                credential_accessor: None,
+                succeeded: true,
+                failure_reason: None,
+            },
+            authorization: AuditAuthorization {
+                capability: Some(AuditCapability::RecoveryManage),
+                allowed: true,
+                reason: AuditReason::None,
+            },
+            consumer_instance_id: None,
+            resource: Some(AuditResource::Canonical(event_resource)),
+            operation: AuditOperation::Restore,
+            outcome: AuditOutcome::Succeeded,
+            reason: AuditReason::OperatorRequested,
+            effective_timestamp_milliseconds,
+            wall_clock_observation_milliseconds: effective_timestamp_milliseconds,
+            secret_version: None,
+            state: AuditStateCommitment::WholeState(WholeStateTransition {
+                kind: BulkTransitionKind::Restore,
+                operation_id: restore_incarnation.to_vec(),
+                before: archived_state_digest,
+                after: installed_state_digest,
+            }),
+            previous_epoch_terminal: None,
+            flood: None,
+            overload_counts: Vec::new(),
+        };
+        let entry = StoredAuditEntry::prepare(
+            &rewrap.keyring,
+            &event,
+            head.audit_epoch,
+            sequence,
+            head.chain_hash()?,
+            random,
+        )
+        .map_err(|_| StoreError::Integrity)?;
+        let event_key = audit_key(&entry.envelope);
+        write
+            .open_table(AUDIT_EVENTS)
+            .map_err(|_| StoreError::Database)?
+            .insert(event_key.as_slice(), entry.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(AUDIT_HEAD)
+            .map_err(|_| StoreError::Database)?
+            .insert(AUDIT_HEAD_KEY, entry.envelope.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write.commit().map_err(|_| StoreError::Database)?;
+        Ok((rewrap.keyring, installed_state_digest))
+    }
     /// Capture every normative table and its state commitment under one redb
     /// transaction. Backup callers must not reconstruct this using separate
     /// public reads: concurrent commits could otherwise produce a torn archive.
