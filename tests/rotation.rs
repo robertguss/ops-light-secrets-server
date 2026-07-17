@@ -846,3 +846,87 @@ fn rotation_cli_help_includes_interval() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("interval"));
 }
+
+#[test]
+fn rotation_complete_guard_requires_current_target_and_adoption() {
+    let (mut management, principal, kv, mut rotations) = fixtures();
+    kv.write(ACTOR, &endpoint(), value(1), Some(0)).unwrap();
+    let started = rotations
+        .begin(
+            &mut management,
+            principal,
+            [1; 16],
+            [9; 16],
+            "secret/apps/database".into(),
+            snapshot(1),
+            100,
+            &kv,
+        )
+        .unwrap();
+    assert!(matches!(
+        rotations.complete(
+            &mut management,
+            principal,
+            [2; 16],
+            started.record.id,
+            started.generation,
+            1,
+            &[],
+            false,
+            None,
+            110,
+        ),
+        Err(RotationError::Conflict { .. })
+    ));
+    let cutover = rotations
+        .cutover(
+            &mut management,
+            principal,
+            [3; 16],
+            started.record.id,
+            started.generation,
+            value(2),
+            110,
+            &kv,
+        )
+        .unwrap();
+    let instance = *cutover.record.active_instances.iter().next().unwrap();
+    let members = [ops_light_secrets_server::rotation::AdoptionMember {
+        kind: "instance",
+        id: instance,
+        class: ops_light_secrets_server::rotation::AdoptionClass::SilentSinceWrite,
+        fetched_version: None,
+        last_read_unix_seconds: None,
+        recency_lookback_exceeded: false,
+    }];
+    assert!(rotations
+        .complete(
+            &mut management,
+            principal,
+            [4; 16],
+            cutover.record.id,
+            cutover.generation,
+            cutover.record.target_version.unwrap(),
+            &members,
+            false,
+            None,
+            120,
+        )
+        .is_err());
+    let report = rotations
+        .complete(
+            &mut management,
+            principal,
+            [5; 16],
+            cutover.record.id,
+            cutover.generation,
+            cutover.record.target_version.unwrap(),
+            &members,
+            true,
+            Some("operator accepted silent consumer"),
+            120,
+        )
+        .unwrap();
+    assert_eq!(report.state, RotationLifecycle::Completed);
+    assert!(report.acknowledged_unverified);
+}

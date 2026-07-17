@@ -227,6 +227,15 @@ pub struct RotationAdoptionStatus {
     pub consumers: Vec<AdoptionMember>,
 }
 
+/// Redacted closeout report (no secret values).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationCloseoutReport {
+    pub rotation_id: [u8; 16],
+    pub state: RotationLifecycle,
+    pub acknowledged_unverified: bool,
+    pub warnings: Vec<String>,
+}
+
 /// Classify post-cutover adoption from audited reads strictly after cutover through cutoff.
 ///
 /// Lookback only annotates recency; it never demotes `on-current` to silent.
@@ -818,6 +827,92 @@ impl RotationCatalog {
     ) -> Result<RotationView, RotationError> {
         management.authorize_command(principal, ControlCommand::RotationStatus, request_id)?;
         self.show_inner(id)
+    }
+
+    /// Guarded rotation closeout (R33). Target must still be current; adoption
+    /// must be on-current or covered by acknowledge_unverified / retirement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete(
+        &mut self,
+        management: &mut ManagementCatalog,
+        principal: ManagementPrincipal,
+        request_id: [u8; 16],
+        id: [u8; 16],
+        expected_generation: u64,
+        current_version: u64,
+        members: &[AdoptionMember],
+        acknowledge_unverified: bool,
+        acknowledge_reason: Option<&str>,
+        effective_unix_seconds: u64,
+    ) -> Result<RotationCloseoutReport, RotationError> {
+        management.authorize_command(principal, ControlCommand::RotationLifecycle, request_id)?;
+        if self
+            .completed
+            .contains(&(request_id, ControlCommand::RotationLifecycle, id))
+        {
+            return Ok(RotationCloseoutReport {
+                rotation_id: id,
+                state: RotationLifecycle::Completed,
+                acknowledged_unverified: acknowledge_unverified,
+                warnings: Vec::new(),
+            });
+        }
+        validate_effective_time(effective_unix_seconds)?;
+        let current = self.show_inner(id)?;
+        require_state(&current, expected_generation, RotationLifecycle::Cutover)?;
+        ensure_history_room(&current)?;
+        let target = current.record.target_version.ok_or(RotationError::Invalid)?;
+        if current_version != target {
+            // Condition (a): never overridable.
+            return Err(RotationError::Conflict {
+                state: current.record.state,
+            });
+        }
+        let unresolved: Vec<&AdoptionMember> = members
+            .iter()
+            .filter(|member| {
+                !matches!(
+                    member.class,
+                    AdoptionClass::OnCurrent | AdoptionClass::RetiredWithoutProof
+                )
+            })
+            .collect();
+        if !unresolved.is_empty() {
+            if !acknowledge_unverified {
+                return Err(RotationError::Invalid);
+            }
+            if acknowledge_reason.map(str::trim).unwrap_or("").is_empty() {
+                return Err(RotationError::Invalid);
+            }
+        }
+        let generation = next(expected_generation)?;
+        let mut record = current.record;
+        record.state = RotationLifecycle::Completed;
+        record.history.push(RotationTransition {
+            state: RotationLifecycle::Completed,
+            effective_unix_seconds,
+            version: target,
+        });
+        self.install(record, generation)?;
+        self.completed
+            .insert((request_id, ControlCommand::RotationLifecycle, id));
+        management.record_command_success(
+            principal,
+            request_id,
+            ControlCommand::RotationLifecycle,
+            id,
+            None,
+        )?;
+        Ok(RotationCloseoutReport {
+            rotation_id: id,
+            state: RotationLifecycle::Completed,
+            acknowledged_unverified: acknowledge_unverified,
+            warnings: if acknowledge_unverified {
+                vec!["acknowledge-unverified".into()]
+            } else {
+                Vec::new()
+            },
+        })
     }
 
     /// Post-write adoption status from audited reads (R33 / AE11).
