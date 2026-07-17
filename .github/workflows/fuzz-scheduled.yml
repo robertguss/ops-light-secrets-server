@@ -1,0 +1,22 @@
+name: fuzz-scheduled
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked
+      - name: Fuzz gate (build + short corpus smoke)
+        run: ./scripts/check-fuzz.sh

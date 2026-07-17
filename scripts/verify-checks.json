@@ -153,6 +153,12 @@
       "program": "./scripts/check-deny.sh",
       "args": [],
       "toolchain": "default"
+    },
+    {
+      "id": "fuzz",
+      "program": "./scripts/check-fuzz.sh",
+      "args": [],
+      "toolchain": "default"
     }
   ]
 }

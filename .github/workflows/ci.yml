@@ -33,6 +33,7 @@ jobs:
           - compat-capture
           - differential
           - deny
+          - fuzz
           - lock-msrv
           - crypto-vectors
           - fmt
