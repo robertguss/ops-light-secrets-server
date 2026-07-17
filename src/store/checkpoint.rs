@@ -832,7 +832,9 @@ fn last_registered_in_write(
     Ok(last)
 }
 
-fn state_digest_in_write(write: &redb::WriteTransaction) -> Result<StateDigest, StoreError> {
+pub(super) fn state_digest_in_write(
+    write: &redb::WriteTransaction,
+) -> Result<StateDigest, StoreError> {
     let mut tuples = Vec::new();
     {
         let table = write.open_table(META).map_err(|_| StoreError::Database)?;

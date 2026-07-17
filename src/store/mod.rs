@@ -1247,7 +1247,108 @@ pub struct Store {
     integrity: integrity::IntegrityMonitor,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalTableSnapshot {
+    pub table: &'static str,
+    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalStoreSnapshot {
+    pub meta: MetaRecord,
+    pub audit_head: AuditEnvelope,
+    pub latest_checkpoint_digest: Option<[u8; 32]>,
+    pub state_digest: StateDigest,
+    pub tables: Vec<LogicalTableSnapshot>,
+}
+
 impl Store {
+    /// Capture every normative table and its state commitment under one redb
+    /// transaction. Backup callers must not reconstruct this using separate
+    /// public reads: concurrent commits could otherwise produce a torn archive.
+    pub fn logical_backup_snapshot(&self) -> Result<LogicalStoreSnapshot, StoreError> {
+        fn collect(
+            write: &redb::WriteTransaction,
+            table: &'static str,
+            definition: TableDefinition<&[u8], &[u8]>,
+        ) -> Result<LogicalTableSnapshot, StoreError> {
+            let table_handle = write
+                .open_table(definition)
+                .map_err(|_| StoreError::Database)?;
+            let mut entries = Vec::new();
+            for row in table_handle.iter().map_err(|_| StoreError::Database)? {
+                let (key, value) = row.map_err(|_| StoreError::Database)?;
+                entries.push((key.value().to_vec(), value.value().to_vec()));
+            }
+            Ok(LogicalTableSnapshot { table, entries })
+        }
+
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let meta = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Uninitialized)?;
+            MetaRecord::decode(bytes.value())?
+        };
+        let audit_head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            AuditEnvelope::decode(bytes.value())?
+        };
+        let latest_checkpoint_digest = {
+            let table = write
+                .open_table(CHECKPOINT_REGISTERED)
+                .map_err(|_| StoreError::Database)?;
+            let mut latest: Option<CheckpointSignature> = None;
+            for row in table.iter().map_err(|_| StoreError::Database)? {
+                let (_, value) = row.map_err(|_| StoreError::Database)?;
+                let checkpoint = CheckpointSignature::decode(value.value())?;
+                if latest.as_ref().is_none_or(|current| {
+                    current.descriptor.range_end < checkpoint.descriptor.range_end
+                }) {
+                    latest = Some(checkpoint);
+                }
+            }
+            latest
+                .as_ref()
+                .map(checkpoint_digest)
+                .transpose()
+                .map_err(|_| StoreError::Integrity)?
+        };
+        let state_digest = checkpoint::state_digest_in_write(&write)?;
+        let tables = vec![
+            collect(&write, "meta", META)?,
+            collect(&write, "system_keyring", SYSTEM_KEYRING)?,
+            collect(&write, "secret_meta", SECRET_META)?,
+            collect(&write, "secrets", SECRETS)?,
+            collect(&write, "audit_events", AUDIT_EVENTS)?,
+            collect(&write, "audit_head", AUDIT_HEAD)?,
+            collect(&write, "identities", IDENTITIES)?,
+            collect(&write, "grants", GRANTS)?,
+            collect(&write, "credentials", CREDENTIALS)?,
+            collect(&write, "credential_epoch", CREDENTIAL_EPOCH)?,
+            collect(&write, "checkpoint_prepared", CHECKPOINT_PREPARED)?,
+            collect(&write, "checkpoint_registered", CHECKPOINT_REGISTERED)?,
+        ];
+        write.abort().map_err(|_| StoreError::Database)?;
+        Ok(LogicalStoreSnapshot {
+            meta,
+            audit_head,
+            latest_checkpoint_digest,
+            state_digest,
+            tables,
+        })
+    }
     pub fn create_with_keyring(
         path: impl AsRef<Path>,
         meta: &MetaRecord,

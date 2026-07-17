@@ -507,6 +507,71 @@ impl Keyring {
         Ok(KeyringEnvelope(ciphertext))
     }
 
+    /// Wrap the unchanged purpose-key plaintext for the backup effective
+    /// recipient set. The embedded keyring retains its live recipient metadata;
+    /// this outer recovery envelope is used only to bootstrap a fresh-host
+    /// rewrap and is never installed directly as the live envelope.
+    pub fn wrap_for_backup(
+        &self,
+        active: &x25519::Recipient,
+        recovery: &[x25519::Recipient],
+    ) -> Result<KeyringEnvelope, KeyringError> {
+        if RecipientFingerprint::of(active) != self.recipients.active
+            || recovery.is_empty()
+            || recovery.len() > 7
+        {
+            return Err(KeyringError::RecipientSet);
+        }
+        let mut recipients: Vec<(RecipientFingerprint, &dyn Recipient)> =
+            vec![(RecipientFingerprint::of(active), active)];
+        recipients.extend(recovery.iter().map(|recipient| {
+            (
+                RecipientFingerprint::of(recipient),
+                recipient as &dyn Recipient,
+            )
+        }));
+        recipients.sort_by_key(|(fingerprint, _)| *fingerprint);
+        if recipients.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(KeyringError::RecipientSet);
+        }
+        let plaintext = Zeroizing::new(self.encode_plaintext()?);
+        let encryptor =
+            Encryptor::with_recipients(recipients.into_iter().map(|(_, recipient)| recipient))
+                .map_err(|_| KeyringError::Encrypt)?;
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor
+            .wrap_output(&mut ciphertext)
+            .map_err(|_| KeyringError::Encrypt)?;
+        writer
+            .write_all(&plaintext)
+            .and_then(|()| writer.finish())
+            .map_err(|_| KeyringError::Encrypt)?;
+        if ciphertext.len() > MAX_AGE_ENVELOPE {
+            return Err(KeyringError::Limit);
+        }
+        Ok(KeyringEnvelope(ciphertext))
+    }
+
+    /// Open a backup-only recovery envelope. Callers must verify the signed
+    /// archive and its source metadata before invoking this, then immediately
+    /// rewrap the returned keyring to a new active recipient.
+    pub fn open_backup_envelope(
+        clear_store_id: StoreId,
+        envelope: &KeyringEnvelope,
+        identity: &x25519::Identity,
+    ) -> Result<Self, KeyringError> {
+        if envelope.0.len() > MAX_AGE_ENVELOPE {
+            return Err(KeyringError::Limit);
+        }
+        let plaintext =
+            Zeroizing::new(age::decrypt(identity, &envelope.0).map_err(|_| KeyringError::Decrypt)?);
+        let keyring = Self::decode_plaintext(&plaintext)?;
+        if keyring.store_id != clear_store_id {
+            return Err(KeyringError::StoreMismatch);
+        }
+        Ok(keyring)
+    }
+
     fn encode_plaintext(&self) -> Result<Vec<u8>, KeyringError> {
         self.validate()?;
         let mut out = Encoder::version(1);

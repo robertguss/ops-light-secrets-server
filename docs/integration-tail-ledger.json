@@ -63,8 +63,8 @@
     },
     {
       "contract": "storage.backup_snapshot_adapter",
-      "owner": "olss-charter-qul.11.2",
-      "verification": "Back U10.2 logical backup with U6.1 SnapshotService cursors and prove consistent real-redb MVCC reads release pinned pages on cancellation, expiration, and completion."
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Replace U10.2's bounded single-transaction logical snapshot adapter with U6.1 SnapshotService cursors in final assembly and prove consistent real-redb MVCC reads release pinned pages on cancellation, expiration, and completion without changing G3 frames or cutoffs."
     },
     {
       "contract": "clock.watermark_audit_event",
@@ -138,8 +138,13 @@
     },
     {
       "contract": "signing_trust.backup_descriptor_inventory",
-      "owner": "olss-charter-qul.11.2",
+      "owner": "olss-charter-qul.12.14",
       "verification": "Make every backup manifest publishing reservation create a signer-bound U6.8 inventory row and resolve it only through registered or owner-audited abandoned terminal disposition; bind lineage generation, transition digest, creator audit position, key id, and backup signature domain."
+    },
+    {
+      "contract": "backup.live_control_catalog",
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Persist and hydrate U10.2 RecoveryRecipientCatalog and BackupCatalog; bind create/list/show/resume/recipient-set/signature-register/abandon/receipt-register to the owner socket, control credential, concrete capabilities, reserved coordinator lane, final-barrier reload, canonical recovery events, and safe CLI rendering. Exercise create while serving, lost replies, restart recovery, and both active/recovery rehearsals through the assembled binary."
     },
     {
       "contract": "signing_trust.audit_export_descriptor_inventory",

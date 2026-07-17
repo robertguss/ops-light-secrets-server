@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use ops_light_secrets_server::backup::{sign_backup, write_detached_signature_atomic};
+use ops_light_secrets_server::backup_format::BackupContainer;
 use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
 use ops_light_secrets_server::config::{Config, SecretSource, SystemSecretInput};
 use ops_light_secrets_server::control::management::{
@@ -119,6 +121,102 @@ enum Command {
         connection: ControlConnectionArgs,
         #[command(subcommand)]
         command: StoreCommand,
+    },
+    /// Create, inspect, sign, and recover logical backup artifacts
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupCommand {
+    Create {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long = "archive-output")]
+        archive_output: PathBuf,
+    },
+    List {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        publication: Option<String>,
+        #[arg(long)]
+        signature: Option<String>,
+        #[arg(long)]
+        rehearsal: Option<String>,
+        #[arg(long)]
+        disposition: Option<String>,
+    },
+    Show {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        manifest_digest: String,
+    },
+    Resume {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        manifest_digest: String,
+    },
+    Recipient {
+        #[command(subcommand)]
+        command: BackupRecipientCommand,
+    },
+    Manifest {
+        #[command(subcommand)]
+        command: BackupManifestCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupRecipientCommand {
+    List {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+    },
+    Set {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long = "recovery-recipient", required = true, num_args = 1..=7)]
+        recovery_recipients: Vec<String>,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupManifestCommand {
+    Sign {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        public_key_candidate: PathBuf,
+        #[arg(long)]
+        private_key_source: SecretSource,
+        #[arg(long = "signature-output")]
+        signature_output: PathBuf,
+    },
+    Abandon {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        manifest_digest: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
     },
 }
 
@@ -648,6 +746,28 @@ pub fn run() -> Result<(), String> {
             cli.unsafe_dev_secret_env,
         );
     }
+    if let Some(Command::Backup {
+        command:
+            BackupCommand::Manifest {
+                command:
+                    BackupManifestCommand::Sign {
+                        archive,
+                        public_key_candidate,
+                        private_key_source,
+                        signature_output,
+                        ..
+                    },
+            },
+    }) = &cli.command
+    {
+        return run_backup_manifest_sign(
+            archive,
+            public_key_candidate,
+            private_key_source,
+            signature_output,
+            cli.unsafe_dev_secret_env,
+        );
+    }
 
     if let Some(command) = &cli.command {
         let config = Config::load(cli.config.as_deref(), cli.unsafe_dev_secret_env)
@@ -759,9 +879,51 @@ pub fn run() -> Result<(), String> {
             | Command::Store { .. } => {
                 return Err("control_command_refused code=integration_pending setting=authenticated_request_coordinator remediation='complete U4.2 control-credential middleware and coordinator adapter'".into());
             }
+            Command::Backup { .. } => {
+                return Err("backup_refused code=live_control_adapter_pending artifact_bytes_unchanged=true remediation='retry after authenticated backup control adapter is available'".into());
+            }
         }
     }
     Ok(())
+}
+
+fn run_backup_manifest_sign(
+    archive_path: &std::path::Path,
+    public_key_path: &std::path::Path,
+    source: &SecretSource,
+    output: &std::path::Path,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    if matches!(source, SecretSource::UnsafeEnvironment(_)) && !unsafe_environment {
+        return Err(
+            "backup signing key environment source requires --unsafe-dev-secret-env".into(),
+        );
+    }
+    let container = std::fs::read(archive_path)
+        .map_err(|_| "backup archive read failed")
+        .and_then(|bytes| {
+            BackupContainer::decode(&bytes).map_err(|_| "backup archive verification failed")
+        })?;
+    let public = std::fs::read(public_key_path)
+        .map_err(|_| "backup public key candidate read failed")
+        .and_then(|bytes| {
+            SigningKeyCandidate::decode(&bytes)
+                .map_err(|_| "backup public key candidate verification failed")
+        })?;
+    if public.id != container.header.signing_key_id {
+        return Err("backup signing key does not match frozen header".into());
+    }
+    let mut input = SystemSecretInput::from_environment();
+    let secret = source
+        .read("backup.private_key_source", &mut input)
+        .map_err(|_| "backup private key source failed")?;
+    let mut private: [u8; 32] = secret
+        .expose()
+        .try_into()
+        .map_err(|_| "backup private key must be exactly 32 raw bytes")?;
+    let signature = sign_backup(&container, &public.verifying_key, &mut private)
+        .map_err(|error| error.to_string())?;
+    write_detached_signature_atomic(output, &signature).map_err(|error| error.to_string())
 }
 
 struct RecipientRewrapCli<'a> {

@@ -114,6 +114,34 @@ The cross-release format/domain registry and shared publication, signer,
 maintenance-preflight, and recovery evidence codecs are frozen in
 `docs/format-freeze-v1.md`.
 
+`backup create` captures all logical table frames, the exact non-audit state
+digest, audit cutoff/head, latest checkpoint, keyring generation, recovery-set
+generation, and signer lineage from one redb transaction. It publishes one
+mode-0600 container through a private same-directory temp, durable `publishing`
+reservation, rename/parent fsync, then a separate durable `published` outcome.
+Never treat those two filesystem/database durability domains as one atomic
+commit. `backup list`, `backup show <manifest-digest>`, and `backup resume
+<manifest-digest>` discover and reconcile the immutable reservation without
+revealing target paths or member data. Missing, corrupt, or substituted bytes
+require explicit owner abandonment; resume never takes a new snapshot.
+
+The configured recovery set is 1–7 distinct off-host public age recipients,
+managed with generation CAS, reason, and exact confirmation. Backup derives the
+effective set from that configuration plus the current active recipient; a
+caller with only `backup` cannot override it. The archive contains both the
+unchanged live envelope and a backup-only recovery envelope of the same purpose
+keys, allowing a recovery identity to unwrap and immediately rewrap to a new
+active recipient. No private identity or signing key is archived.
+
+`backup manifest sign` reads the private Ed25519 key only through an approved
+typed source, verifies it against the frozen public candidate/key id, zeroizes
+it on every result, and atomically creates a detached mode-0600 signature. The
+container is never rewritten. Operational maintenance accepts an artifact only
+after authenticated signature registration and a matching cryptographically
+valid, audited recovery-recipient rehearsal receipt. A detached file or local
+receipt alone remains useful offline evidence but is not an operational
+prerequisite.
+
 ## Offline active-recipient rewrap
 
 `key recipient rewrap` is the cheap routine key operation: it changes only the
