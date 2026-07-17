@@ -490,12 +490,15 @@ pub fn restore<W: Write + std::os::fd::AsFd>(
         store
             .audit_entries()
             .map_err(|_| RestoreError::AuditChain)?;
+        crate::fault_inject::hit("restore.temp_fsync");
         File::open(&temp)
             .and_then(|file| file.sync_all())
             .map_err(|_| RestoreError::Install)?;
         drop(installed_keyring);
         drop(store);
+        crate::fault_inject::hit("restore.install.rename");
         std::fs::rename(&temp, request.target).map_err(|_| RestoreError::Install)?;
+        crate::fault_inject::hit("restore.install.parent_fsync");
         File::open(parent)
             .and_then(|file| file.sync_all())
             .map_err(|_| RestoreError::Install)?;

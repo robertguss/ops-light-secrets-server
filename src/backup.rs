@@ -801,7 +801,9 @@ impl PreparedOutput {
         if self.final_path.exists() {
             return Err(BackupError::Conflict);
         }
+        crate::fault_inject::hit("backup.publish.rename");
         std::fs::rename(&self.temp_path, &self.final_path).map_err(|_| BackupError::Io)?;
+        crate::fault_inject::hit("backup.publish.parent_fsync");
         let parent = self.final_path.parent().ok_or(BackupError::Io)?;
         File::open(parent)
             .and_then(|file| file.sync_all())

@@ -6,6 +6,10 @@ rust-version = "1.85"
 license = "MIT"
 publish = false
 
+[features]
+default = []
+fault-inject = []
+
 [workspace]
 members = ["crates/test-support", "research/ktd2/spike"]
 resolver = "3"
@@ -52,6 +56,10 @@ path = "tests/compat/mod.rs"
 [[test]]
 name = "txn_crash"
 path = "tests/fault/txn_crash.rs"
+
+[[test]]
+name = "core_recovery_gate"
+path = "tests/fault/core_recovery_gate.rs"
 
 [[test]]
 name = "differential"
