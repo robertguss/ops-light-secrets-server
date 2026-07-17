@@ -1,4 +1,5 @@
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use age::x25519;
 use ed25519_dalek::SigningKey;
@@ -20,6 +21,7 @@ use ops_light_secrets_server::store::{
     Canonical, FORMAT_VERSION, Lifecycle, LogicalPath, MetaRecord, SecretKey, SecretRecord, Store,
     StoreId,
 };
+use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
 
 const ACTIVE_IDENTITY: &str =
     "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
@@ -508,4 +510,195 @@ fn output_and_signature_publication_refuse_collisions_and_use_private_modes() {
         0o600
     );
     assert!(write_detached_signature_atomic(&signature_path, &signature).is_err());
+}
+
+const RECOVERY_SCENARIOS: [(&str, &[&str]); 26] = [
+    (
+        "recovery-01-ae7-fresh-host",
+        &[
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-02-concurrent-snapshot",
+        &["tests/backup.rs::backup_during_concurrent_writes_contains_only_complete_records"],
+    ),
+    (
+        "recovery-03-credential-epoch",
+        &[
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-04-member-tamper",
+        &[
+            "tests/restore.rs::invalid_signature_preexisting_target_and_broken_sink_leave_target_inert",
+        ],
+    ),
+    (
+        "recovery-05-rollback-fork",
+        &[
+            "tests/recovery_fork.rs::explicit_fork_activation_increments_epochs_once_and_installs_pending_anchor",
+        ],
+    ),
+    (
+        "recovery-06-logical-format",
+        &[
+            "tests/backup.rs::one_snapshot_builds_recovery_openable_ciphertext_and_complete_manifest",
+        ],
+    ),
+    (
+        "recovery-07-wrong-identity",
+        &[
+            "tests/backup_verify.rs::wrong_recovery_identity_names_envelope_and_outer_tamper_stops_before_unwrap",
+        ],
+    ),
+    (
+        "recovery-08-broken-sink",
+        &[
+            "tests/restore.rs::invalid_signature_preexisting_target_and_broken_sink_leave_target_inert",
+        ],
+    ),
+    (
+        "recovery-09-full-rehearsal",
+        &[
+            "tests/backup_verify.rs::active_and_recovery_paths_are_distinct_signed_receipts_and_cleanup_workspace",
+        ],
+    ),
+    (
+        "recovery-10-recovery-only",
+        &[
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-11-fork-reason",
+        &[
+            "tests/recovery_fork.rs::explicit_fork_activation_increments_epochs_once_and_installs_pending_anchor",
+        ],
+    ),
+    (
+        "recovery-12-absent-target",
+        &[
+            "tests/restore.rs::invalid_signature_preexisting_target_and_broken_sink_leave_target_inert",
+        ],
+    ),
+    (
+        "recovery-13-signature-matrix",
+        &[
+            "tests/restore.rs::unsigned_requires_full_ceremony_and_sink_failure_cleans_temp",
+            "tests/backup.rs::detached_signing_zeroizes_and_registration_is_current_key_bound",
+        ],
+    ),
+    (
+        "recovery-14-observation-limit",
+        &["tests/backup.rs::recipient_authority_and_snapshot_consistency_fail_closed"],
+    ),
+    (
+        "recovery-15-private-key-scan",
+        &[
+            "tests/backup.rs::one_snapshot_builds_recovery_openable_ciphertext_and_complete_manifest",
+        ],
+    ),
+    (
+        "recovery-16-withholding-limit",
+        &["tests/recovery_fork.rs::checkpoint_lineage_and_withheld_evidence_classify_honestly"],
+    ),
+    (
+        "recovery-17-signing-rollover",
+        &[
+            "tests/signing_trust.rs::first_b_checkpoint_covers_activation_and_clears_pending_while_a_history_verifies",
+        ],
+    ),
+    (
+        "recovery-18-rpo-assertion",
+        &[
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-19-pending-anchors",
+        &[
+            "tests/recovery_fork.rs::explicit_fork_activation_increments_epochs_once_and_installs_pending_anchor",
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-20-state-commitment",
+        &[
+            "tests/backup.rs::one_snapshot_builds_recovery_openable_ciphertext_and_complete_manifest",
+        ],
+    ),
+    (
+        "recovery-21-target-identity",
+        &[
+            "tests/restore.rs::signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
+        ],
+    ),
+    (
+        "recovery-22-fork-handoff",
+        &[
+            "tests/recovery_fork.rs::explicit_fork_activation_increments_epochs_once_and_installs_pending_anchor",
+        ],
+    ),
+    (
+        "recovery-23-publication-state",
+        &[
+            "tests/backup.rs::publication_catalog_is_idempotent_discoverable_and_two_phase",
+            "tests/backup.rs::output_and_signature_publication_refuse_collisions_and_use_private_modes",
+        ],
+    ),
+    (
+        "recovery-24-disposition",
+        &[
+            "tests/backup_verify.rs::registration_requires_current_signer_exact_generation_and_full_authority",
+        ],
+    ),
+    (
+        "recovery-25-branch-isolation",
+        &[
+            "tests/recovery_fork.rs::malformed_forked_or_mixed_source_evidence_refuses_instead_of_ignoring",
+        ],
+    ),
+    (
+        "recovery-26-owner-recovery",
+        &["tests/backup.rs::publication_catalog_is_idempotent_discoverable_and_two_phase"],
+    ),
+];
+
+#[test]
+fn every_recovery_contract_scenario_has_source_evidence_and_safe_observability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let harness = Harness::builder("backup-restore-contract")
+        .register_canary(b"backup-restore-contract-secret-canary-a47d")
+        .build()
+        .unwrap();
+    for (index, (id, evidence)) in RECOVERY_SCENARIOS.iter().enumerate() {
+        for item in *evidence {
+            let (path, test) = item.split_once("::").unwrap();
+            let source = std::fs::read_to_string(root.join(path)).unwrap();
+            assert!(
+                source.contains(&format!("fn {test}")),
+                "missing evidence {item}"
+            );
+        }
+        let mut scenario = harness.scenario(id, 1).unwrap();
+        scenario
+            .step(
+                "contract-evidence",
+                SafeSummary::new()
+                    .field("scenario", SafeValue::Unsigned((index + 1) as u64))
+                    .field("evidence_count", SafeValue::Unsigned(evidence.len() as u64)),
+                ExpectedOutcome::Success,
+                ActualOutcome::Success,
+            )
+            .unwrap();
+        let report = scenario.finish_success().unwrap();
+        assert!(report.scan_attestation.clean);
+        assert!(
+            !report
+                .jsonl
+                .contains("backup-restore-contract-secret-canary-a47d")
+        );
+    }
 }
