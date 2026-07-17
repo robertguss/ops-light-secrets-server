@@ -166,16 +166,6 @@ fn ignored_integration_tails_are_owned_only_by_open_beads() {
     let issue_lines = include_str!("../.beads/issues.jsonl");
     for (source, annotation, owner) in [
         (
-            include_str!("store.rs"),
-            "U6.6 owns signed-checkpoint/offline-tail integration",
-            "olss-charter-qul.4.6",
-        ),
-        (
-            include_str!("store.rs"),
-            "U6.6 owns final cross-suite executor evidence",
-            "olss-charter-qul.4.6",
-        ),
-        (
             include_str!("auth.rs"),
             "U5.6 owns the final scoped AppRole-to-KV read tail",
             "olss-charter-qul.7.6",

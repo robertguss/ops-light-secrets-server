@@ -543,13 +543,8 @@ fn u2_scenario_ledger_is_complete_source_checked_and_harness_logged() {
             "missing {source}::{test}"
         );
         let status = entry["status"].as_str().unwrap();
-        assert!(matches!(status, "active" | "deferred"));
-        assert_eq!(status == "deferred", matches!(index + 1, 9 | 13));
-        let status = if status == "active" {
-            "active"
-        } else {
-            "deferred"
-        };
+        assert_eq!(status, "active");
+        let status = "active";
         let owner = if entry["owner"] == "U2.8" {
             "U2.8"
         } else {
@@ -574,7 +569,6 @@ fn u2_scenario_ledger_is_complete_source_checked_and_harness_logged() {
 }
 
 #[test]
-#[ignore = "U6.6 owns signed-checkpoint/offline-tail integration"]
 fn state_tail_checkpoint_rejects_rollback() {
     use ops_light_secrets_server::store::{
         EncryptedTable, StateDelta, StateDeltaSet, StateDigest, StateTuple,
@@ -593,7 +587,6 @@ fn state_tail_checkpoint_rejects_rollback() {
 }
 
 #[test]
-#[ignore = "U6.6 owns final cross-suite executor evidence"]
 fn executor_saturation_preserves_reserved_lane() {
     let source = include_str!("storage_executor.rs");
     assert!(

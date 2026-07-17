@@ -609,6 +609,11 @@ enum AuthzCommand {
 
 #[derive(Debug, Subcommand)]
 enum AuditCommand {
+    /// Verify the encrypted audit chain and stored head without decrypting payloads
+    Verify {
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
     /// Checkpoint preparation, offline signing, and registration
     Checkpoint {
         #[command(subcommand)]
@@ -1177,6 +1182,11 @@ pub fn run() -> Result<(), String> {
                     *output,
                     cli.unsafe_dev_secret_env,
                 );
+            }
+            Command::Audit {
+                command: AuditCommand::Verify { output },
+            } => {
+                return run_audit_verify(&config, *output);
             }
             Command::Audit { .. } => {
                 return Err("signing_trust_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete live signing-trust persistence adapter'".into());
@@ -2302,6 +2312,39 @@ fn parse_private_fd(value: &str) -> Result<i32, String> {
         .ok()
         .filter(|fd| *fd >= 3)
         .ok_or_else(|| "private output descriptor must be at least 3".into())
+}
+
+fn run_audit_verify(config: &Config, output: OutputFormat) -> Result<(), String> {
+    let store = Store::open(config.data_directory.join("store.redb"))
+        .map_err(|_| "audit_verify_failed code=store_open".to_owned())?;
+    let entries = store
+        .audit_entries()
+        .map_err(|_| "audit_verify_failed code=integrity".to_owned())?;
+    let head = entries
+        .last()
+        .map(|entry| entry.envelope)
+        .ok_or_else(|| "audit_verify_failed code=integrity".to_owned())?;
+    let chain_head = hex(&head
+        .chain_hash()
+        .map_err(|_| "audit_verify_failed code=integrity".to_owned())?);
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "verified": true,
+                "entry_count": entries.len(),
+                "epoch_sequence": head.epoch_sequence,
+                "chain_head": chain_head,
+            })
+        ),
+        OutputFormat::Human => println!(
+            "audit verified: entries={} epoch_sequence={} chain_head={}",
+            entries.len(),
+            head.epoch_sequence,
+            chain_head
+        ),
+    }
+    Ok(())
 }
 
 fn run_age_identity_generate(

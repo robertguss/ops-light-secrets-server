@@ -39,3 +39,7 @@ rcgen = "0.13.2"
 tempfile = "3.27.0"
 test-support = { path = "crates/test-support" }
 tower = { version = "0.5.3", features = ["util"] }
+
+[[test]]
+name = "txn_crash"
+path = "tests/fault/txn_crash.rs"
