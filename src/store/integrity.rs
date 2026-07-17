@@ -1,4 +1,5 @@
-use super::{Canonical, CodecError, Encoder, Sealed, StoreId};
+use super::codec::{Decoder, Encoder};
+use super::{Canonical, CodecError, MAX_CIPHERTEXT, Sealed, StoreId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -129,6 +130,67 @@ pub trait ClearRecord: Canonical {
 pub struct MacVerification {
     pub valid: bool,
     pub comparison_work_bytes: usize,
+}
+
+/// Re-MAC a sealed clear-record blob under a new integrity key without decoding domain type T.
+///
+/// Verifies the existing MAC with `old_key`, then returns an identically framed blob whose MAC
+/// was produced with `new_key`. Non-sealed values return `Ok(None)`.
+pub fn reseal_clear_blob(
+    bytes: &[u8],
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+    store_id: StoreId,
+    primary_key: &[u8],
+) -> Result<Option<Vec<u8>>, CodecError> {
+    if bytes.first().copied() != Some(1) {
+        return Ok(None);
+    }
+    let mut input = Decoder::version(bytes, 1)?;
+    let mac_format_version = input.u16()?;
+    if mac_format_version != MAC_FORMAT_VERSION {
+        return Ok(None);
+    }
+    let class_code = input.u16()?;
+    let Ok(class) = RecordClass::from_code(class_code) else {
+        return Ok(None);
+    };
+    let schema_version = input.u16()?;
+    let generation = input.u64()?;
+    let value = input.bytes(MAX_CIPHERTEXT)?;
+    let mac = input.fixed()?;
+    if input.finish().is_err() {
+        return Ok(None);
+    }
+    let expected = record_mac(
+        old_key,
+        class,
+        schema_version,
+        store_id,
+        primary_key,
+        generation,
+        &value,
+    )?;
+    if !compare_tag(&mac, &expected).valid {
+        return Err(CodecError::Invalid);
+    }
+    let replacement = record_mac(
+        new_key,
+        class,
+        schema_version,
+        store_id,
+        primary_key,
+        generation,
+        &value,
+    )?;
+    let mut out = Encoder::version(1);
+    out.u16(mac_format_version);
+    out.u16(class.code());
+    out.u16(schema_version);
+    out.u64(generation);
+    out.bytes(&value, MAX_CIPHERTEXT)?;
+    out.fixed(&replacement);
+    Ok(Some(out.finish()))
 }
 
 pub(crate) fn record_mac(

@@ -9,11 +9,13 @@ use secrecy::ExposeSecret;
 
 use crate::backup_format::{ARCHIVE_REGISTRY, ArchiveEntry, ArchiveFrame};
 use crate::store::keyring::{
-    Keyring, KeyringError, PreparedRecordKeyRotation, RandomSource, RecipientFingerprint,
+    Keyring, KeyringError, KeyringOpener, PreparedRecordKeyRotation, RandomSource,
+    RecipientFingerprint,
 };
 use crate::store::{
-    AuditOperation, AuditResource, Canonical, EncryptedRecord, KEYRING_KEY, KEYRING_METADATA_KEY,
-    Lifecycle, LogicalPath, RecordDomain, RewriteJob, RewriteKind, RewriteStatus, SecretKey,
+    AnchorInstalledState, AuditOperation, AuditResource, Canonical, EncryptedRecord, KEYRING_KEY,
+    KEYRING_METADATA_KEY, Lifecycle, LogicalPath, PendingAnchor, PendingAnchorKind,
+    PendingAnchorStatus, RecordDomain, RewriteJob, RewriteKind, RewriteStatus, Sealed, SecretKey,
     StateDigest, Store, StoreError,
 };
 
@@ -591,4 +593,293 @@ pub fn create_private_sibling(path: &Path) -> Result<File, RecordRotationError> 
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(|_| RecordRotationError::Io)
+}
+
+/// Offline metadata-integrity re-MAC job (U8.5).
+#[derive(Debug, Eq, PartialEq)]
+pub enum MetadataRemacError {
+    Invalid,
+    Identity,
+    Store,
+    Crypto,
+    Io,
+    Authority,
+    Confirm,
+}
+
+impl std::fmt::Display for MetadataRemacError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "metadata re-MAC input invalid or stale",
+            Self::Identity => "metadata re-MAC identity refused",
+            Self::Store => "metadata re-MAC store verification failed",
+            Self::Crypto => "metadata re-MAC crypto failed",
+            Self::Io => "metadata re-MAC filesystem operation failed",
+            Self::Authority => "metadata re-MAC authority refused",
+            Self::Confirm => "metadata re-MAC confirmation mismatch",
+        })
+    }
+}
+
+impl std::error::Error for MetadataRemacError {}
+
+impl From<StoreError> for MetadataRemacError {
+    fn from(_: StoreError) -> Self {
+        Self::Store
+    }
+}
+
+impl From<KeyringError> for MetadataRemacError {
+    fn from(_: KeyringError) -> Self {
+        Self::Crypto
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataRemacReceipt {
+    pub old_key_id: [u8; 16],
+    pub new_key_id: [u8; 16],
+    pub resealed_rows: u64,
+    pub generation: u64,
+    pub before_state_digest: [u8; 32],
+    pub after_state_digest: [u8; 32],
+}
+
+pub fn metadata_remac_confirmation(
+    store_id: [u8; 16],
+    expected_generation: u64,
+    reason: &str,
+) -> Result<String, MetadataRemacError> {
+    if reason.is_empty() || reason.len() > 1024 || reason.chars().any(char::is_control) {
+        return Err(MetadataRemacError::Invalid);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ops-light-secrets-server.metadata-remac-confirmation.v1\0");
+    for field in [
+        &store_id[..],
+        &expected_generation.to_be_bytes()[..],
+        reason.as_bytes(),
+    ] {
+        hasher.update(&(field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Offline whole-store metadata re-MAC: sibling file, reseal clear rows, atomic rename.
+pub fn run_metadata_remac(
+    source_path: &Path,
+    identity: &x25519::Identity,
+    recovery_recipient: Option<&x25519::Recipient>,
+    expected_generation: u64,
+    reason: &str,
+    confirmation: &str,
+    random: &mut impl RandomSource,
+) -> Result<MetadataRemacReceipt, MetadataRemacError> {
+    use crate::store::reseal_clear_blob;
+
+    let source = Store::open(source_path).map_err(|_| MetadataRemacError::Store)?;
+    let meta = source.meta().map_err(|_| MetadataRemacError::Store)?;
+    if meta.lifecycle != Lifecycle::Ready || meta.pending_anchor.is_some() {
+        return Err(MetadataRemacError::Invalid);
+    }
+    let envelope = source
+        .keyring()
+        .map_err(|_| MetadataRemacError::Store)?
+        .ok_or(MetadataRemacError::Store)?;
+    let sealed_metadata = source
+        .keyring_metadata()
+        .map_err(|_| MetadataRemacError::Store)?
+        .ok_or(MetadataRemacError::Store)?;
+    let keyring = KeyringOpener::default()
+        .open(meta.store_id, &envelope, &sealed_metadata, identity)
+        .map_err(|_| MetadataRemacError::Identity)?;
+    if keyring.generation() != expected_generation {
+        return Err(MetadataRemacError::Invalid);
+    }
+    let expected = metadata_remac_confirmation(meta.store_id.0, expected_generation, reason)?;
+    if confirmation != expected {
+        return Err(MetadataRemacError::Confirm);
+    }
+    // Recovery recipient must match keyring when present.
+    match (keyring.recipients().recovery, recovery_recipient) {
+        (Some(fp), Some(rec)) if RecipientFingerprint::of(rec) != fp => {
+            return Err(MetadataRemacError::Invalid);
+        }
+        (Some(_), None) => return Err(MetadataRemacError::Invalid),
+        (None, Some(_)) => return Err(MetadataRemacError::Invalid),
+        _ => {}
+    }
+
+    let before = source
+        .state_digest()
+        .map_err(|_| MetadataRemacError::Store)?
+        .0;
+    let old_mac = *keyring.metadata_integrity_key();
+    let old_key_id = keyring.metadata_integrity_key_id().0;
+
+    // Enter reencrypting lifecycle under the OLD integrity key first.
+    let head = source
+        .audit_head()
+        .map_err(|_| MetadataRemacError::Store)?
+        .ok_or(MetadataRemacError::Store)?;
+    source
+        .commit_record_rotation_lifecycle(
+            &keyring,
+            Lifecycle::Ready,
+            Lifecycle::Reencrypting,
+            phase_id(old_key_id, b"metadata-enter"),
+            phase_id(old_key_id, b"metadata-enter-req"),
+            [0x51; 16],
+            head.effective_timestamp_milliseconds.saturating_add(1),
+            random,
+        )
+        .map_err(|_| MetadataRemacError::Store)?;
+
+    let mut keyring = keyring;
+    let (old_id, new_id) = keyring.rotate_metadata_integrity_key(expected_generation, random)?;
+    if old_id.0 != old_key_id {
+        return Err(MetadataRemacError::Crypto);
+    }
+    let new_mac = *keyring.metadata_integrity_key();
+
+    let snapshot = source
+        .logical_backup_snapshot()
+        .map_err(|_| MetadataRemacError::Store)?;
+    let mut frames = Vec::with_capacity(snapshot.tables.len());
+    let mut resealed_rows = 0u64;
+    for table in snapshot.tables {
+        let codec = ARCHIVE_REGISTRY
+            .iter()
+            .find(|codec| codec.table == table.table)
+            .ok_or(MetadataRemacError::Store)?;
+        let mut entries = Vec::with_capacity(table.entries.len());
+        for (raw_key, raw_value) in table.entries {
+            let value = if codec.id == 2 && raw_key.as_slice() == KEYRING_KEY {
+                raw_value
+            } else {
+                match reseal_clear_blob(&raw_value, &old_mac, &new_mac, meta.store_id, &raw_key) {
+                    Ok(Some(replacement)) => {
+                        resealed_rows = resealed_rows
+                            .checked_add(1)
+                            .ok_or(MetadataRemacError::Store)?;
+                        replacement
+                    }
+                    Ok(None) => raw_value,
+                    Err(_) => return Err(MetadataRemacError::Crypto),
+                }
+            };
+            entries.push(ArchiveEntry {
+                key: raw_key,
+                value,
+            });
+        }
+        frames.push(ArchiveFrame {
+            table_id: codec.id,
+            codec_version: codec.codec_version,
+            entries,
+        });
+    }
+
+    let active = identity.to_public();
+    let new_envelope = keyring
+        .wrap(&active, recovery_recipient)
+        .map_err(|_| MetadataRemacError::Crypto)?;
+    let last_seq = sealed_metadata.value.last_rewrap_audit_sequence.max(1);
+    let new_metadata = Sealed::seal(
+        crate::store::keyring::KeyringMetadata {
+            generation: keyring.generation(),
+            format_version: crate::store::keyring::KEYRING_FORMAT_VERSION,
+            recipients: keyring.recipients(),
+            last_rewrap_audit_sequence: last_seq,
+        },
+        keyring.generation(),
+        keyring.metadata_integrity_key(),
+        meta.store_id,
+        KEYRING_METADATA_KEY,
+    )
+    .map_err(|_| MetadataRemacError::Crypto)?;
+
+    // Envelope lives in system_keyring (table 2); sealed keyring metadata lives in meta (table 1).
+    let keyring_frame = frames
+        .iter_mut()
+        .find(|frame| frame.table_id == 2)
+        .ok_or(MetadataRemacError::Store)?;
+    let envelope_row = keyring_frame
+        .entries
+        .iter_mut()
+        .find(|entry| entry.key.as_slice() == KEYRING_KEY)
+        .ok_or(MetadataRemacError::Store)?;
+    envelope_row.value = new_envelope
+        .encode()
+        .map_err(|_| MetadataRemacError::Store)?;
+    let meta_frame = frames
+        .iter_mut()
+        .find(|frame| frame.table_id == 1)
+        .ok_or(MetadataRemacError::Store)?;
+    let metadata_row = meta_frame
+        .entries
+        .iter_mut()
+        .find(|entry| entry.key.as_slice() == KEYRING_METADATA_KEY)
+        .ok_or(MetadataRemacError::Store)?;
+    metadata_row.value = new_metadata
+        .encode()
+        .map_err(|_| MetadataRemacError::Store)?;
+
+    let target_path = source_path.with_extension("redb.metadata-remac");
+    if target_path.exists() {
+        let _ = std::fs::remove_file(&target_path);
+    }
+    let target = Store::create_from_archive_frames(&target_path, &frames)
+        .map_err(|_| MetadataRemacError::Store)?;
+    // Ready first (no mixed-MAC serve), then MetadataKey pending_anchor for checkpoint postflight.
+    let mut ready_meta = target.meta().map_err(|_| MetadataRemacError::Store)?;
+    ready_meta.lifecycle = Lifecycle::Ready;
+    ready_meta.pending_anchor = None;
+    let current = target.meta().map_err(|_| MetadataRemacError::Store)?;
+    keyring
+        .set_meta_authenticated(&target, &current, &ready_meta)
+        .map_err(|_| MetadataRemacError::Store)?;
+    let installed = target
+        .state_digest()
+        .map_err(|_| MetadataRemacError::Store)?
+        .0;
+    let mut plan_hasher = blake3::Hasher::new();
+    plan_hasher.update(b"ops-light-secrets-server.metadata-remac-plan.v1\0");
+    plan_hasher.update(confirmation.as_bytes());
+    let mut anchored = target.meta().map_err(|_| MetadataRemacError::Store)?;
+    anchored
+        .seal_pending_anchor(
+            PendingAnchor {
+                kind: PendingAnchorKind::MetadataKey,
+                operation_id: phase_id(new_id.0, b"metadata-remac").to_vec(),
+                plan_or_activation_digest: *plan_hasher.finalize().as_bytes(),
+                installed_state: AnchorInstalledState::KeyringGeneration(keyring.generation()),
+                post_state_digest: installed,
+                status: PendingAnchorStatus::Installed,
+            },
+            keyring.generation().max(1),
+            keyring.metadata_integrity_key(),
+        )
+        .map_err(|_| MetadataRemacError::Crypto)?;
+    let current = target.meta().map_err(|_| MetadataRemacError::Store)?;
+    keyring
+        .set_meta_authenticated(&target, &current, &anchored)
+        .map_err(|_| MetadataRemacError::Store)?;
+    let after = target
+        .state_digest()
+        .map_err(|_| MetadataRemacError::Store)?
+        .0;
+    drop(target);
+    drop(source);
+    install_built_store(source_path, &target_path).map_err(|_| MetadataRemacError::Io)?;
+
+    Ok(MetadataRemacReceipt {
+        old_key_id: old_id.0,
+        new_key_id: new_id.0,
+        resealed_rows,
+        generation: keyring.generation(),
+        before_state_digest: before,
+        after_state_digest: after,
+    })
 }

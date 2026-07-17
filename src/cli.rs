@@ -1119,13 +1119,20 @@ enum KeyCommand {
 
 #[derive(Debug, Subcommand)]
 enum MetadataKeyCommand {
+    /// Offline whole-store metadata re-MAC under a new integrity key
     Rotate {
         #[arg(long)]
         expected_generation: u64,
         #[arg(long)]
+        identity_source: SecretSource,
+        #[arg(long)]
+        recovery_recipient: Option<String>,
+        #[arg(long)]
         reason: String,
         #[arg(long)]
         confirm: String,
+        #[arg(long, value_enum, default_value = "json")]
+        output: OutputFormat,
     },
     Abort {
         #[arg(long)]
@@ -1135,13 +1142,18 @@ enum MetadataKeyCommand {
 
 #[derive(Debug, Subcommand)]
 enum AuditPayloadKeyCommand {
+    /// Forward-only online/local audit-payload generation rotation
     Rotate {
         #[arg(long)]
         expected_generation: u64,
         #[arg(long)]
+        identity_source: SecretSource,
+        #[arg(long)]
         reason: String,
         #[arg(long)]
         confirm: String,
+        #[arg(long, value_enum, default_value = "json")]
+        output: OutputFormat,
     },
 }
 
@@ -1641,11 +1653,14 @@ pub fn run() -> Result<(), String> {
                 return Err("backup_refused code=live_control_adapter_pending artifact_bytes_unchanged=true remediation='retry after authenticated backup control adapter is available'".into());
             }
             Command::Key {
-                command: KeyCommand::Metadata { .. } | KeyCommand::AuditPayload { .. },
+                command: KeyCommand::Metadata { command },
             } => {
-                return Err(
-                    "key_rotation_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete control-plane key rotation adapter'".into(),
-                );
+                return run_metadata_key_command(&config, command, cli.unsafe_dev_secret_env);
+            }
+            Command::Key {
+                command: KeyCommand::AuditPayload { command },
+            } => {
+                return run_audit_payload_key_command(&config, command, cli.unsafe_dev_secret_env);
             }
             Command::Restore { .. } => unreachable!("offline restore handled before config"),
         }
@@ -2534,6 +2549,181 @@ fn run_record_key_command(
         return Err("record_key_rotation_refused code=unsafe_environment_source".into());
     }
     Err("record_key_rotation_refused code=live_recovery_evidence_catalog_pending artifact_bytes_unchanged=true remediation='register exact signature and recovery-path rehearsal receipt through authenticated backup control adapter'".into())
+}
+
+fn run_metadata_key_command(
+    config: &Config,
+    command: &MetadataKeyCommand,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    match command {
+        MetadataKeyCommand::Abort { reason } => {
+            if reason.trim().is_empty() {
+                return Err("metadata_key_rotation_refused code=reason_required".into());
+            }
+            // Offline abort: delete partial sibling if present.
+            let sibling = config.data_directory.join("store.redb.metadata-remac");
+            if sibling.exists() {
+                std::fs::remove_file(&sibling)
+                    .map_err(|_| "metadata_key_rotation_refused code=abort_cleanup".to_owned())?;
+            }
+            println!(
+                "{{\"schema\":1,\"status\":\"aborted\",\"partial_removed\":{}}}",
+                sibling.exists() == false
+            );
+            Ok(())
+        }
+        MetadataKeyCommand::Rotate {
+            expected_generation,
+            identity_source,
+            recovery_recipient,
+            reason,
+            confirm,
+            output,
+        } => {
+            if !unsafe_environment && matches!(identity_source, SecretSource::UnsafeEnvironment(_))
+            {
+                return Err("metadata_key_rotation_refused code=unsafe_environment_source".into());
+            }
+            let _lock = DataDirectoryLock::acquire(&config.data_directory)
+                .map_err(|_| "metadata_key_rotation_refused code=store_lock".to_owned())?;
+            let store_path = config.data_directory.join("store.redb");
+            let mut input = SystemSecretInput::from_environment();
+            let secret = identity_source
+                .read("key.identity_source", &mut input)
+                .map_err(|_| "metadata_key_rotation_refused code=identity_source".to_owned())?;
+            let identity = parse_identity(secret.into_zeroizing())
+                .map_err(|_| "metadata_key_rotation_refused code=identity_invalid".to_owned())?;
+            let recovery = recovery_recipient
+                .as_deref()
+                .map(str::parse::<age::x25519::Recipient>)
+                .transpose()
+                .map_err(|_| {
+                    "metadata_key_rotation_refused code=recovery_recipient_invalid".to_owned()
+                })?;
+            let mut random = SystemRandom;
+            let receipt = ops_light_secrets_server::reencrypt::run_metadata_remac(
+                &store_path,
+                &identity,
+                recovery.as_ref(),
+                *expected_generation,
+                reason,
+                confirm,
+                &mut random,
+            )
+            .map_err(|error| format!("metadata_key_rotation_refused code={error}"))?;
+            let value = serde_json::json!({
+                "schema": 1,
+                "status": "installed",
+                "generation": receipt.generation,
+                "old_key_id": hex(&receipt.old_key_id),
+                "new_key_id": hex(&receipt.new_key_id),
+                "resealed_rows": receipt.resealed_rows,
+                "before_state_digest": hex(&receipt.before_state_digest),
+                "after_state_digest": hex(&receipt.after_state_digest),
+            });
+            match output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string(&value)
+                        .map_err(|_| "metadata_key_rotation_refused code=encode".to_owned())?
+                ),
+                OutputFormat::Human => println!(
+                    "metadata re-MAC installed generation={} resealed_rows={}",
+                    receipt.generation, receipt.resealed_rows
+                ),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_audit_payload_key_command(
+    config: &Config,
+    command: &AuditPayloadKeyCommand,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    let AuditPayloadKeyCommand::Rotate {
+        expected_generation,
+        identity_source,
+        reason,
+        confirm,
+        output,
+    } = command;
+    if reason.trim().is_empty() || confirm.trim().is_empty() {
+        return Err("audit_payload_key_rotation_refused code=reason_or_confirm_required".into());
+    }
+    if !unsafe_environment && matches!(identity_source, SecretSource::UnsafeEnvironment(_)) {
+        return Err("audit_payload_key_rotation_refused code=unsafe_environment_source".into());
+    }
+    let _lock = DataDirectoryLock::acquire(&config.data_directory)
+        .map_err(|_| "audit_payload_key_rotation_refused code=store_lock".to_owned())?;
+    let store_path = config.data_directory.join("store.redb");
+    let store = Store::open(&store_path)
+        .map_err(|_| "audit_payload_key_rotation_refused code=store_open".to_owned())?;
+    let mut input = SystemSecretInput::from_environment();
+    let secret = identity_source
+        .read("key.identity_source", &mut input)
+        .map_err(|_| "audit_payload_key_rotation_refused code=identity_source".to_owned())?;
+    let identity = parse_identity(secret.into_zeroizing())
+        .map_err(|_| "audit_payload_key_rotation_refused code=identity_invalid".to_owned())?;
+    let meta = store
+        .meta()
+        .map_err(|_| "audit_payload_key_rotation_refused code=meta".to_owned())?;
+    let envelope = store
+        .keyring()
+        .map_err(|_| "audit_payload_key_rotation_refused code=envelope".to_owned())?
+        .ok_or_else(|| "audit_payload_key_rotation_refused code=uninitialized".to_owned())?;
+    let sealed_metadata = store
+        .keyring_metadata()
+        .map_err(|_| "audit_payload_key_rotation_refused code=metadata".to_owned())?
+        .ok_or_else(|| "audit_payload_key_rotation_refused code=uninitialized".to_owned())?;
+    let mut keyring = KeyringOpener::default()
+        .open(meta.store_id, &envelope, &sealed_metadata, &identity)
+        .map_err(|_| "audit_payload_key_rotation_refused code=identity_rejected".to_owned())?;
+    let mut random = SystemRandom;
+    let new_id = keyring
+        .rotate_audit_payload_key(*expected_generation, &mut random)
+        .map_err(|error| format!("audit_payload_key_rotation_refused code={error:?}"))?;
+    let active = identity.to_public();
+    if keyring.recipients().recovery.is_some() {
+        return Err(
+            "audit_payload_key_rotation_refused code=recovery_recipient_required_for_persist remediation='supply recovery material through control-plane adapter'".into(),
+        );
+    }
+    let new_envelope = keyring
+        .wrap(&active, None)
+        .map_err(|_| "audit_payload_key_rotation_refused code=wrap".to_owned())?;
+    let new_metadata = keyring
+        .seal_keyring_metadata(sealed_metadata.value.last_rewrap_audit_sequence)
+        .map_err(|_| "audit_payload_key_rotation_refused code=metadata_seal".to_owned())?;
+    store
+        .put_keyring(&new_envelope)
+        .map_err(|_| "audit_payload_key_rotation_refused code=persist_envelope".to_owned())?;
+    store
+        .put_keyring_metadata(&new_metadata)
+        .map_err(|_| "audit_payload_key_rotation_refused code=persist_metadata".to_owned())?;
+    let value = serde_json::json!({
+        "schema": 1,
+        "status": "rotated",
+        "generation": keyring.generation(),
+        "new_key_id": hex(&new_id.0),
+        "audit_payload_generations": keyring.audit_payload_generations(),
+        "reason_digest": &blake3::hash(reason.as_bytes()).to_hex()[..16],
+    });
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string(&value)
+                .map_err(|_| "audit_payload_key_rotation_refused code=encode".to_owned())?
+        ),
+        OutputFormat::Human => println!(
+            "audit-payload generation rotated generation={} gens={}",
+            keyring.generation(),
+            keyring.audit_payload_generations()
+        ),
+    }
+    Ok(())
 }
 
 fn authorize_recipient_rewrap(

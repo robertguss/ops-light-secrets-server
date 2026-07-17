@@ -100,3 +100,7 @@ path = "tests/cli_coherence.rs"
 [[test]]
 name = "release_smoke"
 path = "tests/release_smoke.rs"
+
+[[test]]
+name = "metadata_remac"
+path = "tests/metadata_remac.rs"

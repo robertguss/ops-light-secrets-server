@@ -18,8 +18,8 @@ fn key_rotation_suite_registers_purpose_key_slices() {
         ("reencrypt", "tests/reencrypt.rs", "fn "),
         (
             "metadata-integrity",
-            "tests/keyring.rs",
-            "metadata_integrity_key_rotation_advances_generation",
+            "tests/metadata_remac.rs",
+            "offline_metadata_remac_reseals_and_preserves_secret_bytes",
         ),
         (
             "audit-payload",

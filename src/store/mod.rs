@@ -35,6 +35,7 @@ pub use integrity::{
     BulkTransitionKind, ClearRecord, EncryptedTable, IntegrityDiagnostic, IntegrityOperation,
     IntegrityStatus, MAC_FORMAT_VERSION, MacConformanceReport, MacVerification, RecordClass,
     StateDelta, StateDeltaSet, StateDigest, StateTuple, WholeStateTransition, mac_conformance,
+    reseal_clear_blob,
 };
 pub use signing_trust::{
     CHECKPOINT_PUBLIC_KEY_WARNING, DescriptorDisposition, GeneratedSigningKey,
@@ -63,7 +64,7 @@ const MAX_CUSTOM_ENTRIES: usize = 64;
 const MAX_CUSTOM_KEY: usize = 128;
 const MAX_CUSTOM_VALUE: usize = 1024;
 const MAX_ENVELOPE: usize = 1024 * 1024;
-const MAX_CIPHERTEXT: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_CIPHERTEXT: usize = 8 * 1024 * 1024;
 
 const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 const SYSTEM_KEYRING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("system_keyring");
@@ -2404,6 +2405,15 @@ impl Store {
     pub fn put_keyring(&self, envelope: &KeyringEnvelope) -> Result<(), StoreError> {
         self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         self.put(SYSTEM_KEYRING, KEYRING_KEY, &envelope.encode()?)
+    }
+
+    pub fn put_keyring_metadata(
+        &self,
+        metadata: &Sealed<keyring::KeyringMetadata>,
+    ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        // Keyring metadata is stored in the META table alongside provisional meta.
+        self.put(META, KEYRING_METADATA_KEY, &metadata.encode()?)
     }
 
     pub fn commit_recipient_rewrap(

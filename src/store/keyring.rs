@@ -487,8 +487,28 @@ impl Keyring {
         Ok((old, new_id))
     }
 
-    pub(crate) fn metadata_integrity_key(&self) -> &[u8; 32] {
+    pub fn metadata_integrity_key(&self) -> &[u8; 32] {
         self.metadata_integrity.expose()
+    }
+
+    /// Seal keyring metadata under the current metadata-integrity key.
+    pub fn seal_keyring_metadata(
+        &self,
+        last_rewrap_audit_sequence: u64,
+    ) -> Result<Sealed<KeyringMetadata>, KeyringError> {
+        Sealed::seal(
+            KeyringMetadata {
+                generation: self.generation,
+                format_version: KEYRING_FORMAT_VERSION,
+                recipients: self.recipients,
+                last_rewrap_audit_sequence: last_rewrap_audit_sequence.max(1),
+            },
+            self.generation,
+            self.metadata_integrity_key(),
+            self.store_id,
+            super::KEYRING_METADATA_KEY,
+        )
+        .map_err(|_| KeyringError::Invalid)
     }
 
     pub fn set_meta_authenticated(
