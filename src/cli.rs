@@ -4,6 +4,10 @@ use ops_light_secrets_server::backup::{sign_backup, write_detached_signature_ato
 use ops_light_secrets_server::backup_format::{
     BackupContainer, DetachedBackupSignature, unsigned_confirmation,
 };
+use ops_light_secrets_server::backup_verify::{
+    FullVerifyRequest, RehearsalMode, verify_backup, verify_backup_full,
+    write_rehearsal_receipt_atomic,
+};
 use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
 use ops_light_secrets_server::config::{Config, SecretSource, SystemSecretInput};
 use ops_light_secrets_server::control::management::{
@@ -251,6 +255,40 @@ enum BackupCommand {
         connection: ControlConnectionArgs,
         manifest_digest: String,
     },
+    Verify {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        signature: Option<PathBuf>,
+        #[arg(long)]
+        public_key_candidate: PathBuf,
+        #[arg(long)]
+        identity_source: SecretSource,
+        #[arg(long)]
+        full: bool,
+        #[arg(long, value_enum)]
+        identity_kind: Option<RehearsalPathArg>,
+        #[arg(long)]
+        work_directory: Option<PathBuf>,
+        #[arg(long)]
+        receipt_signing_key_source: Option<SecretSource>,
+        #[arg(long)]
+        receipt_public_key_candidate: Option<PathBuf>,
+        #[arg(long)]
+        receipt_output: Option<PathBuf>,
+        #[arg(long)]
+        allow_unsigned_manifest: bool,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        unsigned_confirm: Option<String>,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
+    Rehearsal {
+        #[command(subcommand)]
+        command: BackupRehearsalCommand,
+    },
     Recipient {
         #[command(subcommand)]
         command: BackupRecipientCommand,
@@ -258,6 +296,31 @@ enum BackupCommand {
     Manifest {
         #[command(subcommand)]
         command: BackupManifestCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RehearsalPathArg {
+    Active,
+    Recovery,
+}
+
+impl From<RehearsalPathArg> for RehearsalMode {
+    fn from(value: RehearsalPathArg) -> Self {
+        match value {
+            RehearsalPathArg::Active => Self::ActiveRecipient,
+            RehearsalPathArg::Recovery => Self::RecoveryRecipient,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum BackupRehearsalCommand {
+    Record {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[arg(long)]
+        receipt: PathBuf,
     },
 }
 
@@ -856,6 +919,44 @@ pub fn run() -> Result<(), String> {
             cli.unsafe_dev_secret_env,
         );
     }
+    if let Some(Command::Backup {
+        command:
+            BackupCommand::Verify {
+                archive,
+                signature,
+                public_key_candidate,
+                identity_source,
+                full,
+                identity_kind,
+                work_directory,
+                receipt_signing_key_source,
+                receipt_public_key_candidate,
+                receipt_output,
+                allow_unsigned_manifest,
+                reason,
+                unsigned_confirm,
+                output,
+            },
+    }) = &cli.command
+    {
+        return run_backup_verify(BackupVerifyCli {
+            archive,
+            signature: signature.as_deref(),
+            public_key_candidate,
+            identity_source,
+            full: *full,
+            identity_kind: *identity_kind,
+            work_directory: work_directory.as_deref(),
+            receipt_signing_key_source: receipt_signing_key_source.as_ref(),
+            receipt_public_key_candidate: receipt_public_key_candidate.as_deref(),
+            receipt_output: receipt_output.as_deref(),
+            allow_unsigned_manifest: *allow_unsigned_manifest,
+            reason: reason.as_deref(),
+            unsigned_confirm: unsigned_confirm.as_deref(),
+            output: *output,
+            unsafe_environment: cli.unsafe_dev_secret_env,
+        });
+    }
     if let Some(Command::Restore {
         archive,
         signature,
@@ -1275,6 +1376,183 @@ fn run_backup_manifest_sign(
     let signature = sign_backup(&container, &public.verifying_key, &mut private)
         .map_err(|error| error.to_string())?;
     write_detached_signature_atomic(output, &signature).map_err(|error| error.to_string())
+}
+
+struct BackupVerifyCli<'a> {
+    archive: &'a std::path::Path,
+    signature: Option<&'a std::path::Path>,
+    public_key_candidate: &'a std::path::Path,
+    identity_source: &'a SecretSource,
+    full: bool,
+    identity_kind: Option<RehearsalPathArg>,
+    work_directory: Option<&'a std::path::Path>,
+    receipt_signing_key_source: Option<&'a SecretSource>,
+    receipt_public_key_candidate: Option<&'a std::path::Path>,
+    receipt_output: Option<&'a std::path::Path>,
+    allow_unsigned_manifest: bool,
+    reason: Option<&'a str>,
+    unsigned_confirm: Option<&'a str>,
+    output: OutputFormat,
+    unsafe_environment: bool,
+}
+
+fn run_backup_verify(request: BackupVerifyCli<'_>) -> Result<(), String> {
+    if !request.unsafe_environment
+        && std::iter::once(request.identity_source)
+            .chain(request.receipt_signing_key_source)
+            .any(|source| matches!(source, SecretSource::UnsafeEnvironment(_)))
+    {
+        return Err("backup_verify_refused code=unsafe_environment_source".into());
+    }
+    let container = std::fs::read(request.archive)
+        .map_err(|_| "backup_verify_refused code=archive_read".to_owned())
+        .and_then(|bytes| {
+            BackupContainer::decode(&bytes)
+                .map_err(|_| "backup_verify_refused code=outer_archive".to_owned())
+        })?;
+    let candidate = std::fs::read(request.public_key_candidate)
+        .map_err(|_| "backup_verify_refused code=public_key_candidate_read".to_owned())
+        .and_then(|bytes| {
+            SigningKeyCandidate::decode(&bytes)
+                .map_err(|_| "backup_verify_refused code=public_key_candidate_decode".to_owned())
+        })?;
+    if candidate.id != container.header.signing_key_id {
+        return Err("backup_verify_refused code=public_key_candidate_id_mismatch".into());
+    }
+    let detached = request
+        .signature
+        .map(|path| {
+            std::fs::read(path)
+                .map_err(|_| "backup_verify_refused code=signature_read".to_owned())
+                .and_then(|bytes| {
+                    DetachedBackupSignature::decode(&bytes)
+                        .map_err(|_| "backup_verify_refused code=signature_decode".to_owned())
+                })
+        })
+        .transpose()?;
+    let reason = request.reason.unwrap_or("");
+    let signature = match &detached {
+        Some(detached) => RestoreSignature::Signed {
+            detached,
+            authenticated_public_key: &candidate.verifying_key,
+        },
+        None => RestoreSignature::Unsigned {
+            allow_unsigned: request.allow_unsigned_manifest,
+            reason,
+            confirmation: request.unsigned_confirm.unwrap_or(""),
+        },
+    };
+    let mut input = SystemSecretInput::from_environment();
+    let identity = parse_identity(
+        request
+            .identity_source
+            .read("backup.verify.identity_source", &mut input)
+            .map_err(|_| "backup_verify_refused code=identity_source".to_owned())?
+            .into_zeroizing(),
+    )
+    .map_err(|_| "backup_verify_refused code=identity_invalid".to_owned())?;
+    let verification = if request.full {
+        let expected_mode = request
+            .identity_kind
+            .ok_or_else(|| "backup_verify_refused code=identity_kind_required".to_owned())?;
+        let signing_source = request.receipt_signing_key_source.ok_or_else(|| {
+            "backup_verify_refused code=receipt_signing_key_source_required".to_owned()
+        })?;
+        let receipt_candidate_path = request.receipt_public_key_candidate.ok_or_else(|| {
+            "backup_verify_refused code=receipt_public_key_candidate_required".to_owned()
+        })?;
+        let receipt_output = request
+            .receipt_output
+            .ok_or_else(|| "backup_verify_refused code=receipt_output_required".to_owned())?;
+        let receipt_candidate = std::fs::read(receipt_candidate_path)
+            .map_err(|_| "backup_verify_refused code=receipt_public_key_read".to_owned())
+            .and_then(|bytes| {
+                SigningKeyCandidate::decode(&bytes)
+                    .map_err(|_| "backup_verify_refused code=receipt_public_key_decode".to_owned())
+            })?;
+        let secret = signing_source
+            .read("backup.verify.receipt_signing_key_source", &mut input)
+            .map_err(|_| "backup_verify_refused code=receipt_signing_key_source".to_owned())?;
+        let mut private: [u8; 32] = secret
+            .expose()
+            .try_into()
+            .map_err(|_| "backup_verify_refused code=receipt_signing_key_length".to_owned())?;
+        let default_workspace = std::env::temp_dir();
+        let workspace = request.work_directory.unwrap_or(&default_workspace);
+        if workspace
+            == request
+                .archive
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+        {
+            eprintln!(
+                "WARNING: rehearsal workspace shares archive filesystem and can pressure live capacity"
+            );
+        }
+        let performed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "backup_verify_refused code=clock".to_owned())?
+            .as_secs();
+        let receipt = verify_backup_full(
+            &container,
+            signature,
+            FullVerifyRequest {
+                identity: &identity,
+                work_directory: workspace,
+                performed_at_unix_seconds: performed_at,
+                receipt_signing_candidate: &receipt_candidate,
+                receipt_private_key: &mut private,
+            },
+            &mut SystemRandom,
+        )
+        .map_err(|error| format!("backup_verify_refused code={error}"))?;
+        if receipt.mode != expected_mode.into() {
+            return Err(format!(
+                "backup_verify_refused code=identity_kind_mismatch actual={}",
+                receipt.mode.label()
+            ));
+        }
+        write_rehearsal_receipt_atomic(receipt_output, &receipt)
+            .map_err(|error| format!("backup_verify_refused code={error}"))?;
+        serde_json::json!({
+            "schema": 1,
+            "archive_digest": hex(&receipt.archive_digest),
+            "mode": receipt.mode.label(),
+            "record_count": receipt.verified_record_count,
+            "receipt": receipt_output,
+            "registration_status": "unknown_offline",
+            "performed_at_claimed_unix_seconds": receipt.performed_at_unix_seconds,
+        })
+    } else {
+        if request.identity_kind.is_some()
+            || request.work_directory.is_some()
+            || request.receipt_signing_key_source.is_some()
+            || request.receipt_public_key_candidate.is_some()
+            || request.receipt_output.is_some()
+        {
+            return Err("backup_verify_refused code=full_only_argument".into());
+        }
+        let (verified, _, _) = verify_backup(&container, signature, &identity)
+            .map_err(|error| format!("backup_verify_refused code={error}"))?;
+        serde_json::json!({
+            "schema": 1,
+            "archive_digest": hex(&verified.archive_digest),
+            "manifest_digest": hex(&verified.manifest_digest),
+            "mode": verified.mode.label(),
+            "signature_status": format!("{:?}", verified.signature_status).to_lowercase(),
+            "full": false,
+        })
+    };
+    let rendered = match request.output {
+        OutputFormat::Json => serde_json::to_string(&verification)
+            .map_err(|_| "backup_verify_refused code=output_encoding".to_owned())?,
+        OutputFormat::Human => serde_json::to_string_pretty(&verification)
+            .map_err(|_| "backup_verify_refused code=output_encoding".to_owned())?,
+    };
+    std::io::stdout()
+        .write_all(rendered.as_bytes())
+        .and_then(|()| std::io::stdout().write_all(b"\n"))
+        .map_err(|_| "backup_verify_refused code=output".to_owned())
 }
 
 struct RestoreCli<'a> {

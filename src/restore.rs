@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use age::x25519;
 
-use crate::backup::{BackupError, artifact_digest, decrypt_backup};
+use crate::backup::{BackupError, BackupPayload, artifact_digest, decrypt_backup};
 use crate::backup_format::{
     BackupContainer, DetachedBackupSignature, SignatureStatus, UnsignedOverride,
     allow_restore_signature,
@@ -20,7 +20,9 @@ use crate::init::validate_secret_sink;
 use crate::store::keyring::{
     Keyring, RandomSource, RecipientRewrapRequest, RecipientSet, recipient_rewrap_confirmation,
 };
-use crate::store::{Canonical, NormalRestoreActivation, StateDigest, Store, StoreError, StoreId};
+use crate::store::{
+    Canonical, NormalRestoreActivation, StateDigest, Store, StoreError, StoreId, checkpoint_digest,
+};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum RestoreError {
@@ -146,16 +148,13 @@ pub fn restore_assertion_confirmation(
     Ok(*hasher.finalize().as_bytes())
 }
 
-pub fn restore<W: Write + std::os::fd::AsFd>(
+pub fn verify_backup_gate(
     container: &BackupContainer,
-    request: RestoreRequest<'_>,
-    credential_sink: &mut W,
-    random: &mut impl RandomSource,
-) -> Result<RestoreReceipt, RestoreError> {
-    // Cheap outer/authentication gate precedes every identity/decode hook.
+    signature: RestoreSignature<'_>,
+) -> Result<([u8; 32], SignatureStatus), RestoreError> {
     container.encode().map_err(|_| RestoreError::Frame)?;
     let archive_digest = artifact_digest(container).map_err(|_| RestoreError::Frame)?;
-    let signature_status = match request.signature {
+    let status = match signature {
         RestoreSignature::Signed {
             detached,
             authenticated_public_key,
@@ -186,6 +185,106 @@ pub fn restore<W: Write + std::os::fd::AsFd>(
             SignatureStatus::Absent
         }
     };
+    Ok((archive_digest, status))
+}
+
+pub(crate) fn reconstruct_and_verify(
+    path: &Path,
+    payload: &BackupPayload,
+    keyring: &Keyring,
+) -> Result<(Store, u64), RestoreError> {
+    let store = Store::create_from_archive_frames(path, &payload.frames)?;
+    if store
+        .state_digest()
+        .map_err(|_| RestoreError::StateDigest)?
+        .0
+        != payload.manifest.state_digest
+    {
+        return Err(RestoreError::StateDigest);
+    }
+    let entries = store
+        .audit_entries()
+        .map_err(|_| RestoreError::AuditChain)?;
+    let head = store.audit_head()?.ok_or(RestoreError::AuditChain)?;
+    if entries.len() as u64 != payload.manifest.audit_sequence
+        || head.chain_hash().map_err(|_| RestoreError::AuditChain)? != payload.manifest.audit_head
+    {
+        return Err(RestoreError::AuditChain);
+    }
+    for entry in &entries {
+        entry
+            .decrypt(keyring)
+            .map_err(|_| RestoreError::AuditChain)?;
+    }
+    let checkpoints = store
+        .registered_checkpoints()
+        .map_err(|_| RestoreError::AuditChain)?;
+    let mut previous: Option<(u64, [u8; 32])> = None;
+    for checkpoint in &checkpoints {
+        let descriptor = &checkpoint.descriptor;
+        let anchored = entries
+            .iter()
+            .find(|entry| {
+                entry.envelope.audit_epoch == descriptor.audit_epoch
+                    && entry.envelope.epoch_sequence == descriptor.range_end
+            })
+            .ok_or(RestoreError::AuditChain)?;
+        let digest = checkpoint_digest(checkpoint).map_err(|_| RestoreError::AuditChain)?;
+        if descriptor.store_id != payload.manifest.store_id
+            || descriptor.audit_epoch != head.audit_epoch
+            || anchored
+                .envelope
+                .chain_hash()
+                .map_err(|_| RestoreError::AuditChain)?
+                != descriptor.chain_head
+        {
+            return Err(RestoreError::AuditChain);
+        }
+        match previous {
+            None if descriptor.previous_checkpoint_digest.is_some() => {
+                return Err(RestoreError::AuditChain);
+            }
+            Some((range_end, prior_digest))
+                if descriptor.range_start != range_end.saturating_add(1)
+                    || descriptor.previous_checkpoint_digest != Some(prior_digest) =>
+            {
+                return Err(RestoreError::AuditChain);
+            }
+            _ => {}
+        }
+        previous = Some((descriptor.range_end, digest));
+    }
+    if previous.map(|(_, digest)| digest) != payload.manifest.latest_checkpoint_digest {
+        return Err(RestoreError::AuditChain);
+    }
+    let identities = keyring
+        .identity_records(&store)
+        .map_err(|_| RestoreError::RecordIntegrity)?;
+    for identity in &identities {
+        keyring
+            .grant_records(&store, identity.value.id)
+            .map_err(|_| RestoreError::RecordIntegrity)?;
+    }
+    keyring
+        .credential_records(&store)
+        .map_err(|_| RestoreError::RecordIntegrity)?;
+    keyring
+        .credential_epoch(&store)
+        .map_err(|_| RestoreError::RecordIntegrity)?;
+    let records = keyring
+        .verify_encrypted_records(&store)
+        .map_err(|_| RestoreError::RecordIntegrity)?;
+    Ok((store, records))
+}
+
+pub fn restore<W: Write + std::os::fd::AsFd>(
+    container: &BackupContainer,
+    request: RestoreRequest<'_>,
+    credential_sink: &mut W,
+    random: &mut impl RandomSource,
+) -> Result<RestoreReceipt, RestoreError> {
+    // Cheap outer/authentication gate precedes every identity/decode hook.
+    let (archive_digest, signature_status) = verify_backup_gate(container, request.signature)?;
     if !request.source_decommissioned
         || request.actor_id == [0; 16]
         || request.temp_nonce == [0; 16]
@@ -246,44 +345,8 @@ pub fn restore<W: Write + std::os::fd::AsFd>(
         hex(&request.temp_nonce)
     ));
     let result = (|| {
-        let store = Store::create_from_archive_frames(&temp, &payload.frames)?;
-        if store
-            .state_digest()
-            .map_err(|_| RestoreError::StateDigest)?
-            .0
-            != payload.manifest.state_digest
-        {
-            return Err(RestoreError::StateDigest);
-        }
-        let entries = store
-            .audit_entries()
-            .map_err(|_| RestoreError::AuditChain)?;
+        let (store, _) = reconstruct_and_verify(&temp, &payload, &recovered_keyring)?;
         let head = store.audit_head()?.ok_or(RestoreError::Frame)?;
-        if entries.len() as u64 != payload.manifest.audit_sequence
-            || head.chain_hash().map_err(|_| RestoreError::AuditChain)?
-                != payload.manifest.audit_head
-        {
-            return Err(RestoreError::AuditChain);
-        }
-        for entry in &entries {
-            entry
-                .decrypt(&recovered_keyring)
-                .map_err(|_| RestoreError::AuditChain)?;
-        }
-        let identities = recovered_keyring
-            .identity_records(&store)
-            .map_err(|_| RestoreError::RecordIntegrity)?;
-        for identity in &identities {
-            recovered_keyring
-                .grant_records(&store, identity.value.id)
-                .map_err(|_| RestoreError::RecordIntegrity)?;
-        }
-        recovered_keyring
-            .credential_records(&store)
-            .map_err(|_| RestoreError::RecordIntegrity)?;
-        recovered_keyring
-            .credential_epoch(&store)
-            .map_err(|_| RestoreError::RecordIntegrity)?;
         if !payload.manifest.source.claimed_decommissioned {
             return Err(RestoreError::Invalid);
         }

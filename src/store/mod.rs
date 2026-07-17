@@ -2761,6 +2761,80 @@ impl Store {
         Ok(rows.remove(&selected).map(|record| (selected, record)))
     }
 
+    pub(crate) fn verify_encrypted_records(
+        &self,
+        keyring: &keyring::Keyring,
+    ) -> Result<u64, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Diagnostics)?;
+        let store_id = self.meta()?.store_id;
+        let mac_key = keyring.metadata_integrity_key();
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let metadata_table = read
+            .open_table(SECRET_META)
+            .map_err(|_| StoreError::Database)?;
+        let mut metadata = BTreeMap::new();
+        for row in metadata_table.iter().map_err(|_| StoreError::Database)? {
+            let (raw_path, raw_value) = row.map_err(|_| StoreError::Database)?;
+            let path = LogicalPath::decode(raw_path.value())?;
+            let value = Sealed::<SecretMetadata>::decode(raw_value.value())?;
+            if value.generation != value.value.versions.generation
+                || value.verify(mac_key, store_id, raw_path.value()).is_err()
+                || metadata.insert(path, value).is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+        }
+        let secrets = read.open_table(SECRETS).map_err(|_| StoreError::Database)?;
+        let mut present = BTreeMap::<LogicalPath, BTreeMap<u64, ()>>::new();
+        let mut count = 0u64;
+        for row in secrets.iter().map_err(|_| StoreError::Database)? {
+            let (raw_key, raw_value) = row.map_err(|_| StoreError::Database)?;
+            let key = SecretKey::decode(raw_key.value())?;
+            let record =
+                EncryptedRecord::decode(raw_value.value()).map_err(|_| StoreError::Integrity)?;
+            let binding = record.header().binding();
+            let storage_path =
+                LogicalPath::new(format!("{}/{}", binding.mount(), binding.path().as_str()))?;
+            if record.header().store_id() != store_id
+                || binding.domain() != RecordDomain::SecretValue
+                || storage_path != key.path
+                || binding.version() != Some(key.version)
+                || binding.logical_record_id() != b"secret-value.v1"
+                || !metadata.contains_key(&key.path)
+                || present
+                    .entry(key.path.clone())
+                    .or_default()
+                    .insert(key.version, ())
+                    .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            keyring
+                .decrypt_record(binding, &record)
+                .map_err(|_| StoreError::Integrity)?;
+            count = count.checked_add(1).ok_or(StoreError::Integrity)?;
+        }
+        for (path, value) in metadata {
+            let rows = present.get(&path);
+            for (version, state) in &value.value.versions.states {
+                let exists = rows.is_some_and(|rows| rows.contains_key(version));
+                if (*state == VersionState::Destroyed) == exists {
+                    return Err(StoreError::Integrity);
+                }
+            }
+            if rows.is_some_and(|rows| {
+                rows.keys()
+                    .any(|version| *version > value.value.versions.max_version)
+            }) {
+                return Err(StoreError::Integrity);
+            }
+        }
+        Ok(count)
+    }
+
     pub fn put_secret(&self, key: &SecretKey, record: &SecretRecord) -> Result<(), StoreError> {
         self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         if record.version != key.version {

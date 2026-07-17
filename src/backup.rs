@@ -328,7 +328,7 @@ pub fn decrypt_backup(
     Ok(payload)
 }
 
-fn summarize_frames(frames: &[ArchiveFrame]) -> Result<Vec<TableSummary>, CodecError> {
+pub fn summarize_frames(frames: &[ArchiveFrame]) -> Result<Vec<TableSummary>, CodecError> {
     let mut summaries = Vec::with_capacity(frames.len());
     for frame in frames {
         let encoded = frame.encode()?;

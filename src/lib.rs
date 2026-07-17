@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod backup;
 pub mod backup_format;
+pub mod backup_verify;
 pub mod capacity;
 pub mod clock;
 pub mod config;

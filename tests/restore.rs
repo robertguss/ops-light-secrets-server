@@ -18,7 +18,7 @@ use ops_light_secrets_server::store::keyring::{
     Keyring, KeyringError, KeyringOpener, RandomSource,
 };
 use ops_light_secrets_server::store::{
-    FORMAT_VERSION, Lifecycle, LogicalPath, MetaRecord, SecretKey, SecretRecord, Store, StoreId,
+    FORMAT_VERSION, Lifecycle, LogicalPath, MetaRecord, PlaintextSecret, Store, StoreId,
 };
 use secrecy::ExposeSecret;
 
@@ -64,27 +64,22 @@ fn fixture() -> Fixture {
     let source = transaction
         .commit(source_dir.path().join("store.redb"))
         .unwrap();
-    source
-        .put_secret(
-            &SecretKey {
-                path: LogicalPath::new("restored/value").unwrap(),
-                version: 1,
-            },
-            &SecretRecord {
-                version: 1,
-                created_unix_milliseconds: 1_800_000_000_001,
-                key_id: [0x41; 16],
-                nonce: [0x42; 24],
-                ciphertext: vec![0x43; 48],
-            },
-        )
-        .unwrap();
     let keyring = KeyringOpener::default()
         .open(
             StoreId([7; 16]),
             &source.keyring().unwrap().unwrap(),
             &source.keyring_metadata().unwrap().unwrap(),
             &active,
+        )
+        .unwrap();
+    keyring
+        .write_secret(
+            &source,
+            "secret",
+            &LogicalPath::new("restored/value").unwrap(),
+            &PlaintextSecret::new(b"restore-canary-value".to_vec()),
+            1_800_000_000_001,
+            &mut Counter(20),
         )
         .unwrap();
     Fixture {
@@ -251,15 +246,16 @@ fn signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclos
             .authenticated_id
             .is_some()
     );
-    assert!(
-        restored
-            .secret(&SecretKey {
-                path: LogicalPath::new("restored/value").unwrap(),
-                version: 1,
-            })
-            .unwrap()
-            .is_some()
-    );
+    let plaintext = keyring
+        .read_secret(
+            &restored,
+            "secret",
+            &LogicalPath::new("restored/value").unwrap(),
+            Some(1),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(plaintext.expose_secret(), b"restore-canary-value");
     let entries = restored.audit_entries().unwrap();
     assert_eq!(entries.len(), 2);
     let activation = entries[1].decrypt(&keyring).unwrap();

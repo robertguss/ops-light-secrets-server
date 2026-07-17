@@ -17,7 +17,16 @@ fn backup_help_freezes_catalog_recipient_and_manifest_commands() {
     let output = binary().args(["backup", "--help"]).output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for command in ["create", "list", "show", "resume", "recipient", "manifest"] {
+    for command in [
+        "create",
+        "list",
+        "show",
+        "resume",
+        "verify",
+        "rehearsal",
+        "recipient",
+        "manifest",
+    ] {
         assert!(help.contains(command));
     }
     let recipient = binary()
@@ -34,6 +43,23 @@ fn backup_help_freezes_catalog_recipient_and_manifest_commands() {
     let manifest = String::from_utf8(manifest.stdout).unwrap();
     assert!(manifest.contains("sign"));
     assert!(manifest.contains("abandon"));
+    let verify = binary()
+        .args(["backup", "verify", "--help"])
+        .output()
+        .unwrap();
+    let verify = String::from_utf8(verify.stdout).unwrap();
+    assert!(verify.contains("--full"));
+    assert!(verify.contains("--identity-source"));
+    assert!(verify.contains("--receipt-signing-key-source"));
+    let rehearsal = binary()
+        .args(["backup", "rehearsal", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(rehearsal.stdout)
+            .unwrap()
+            .contains("record")
+    );
 }
 
 #[test]

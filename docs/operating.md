@@ -142,6 +142,34 @@ valid, audited recovery-recipient rehearsal receipt. A detached file or local
 receipt alone remains useful offline evidence but is not an operational
 prerequisite.
 
+## Backup verification and disaster-recovery rehearsal
+
+Run `backup verify` for the cheap detached-signature, encrypted-container,
+manifest, and frame checks. Run `backup verify --full` in an offline process to
+reconstruct an isolated temporary store, authenticate every MAC and encrypted
+record, decrypt every record without printing its plaintext, and verify the
+state, audit, and checkpoint relationships. The temporary directory is removed
+on success or failure. Select a work directory on a filesystem other than the
+live store where possible; a same-filesystem rehearsal can pressure live
+capacity and the verifier refuses when projected use exceeds half the available
+space.
+
+Supply either the active identity or, for the meaningful fresh-host test, only
+one of the distinct recovery identities through an approved typed source. The
+former records `integrity-verified (active-recipient path)`. Only the latter
+records `DR-rehearsed (recovery path)`. A backup never successfully rehearsed is
+unproven. A backup never rehearsed through a recovery recipient is unproven for
+disaster recovery.
+
+Full verification writes a detached receipt signed under the rehearsal domain.
+Its `performed_at` is signer-claimed context, not trusted time, and offline
+output always reports registration state as unknown. Operational freshness
+starts at authenticated server registration, uses the effective registration
+time, and is valid only for the exact latest archive digest and recipient-set
+generation. Recipient changes invalidate prior freshness. Retired public keys
+remain usable only through authenticated trust lineage; loss or compromise of a
+retired private key remains an operator custody risk.
+
 ## Offline active-recipient rewrap
 
 `key recipient rewrap` is the cheap routine key operation: it changes only the

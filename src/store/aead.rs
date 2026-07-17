@@ -122,6 +122,14 @@ impl RecordBinding {
         &self.logical_record_id
     }
 
+    pub(crate) fn mount(&self) -> &str {
+        &self.mount
+    }
+
+    pub(crate) fn path(&self) -> &LogicalPath {
+        &self.path
+    }
+
     fn validate(&self) -> Result<(), RecordCryptoError> {
         if self.mount.is_empty()
             || self.mount.len() > MAX_MOUNT

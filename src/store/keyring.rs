@@ -355,7 +355,7 @@ impl Keyring {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn write_secret(
+    pub fn write_secret(
         &self,
         store: &Store,
         mount: &str,
@@ -392,7 +392,7 @@ impl Keyring {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn read_secret(
+    pub fn read_secret(
         &self,
         store: &Store,
         mount: &str,
@@ -419,6 +419,10 @@ impl Keyring {
         Ok(Some(PlaintextSecret::from_secret_box(
             self.decrypt_record(&binding, &record)?,
         )))
+    }
+
+    pub fn verify_encrypted_records(&self, store: &Store) -> Result<u64, StoreError> {
+        store.verify_encrypted_records(self)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
