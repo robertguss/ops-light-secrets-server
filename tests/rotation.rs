@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -507,4 +507,297 @@ async fn remote_listener_has_no_rotation_routes() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+}
+
+#[test]
+fn adoption_status_classifies_instances_and_ignores_lookback_for_class() {
+    use ops_light_secrets_server::rotation::{
+        AdoptionClass, ReadObservation, classify_adoption,
+    };
+    use std::collections::BTreeMap;
+
+    let consumer_a = [0xA1; 16];
+    let consumer_b = [0xA2; 16];
+    let identity_a = [0xB1; 16];
+    let identity_b = [0xB2; 16];
+    let instance_a1 = [0xC1; 16];
+    let instance_a2 = [0xC2; 16];
+    let instance_b = [0xC3; 16];
+    let snapshot = RotationSnapshotInput {
+        declared_consumers: [consumer_a, consumer_b].into_iter().collect(),
+        authorized_identities: [identity_a, identity_b].into_iter().collect(),
+        active_instances: [instance_a1, instance_a2, instance_b].into_iter().collect(),
+    };
+    let mut instance_to_identity = BTreeMap::new();
+    instance_to_identity.insert(instance_a1, identity_a);
+    instance_to_identity.insert(instance_a2, identity_a);
+    instance_to_identity.insert(instance_b, identity_b);
+    let mut identity_to_consumer = BTreeMap::new();
+    identity_to_consumer.insert(identity_a, consumer_a);
+    identity_to_consumer.insert(identity_b, consumer_b);
+
+    // cutover at seq 10, target version 3
+    let observations = [
+        ReadObservation {
+            sequence: 5,
+            identity_id: identity_a,
+            consumer_instance_id: Some(instance_a1),
+            version: 2,
+            effective_unix_seconds: 50,
+        },
+        ReadObservation {
+            sequence: 12,
+            identity_id: identity_a,
+            consumer_instance_id: Some(instance_a1),
+            version: 3,
+            effective_unix_seconds: 100,
+        },
+        ReadObservation {
+            sequence: 13,
+            identity_id: identity_a,
+            consumer_instance_id: Some(instance_a2),
+            version: 2,
+            effective_unix_seconds: 101,
+        },
+        // old post-cutover current read; lookback would mark recency but class stays on-current
+        ReadObservation {
+            sequence: 14,
+            identity_id: identity_b,
+            consumer_instance_id: Some(instance_b),
+            version: 3,
+            effective_unix_seconds: 10,
+        },
+    ];
+
+    let members = classify_adoption(
+        &snapshot,
+        3,
+        10,
+        100,
+        &observations,
+        &BTreeSet::new(),
+        Some(30),
+        200,
+        &instance_to_identity,
+        &identity_to_consumer,
+    )
+    .unwrap();
+
+    let instance = |id: [u8; 16]| {
+        members
+            .iter()
+            .find(|member| member.kind == "instance" && member.id == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(instance(instance_a1).class, AdoptionClass::OnCurrent);
+    assert_eq!(instance(instance_a1).fetched_version, Some(3));
+    assert_eq!(instance(instance_a2).class, AdoptionClass::OnPrior);
+    assert_eq!(instance(instance_b).class, AdoptionClass::OnCurrent);
+    assert!(instance(instance_b).recency_lookback_exceeded);
+
+    let identity = |id: [u8; 16]| {
+        members
+            .iter()
+            .find(|member| member.kind == "identity" && member.id == id)
+            .unwrap()
+            .clone()
+    };
+    // mixed replicas under identity_a → on-prior (never hide prior)
+    assert_eq!(identity(identity_a).class, AdoptionClass::OnPrior);
+    assert_eq!(identity(identity_b).class, AdoptionClass::OnCurrent);
+
+    let silent = members
+        .iter()
+        .find(|member| member.kind == "instance" && member.class == AdoptionClass::SilentSinceWrite);
+    assert!(silent.is_none());
+}
+
+#[test]
+fn adoption_status_marks_retired_and_no_instance_and_ae11_silent() {
+    use ops_light_secrets_server::rotation::{
+        AdoptionClass, ReadObservation, classify_adoption,
+    };
+    use std::collections::BTreeMap;
+
+    let consumer = [1; 16];
+    let identity_read = [2; 16];
+    let identity_silent = [3; 16];
+    let identity_only = [4; 16];
+    let instance_read = [5; 16];
+    let instance_silent = [6; 16];
+    let instance_retired = [7; 16];
+    let snapshot = RotationSnapshotInput {
+        declared_consumers: [consumer].into_iter().collect(),
+        authorized_identities: [identity_read, identity_silent, identity_only]
+            .into_iter()
+            .collect(),
+        active_instances: [instance_read, instance_silent, instance_retired]
+            .into_iter()
+            .collect(),
+    };
+    let mut instance_to_identity = BTreeMap::new();
+    instance_to_identity.insert(instance_read, identity_read);
+    instance_to_identity.insert(instance_silent, identity_silent);
+    instance_to_identity.insert(instance_retired, identity_silent);
+    let mut identity_to_consumer = BTreeMap::new();
+    identity_to_consumer.insert(identity_read, consumer);
+    identity_to_consumer.insert(identity_silent, consumer);
+    identity_to_consumer.insert(identity_only, consumer);
+
+    let observations = [ReadObservation {
+        sequence: 20,
+        identity_id: identity_read,
+        consumer_instance_id: Some(instance_read),
+        version: 9,
+        effective_unix_seconds: 500,
+    }];
+    let retired = BTreeSet::from([instance_retired]);
+    let members = classify_adoption(
+        &snapshot,
+        9,
+        10,
+        30,
+        &observations,
+        &retired,
+        None,
+        1000,
+        &instance_to_identity,
+        &identity_to_consumer,
+    )
+    .unwrap();
+
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.id == instance_read)
+            .unwrap()
+            .class,
+        AdoptionClass::OnCurrent
+    );
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.id == instance_silent)
+            .unwrap()
+            .class,
+        AdoptionClass::SilentSinceWrite
+    );
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.id == instance_retired)
+            .unwrap()
+            .class,
+        AdoptionClass::RetiredWithoutProof
+    );
+    assert_eq!(
+        members
+            .iter()
+            .find(|m| m.kind == "identity" && m.id == identity_only)
+            .unwrap()
+            .class,
+        AdoptionClass::NoInstanceObservation
+    );
+}
+
+#[test]
+fn rotation_status_command_requires_cutover_and_is_management_gated() {
+    let (mut management, principal, kv, mut rotations) = fixtures();
+    kv.write(ACTOR, &endpoint(), value(1), Some(0)).unwrap();
+    let started = rotations
+        .begin(
+            &mut management,
+            principal,
+            [1; 16],
+            [9; 16],
+            "secret/apps/database".into(),
+            snapshot(1),
+            100,
+            &kv,
+        )
+        .unwrap();
+    // Prepared refuses status.
+    let err = rotations
+        .status(
+            &mut management,
+            principal,
+            [2; 16],
+            started.record.id,
+            &[],
+            &BTreeSet::new(),
+            0,
+            0,
+            None,
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RotationError::Conflict {
+            state: RotationLifecycle::Prepared
+        }
+    ));
+
+    let cutover = rotations
+        .cutover(
+            &mut management,
+            principal,
+            [3; 16],
+            started.record.id,
+            started.generation,
+            value(2),
+            110,
+            &kv,
+        )
+        .unwrap();
+    let consumer = *cutover.record.declared_consumers.iter().next().unwrap();
+    let identity = *cutover.record.authorized_identities.iter().next().unwrap();
+    let instance = *cutover.record.active_instances.iter().next().unwrap();
+    let mut instance_to_identity = BTreeMap::new();
+    instance_to_identity.insert(instance, identity);
+    let mut identity_to_consumer = BTreeMap::new();
+    identity_to_consumer.insert(identity, consumer);
+    let observations = [ops_light_secrets_server::rotation::ReadObservation {
+        sequence: 5,
+        identity_id: identity,
+        consumer_instance_id: Some(instance),
+        version: cutover.record.target_version.unwrap(),
+        effective_unix_seconds: 120,
+    }];
+    let status = rotations
+        .status(
+            &mut management,
+            principal,
+            [4; 16],
+            cutover.record.id,
+            &observations,
+            &BTreeSet::new(),
+            1,
+            10,
+            None,
+            200,
+            &instance_to_identity,
+            &identity_to_consumer,
+        )
+        .unwrap();
+    assert_eq!(status.target_version, cutover.record.target_version.unwrap());
+    assert_eq!(
+        status.instances[0].class,
+        ops_light_secrets_server::rotation::AdoptionClass::OnCurrent
+    );
+    assert_eq!(status.instances[0].fetched_version, Some(status.target_version));
+}
+
+#[test]
+fn rotation_cli_help_includes_status() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+        .args(["rotation", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("status"));
 }

@@ -842,6 +842,12 @@ enum RotationCommand {
         #[arg(long)]
         request_id: String,
     },
+    /// Post-cutover adoption status from audited read versions (R33)
+    Status {
+        rotation_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]

@@ -171,6 +171,279 @@ pub struct RotationView {
     pub generation: u64,
 }
 
+/// Post-cutover adoption class (R33). Language is "fetched version N", never "using".
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AdoptionClass {
+    OnCurrent,
+    OnPrior,
+    SilentSinceWrite,
+    NoInstanceObservation,
+    RetiredWithoutProof,
+}
+
+impl AdoptionClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnCurrent => "on-current",
+            Self::OnPrior => "on-prior",
+            Self::SilentSinceWrite => "silent-since-write",
+            Self::NoInstanceObservation => "no-instance-observation",
+            Self::RetiredWithoutProof => "retired-without-proof",
+        }
+    }
+}
+
+/// One audited read observation used for adoption classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadObservation {
+    pub sequence: u64,
+    pub identity_id: [u8; 16],
+    pub consumer_instance_id: Option<[u8; 16]>,
+    pub version: u64,
+    pub effective_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdoptionMember {
+    pub kind: &'static str,
+    pub id: [u8; 16],
+    pub class: AdoptionClass,
+    pub fetched_version: Option<u64>,
+    pub last_read_unix_seconds: Option<u64>,
+    /// Recency annotation only — never changes class (R23 lookback is not a reclassifier).
+    pub recency_lookback_exceeded: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationAdoptionStatus {
+    pub rotation_id: [u8; 16],
+    pub resource: String,
+    pub state: RotationLifecycle,
+    pub target_version: u64,
+    pub cutover_sequence: u64,
+    pub cutoff_sequence: u64,
+    pub instances: Vec<AdoptionMember>,
+    pub identities: Vec<AdoptionMember>,
+    pub consumers: Vec<AdoptionMember>,
+}
+
+/// Classify post-cutover adoption from audited reads strictly after cutover through cutoff.
+///
+/// Lookback only annotates recency; it never demotes `on-current` to silent.
+pub fn classify_adoption(
+    snapshot: &RotationSnapshotInput,
+    target_version: u64,
+    cutover_sequence: u64,
+    cutoff_sequence: u64,
+    observations: &[ReadObservation],
+    retired_instances: &BTreeSet<[u8; 16]>,
+    lookback_unix_seconds: Option<u64>,
+    now_unix_seconds: u64,
+    instance_to_identity: &BTreeMap<[u8; 16], [u8; 16]>,
+    identity_to_consumer: &BTreeMap<[u8; 16], [u8; 16]>,
+) -> Result<Vec<AdoptionMember>, RotationError> {
+    if cutoff_sequence < cutover_sequence {
+        return Err(RotationError::Invalid);
+    }
+    let window: Vec<&ReadObservation> = observations
+        .iter()
+        .filter(|item| item.sequence > cutover_sequence && item.sequence <= cutoff_sequence)
+        .collect();
+
+    let mut members = Vec::new();
+
+    // Instance granularity is authoritative (KTD5).
+    for instance in &snapshot.active_instances {
+        let reads: Vec<&ReadObservation> = window
+            .iter()
+            .copied()
+            .filter(|item| item.consumer_instance_id == Some(*instance))
+            .collect();
+        let (class, version, last) = latest_class(&reads, target_version);
+        let mut class = class;
+        if retired_instances.contains(instance) && class != AdoptionClass::OnCurrent {
+            class = AdoptionClass::RetiredWithoutProof;
+        }
+        let recency = lookback_exceeded(last, lookback_unix_seconds, now_unix_seconds);
+        members.push(AdoptionMember {
+            kind: "instance",
+            id: *instance,
+            class,
+            fetched_version: version,
+            last_read_unix_seconds: last,
+            recency_lookback_exceeded: recency,
+        });
+    }
+
+    // Identity rollup: mixed when instances disagree; no-instance principals explicit.
+    for identity in &snapshot.authorized_identities {
+        let instance_ids: Vec<[u8; 16]> = snapshot
+            .active_instances
+            .iter()
+            .copied()
+            .filter(|instance| instance_to_identity.get(instance) == Some(identity))
+            .collect();
+        if instance_ids.is_empty() {
+            let reads: Vec<&ReadObservation> = window
+                .iter()
+                .copied()
+                .filter(|item| {
+                    item.identity_id == *identity && item.consumer_instance_id.is_none()
+                })
+                .collect();
+            let (class, version, last) = if reads.is_empty() {
+                (AdoptionClass::NoInstanceObservation, None, None)
+            } else {
+                latest_class(&reads, target_version)
+            };
+            members.push(AdoptionMember {
+                kind: "identity",
+                id: *identity,
+                class,
+                fetched_version: version,
+                last_read_unix_seconds: last,
+                recency_lookback_exceeded: lookback_exceeded(
+                    last,
+                    lookback_unix_seconds,
+                    now_unix_seconds,
+                ),
+            });
+            continue;
+        }
+        let classes: BTreeSet<AdoptionClass> = instance_ids
+            .iter()
+            .filter_map(|instance| {
+                members
+                    .iter()
+                    .find(|member| member.kind == "instance" && member.id == *instance)
+                    .map(|member| member.class)
+            })
+            .collect();
+        let class = if classes.len() == 1 {
+            *classes.iter().next().expect("one")
+        } else if classes.contains(&AdoptionClass::OnPrior)
+            || classes.contains(&AdoptionClass::SilentSinceWrite)
+            || classes.contains(&AdoptionClass::RetiredWithoutProof)
+        {
+            // Mixed replicas: surface the least-adopted signal (never hide prior/silent).
+            if classes.contains(&AdoptionClass::OnPrior) {
+                AdoptionClass::OnPrior
+            } else if classes.contains(&AdoptionClass::SilentSinceWrite) {
+                AdoptionClass::SilentSinceWrite
+            } else {
+                AdoptionClass::RetiredWithoutProof
+            }
+        } else {
+            AdoptionClass::OnCurrent
+        };
+        let last = instance_ids
+            .iter()
+            .filter_map(|instance| {
+                members
+                    .iter()
+                    .find(|member| member.kind == "instance" && member.id == *instance)
+                    .and_then(|member| member.last_read_unix_seconds)
+            })
+            .max();
+        let version = instance_ids.iter().find_map(|instance| {
+            members
+                .iter()
+                .find(|member| member.kind == "instance" && member.id == *instance)
+                .and_then(|member| member.fetched_version)
+        });
+        members.push(AdoptionMember {
+            kind: "identity",
+            id: *identity,
+            class,
+            fetched_version: version,
+            last_read_unix_seconds: last,
+            recency_lookback_exceeded: lookback_exceeded(
+                last,
+                lookback_unix_seconds,
+                now_unix_seconds,
+            ),
+        });
+    }
+
+    for consumer in &snapshot.declared_consumers {
+        let identities: Vec<[u8; 16]> = snapshot
+            .authorized_identities
+            .iter()
+            .copied()
+            .filter(|identity| identity_to_consumer.get(identity) == Some(consumer))
+            .collect();
+        let class = if identities.is_empty() {
+            AdoptionClass::SilentSinceWrite
+        } else {
+            let classes: BTreeSet<AdoptionClass> = identities
+                .iter()
+                .filter_map(|identity| {
+                    members
+                        .iter()
+                        .find(|member| member.kind == "identity" && member.id == *identity)
+                        .map(|member| member.class)
+                })
+                .collect();
+            if classes.contains(&AdoptionClass::OnPrior) {
+                AdoptionClass::OnPrior
+            } else if classes.contains(&AdoptionClass::SilentSinceWrite)
+                || classes.contains(&AdoptionClass::NoInstanceObservation)
+            {
+                AdoptionClass::SilentSinceWrite
+            } else if classes.contains(&AdoptionClass::RetiredWithoutProof) {
+                AdoptionClass::RetiredWithoutProof
+            } else {
+                AdoptionClass::OnCurrent
+            }
+        };
+        members.push(AdoptionMember {
+            kind: "consumer",
+            id: *consumer,
+            class,
+            fetched_version: None,
+            last_read_unix_seconds: None,
+            recency_lookback_exceeded: false,
+        });
+    }
+
+    members.sort_by(|left, right| {
+        left.kind
+            .cmp(right.kind)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(members)
+}
+
+fn latest_class(
+    reads: &[&ReadObservation],
+    target_version: u64,
+) -> (AdoptionClass, Option<u64>, Option<u64>) {
+    let Some(latest) = reads.iter().copied().max_by_key(|item| item.sequence) else {
+        return (AdoptionClass::SilentSinceWrite, None, None);
+    };
+    let class = if latest.version == target_version {
+        AdoptionClass::OnCurrent
+    } else {
+        AdoptionClass::OnPrior
+    };
+    (
+        class,
+        Some(latest.version),
+        Some(latest.effective_unix_seconds),
+    )
+}
+
+fn lookback_exceeded(
+    last_read: Option<u64>,
+    lookback_unix_seconds: Option<u64>,
+    now_unix_seconds: u64,
+) -> bool {
+    match (last_read, lookback_unix_seconds) {
+        (Some(last), Some(window)) => now_unix_seconds.saturating_sub(last) > window,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RotationError {
     Denied,
@@ -545,6 +818,78 @@ impl RotationCatalog {
     ) -> Result<RotationView, RotationError> {
         management.authorize_command(principal, ControlCommand::RotationStatus, request_id)?;
         self.show_inner(id)
+    }
+
+    /// Post-write adoption status from audited reads (R33 / AE11).
+    #[allow(clippy::too_many_arguments)]
+    pub fn status(
+        &self,
+        management: &mut ManagementCatalog,
+        principal: ManagementPrincipal,
+        request_id: [u8; 16],
+        id: [u8; 16],
+        observations: &[ReadObservation],
+        retired_instances: &BTreeSet<[u8; 16]>,
+        cutover_sequence: u64,
+        cutoff_sequence: u64,
+        lookback_unix_seconds: Option<u64>,
+        now_unix_seconds: u64,
+        instance_to_identity: &BTreeMap<[u8; 16], [u8; 16]>,
+        identity_to_consumer: &BTreeMap<[u8; 16], [u8; 16]>,
+    ) -> Result<RotationAdoptionStatus, RotationError> {
+        management.authorize_command(principal, ControlCommand::RotationStatus, request_id)?;
+        let view = self.show_inner(id)?;
+        if view.record.state != RotationLifecycle::Cutover
+            && view.record.state != RotationLifecycle::Completed
+        {
+            return Err(RotationError::Conflict {
+                state: view.record.state,
+            });
+        }
+        let target_version = view.record.target_version.ok_or(RotationError::Invalid)?;
+        let snapshot = RotationSnapshotInput {
+            declared_consumers: view.record.declared_consumers.clone(),
+            authorized_identities: view.record.authorized_identities.clone(),
+            active_instances: view.record.active_instances.clone(),
+        };
+        let members = classify_adoption(
+            &snapshot,
+            target_version,
+            cutover_sequence,
+            cutoff_sequence,
+            observations,
+            retired_instances,
+            lookback_unix_seconds,
+            now_unix_seconds,
+            instance_to_identity,
+            identity_to_consumer,
+        )?;
+        let instances = members
+            .iter()
+            .filter(|member| member.kind == "instance")
+            .cloned()
+            .collect();
+        let identities = members
+            .iter()
+            .filter(|member| member.kind == "identity")
+            .cloned()
+            .collect();
+        let consumers = members
+            .iter()
+            .filter(|member| member.kind == "consumer")
+            .cloned()
+            .collect();
+        Ok(RotationAdoptionStatus {
+            rotation_id: view.record.id,
+            resource: view.record.resource,
+            state: view.record.state,
+            target_version,
+            cutover_sequence,
+            cutoff_sequence,
+            instances,
+            identities,
+            consumers,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
