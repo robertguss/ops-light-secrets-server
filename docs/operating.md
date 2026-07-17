@@ -915,3 +915,8 @@ The fetcher checks every SHA-256 digest before the archive can be extracted or
 executed. A client upgrade requires updating the pin, provenance, checksum, and
 captured compatibility evidence together. No legacy Vault line is claimed
 without a documented deployed consumer or a proven distinct request contract.
+
+## systemd units
+
+Hardened example units live under `examples/systemd/`.
+They use FD/credential secret sources only; no identity material in unit `Environment=`.

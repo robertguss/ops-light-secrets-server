@@ -88,3 +88,7 @@ path = "tests/fault/extended_fault.rs"
 [[test]]
 name = "verification_contract"
 path = "tests/verification_contract.rs"
+
+[[test]]
+name = "systemd_examples"
+path = "tests/systemd_examples.rs"
