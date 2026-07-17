@@ -79,6 +79,14 @@ enum Command {
     },
     /// Validate configuration and serve requests
     Serve,
+    /// Operator health checks with stable JSON and exit codes
+    Doctor {
+        /// Data directory to inspect offline (defaults to configured data directory)
+        #[arg(long)]
+        data_directory: Option<std::path::PathBuf>,
+        #[arg(long, value_enum, default_value = "json")]
+        output: OutputFormat,
+    },
     /// Offline clock recovery operations
     Clock {
         #[command(subcommand)]
@@ -1387,6 +1395,40 @@ pub fn run() -> Result<(), String> {
         match command {
             Command::Serve => {
                 validate_serve_shell(&config).map_err(|error| error.to_string())?;
+            }
+            Command::Doctor {
+                data_directory,
+                output,
+            } => {
+                let directory = data_directory
+                    .clone()
+                    .unwrap_or_else(|| config.data_directory.clone());
+                let report = ops_light_secrets_server::doctor::run_offline(&directory);
+                match output {
+                    OutputFormat::Json => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                        );
+                    }
+                    OutputFormat::Human => {
+                        println!(
+                            "doctor mode={} exit={} checks={}",
+                            report.mode,
+                            report.exit_code,
+                            report.checks.len()
+                        );
+                        for check in &report.checks {
+                            println!(
+                                "  [{}] {} — {}",
+                                format!("{:?}", check.severity).to_lowercase(),
+                                check.id,
+                                check.summary
+                            );
+                        }
+                    }
+                }
+                std::process::exit(i32::from(report.exit_code));
             }
             Command::Init {
                 bootstrap_ttl,

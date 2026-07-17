@@ -13,6 +13,7 @@ pub mod config;
 pub mod consumer;
 pub mod control;
 pub mod credential;
+pub mod doctor;
 pub mod credential_epoch;
 pub mod fault_inject;
 pub mod format_registry;
