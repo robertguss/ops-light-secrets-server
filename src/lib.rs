@@ -10,6 +10,7 @@ pub mod init;
 pub mod input_hygiene;
 pub mod kv;
 pub mod proxy;
+pub mod rate_limit;
 pub mod raw_target;
 pub mod startup;
 pub mod storage_executor;

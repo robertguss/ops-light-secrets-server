@@ -125,6 +125,11 @@
       "contract": "kv.durable_coordinator_router",
       "owner": "olss-charter-qul.7.7",
       "verification": "Assemble U5.1's final KV dispatcher in the real serve path with hydrated U4 grants and U2 encrypted records; adapt its transaction kernel so authorization reload, CAS, encrypted version mutation/read, canonical versioned audit append, commit, and reply all use the live redb coordinator. Prove the pinned fnox preflight plus KV read against that assembly."
+    },
+    {
+      "contract": "limits.live_source_and_aggregate_flush",
+      "owner": "olss-charter-qul.8.2",
+      "verification": "In the final security-ordered middleware stack, insert U9.3's verified per-request ClientSource before U4.3 limiting; keep missing forwarded configuration on the shared bucket; and drain U4.3's bounded DropAggregate buffer into canonical encrypted aggregate audit events on the next coordinator commit without raw source, identity, path, or credential labels."
     }
   ]
 }

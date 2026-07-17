@@ -496,8 +496,26 @@ struct KvRouterState {
 }
 
 pub fn kv_router(auth: AuthService, service: KvService, hygiene: InputHygieneState) -> Router {
+    let limits = crate::rate_limit::RateLimitService::new(
+        crate::rate_limit::RateLimitConfig::default(),
+        [0x4b; 32],
+    )
+    .expect("default rate limit configuration is valid");
+    kv_router_with_limits(auth, service, hygiene, limits)
+}
+
+pub fn kv_router_with_limits(
+    auth: AuthService,
+    service: KvService,
+    hygiene: InputHygieneState,
+    limits: crate::rate_limit::RateLimitService,
+) -> Router {
     Router::new()
         .route("/v1/{*path}", routing::any(dispatch))
+        .layer(middleware::from_fn_with_state(
+            limits,
+            crate::rate_limit::authenticated_guard,
+        ))
         .layer(middleware::from_fn_with_state(auth, token_auth_guard))
         .layer(middleware::from_fn(raw_target_guard))
         .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))

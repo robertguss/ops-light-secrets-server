@@ -31,15 +31,43 @@ pub fn data_router_with_auth(
     data_router().merge(crate::auth::auth_router(service, hygiene))
 }
 
+pub fn data_router_with_auth_and_limits(
+    service: crate::auth::AuthService,
+    hygiene: crate::input_hygiene::InputHygieneState,
+    limits: crate::rate_limit::RateLimitService,
+) -> Router {
+    data_router().merge(crate::auth::auth_router_with_limits(
+        service, hygiene, limits,
+    ))
+}
+
 /// Remote router with authentication and the final KV v2 data dispatcher.
 pub fn data_router_with_auth_and_kv(
     auth: crate::auth::AuthService,
     kv: crate::kv::KvService,
     hygiene: crate::input_hygiene::InputHygieneState,
 ) -> Router {
+    let limits = crate::rate_limit::RateLimitService::new(
+        crate::rate_limit::RateLimitConfig::default(),
+        [0x44; 32],
+    )
+    .expect("default rate limit configuration is valid");
+    data_router_with_auth_and_kv_limits(auth, kv, hygiene, limits)
+}
+
+pub fn data_router_with_auth_and_kv_limits(
+    auth: crate::auth::AuthService,
+    kv: crate::kv::KvService,
+    hygiene: crate::input_hygiene::InputHygieneState,
+    limits: crate::rate_limit::RateLimitService,
+) -> Router {
     data_router()
-        .merge(crate::auth::auth_router(auth.clone(), hygiene.clone()))
-        .merge(crate::kv::kv_router(auth, kv, hygiene))
+        .merge(crate::auth::auth_router_with_limits(
+            auth.clone(),
+            hygiene.clone(),
+            limits.clone(),
+        ))
+        .merge(crate::kv::kv_router_with_limits(auth, kv, hygiene, limits))
 }
 
 /// Router reachable only through the owner control socket.

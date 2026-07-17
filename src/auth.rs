@@ -759,17 +759,44 @@ pub struct AuthenticatedToken {
 }
 
 pub fn auth_router(service: AuthService, hygiene: InputHygieneState) -> Router {
-    Router::new()
-        .route(
-            "/v1/auth/approle/login",
-            routing::post(approle_login).put(approle_login),
-        )
+    let limits = crate::rate_limit::RateLimitService::new(
+        crate::rate_limit::RateLimitConfig::default(),
+        [0x41; 32],
+    )
+    .expect("default rate limit configuration is valid");
+    auth_router_with_limits(service, hygiene, limits)
+}
+
+pub fn auth_router_with_limits(
+    service: AuthService,
+    hygiene: InputHygieneState,
+    limits: crate::rate_limit::RateLimitService,
+) -> Router {
+    let login = Router::new().route(
+        "/v1/auth/approle/login",
+        routing::post(approle_login).put(approle_login),
+    );
+    let protected = Router::new()
         .route("/v1/auth/token/lookup-self", routing::get(lookup_self))
         .route(
             "/v1/auth/token/renew-self",
             routing::post(renew_self).put(renew_self),
         )
+        .route_layer(middleware::from_fn_with_state(
+            limits.clone(),
+            crate::rate_limit::authenticated_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            service.clone(),
+            token_auth_guard,
+        ));
+    login
+        .merge(protected)
         .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
+        .layer(middleware::from_fn_with_state(
+            limits,
+            crate::rate_limit::pre_verifier_guard,
+        ))
         .layer(middleware::from_fn(vault_error_normalizer))
         .with_state(service)
 }

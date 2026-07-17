@@ -445,6 +445,25 @@ other than the configured proxy ignore all forwarding headers. Only the source
 derived under these rules becomes the request's rate-limit bucket; it is
 request-local and is not retained on a pooled connection.
 
+## Request limiting
+
+AppRole login and unauthenticated health/seal probes have separate fixed-shard
+budgets beneath one global attempt cap. Source churn cannot allocate memory or
+refresh a full allowance: colliding and overflow sources share existing bucket
+state. Rate, malformed, and oversized drops are coalesced into a bounded
+aggregate buffer containing only bucket IDs, counts, reasons, and window
+durations. The next storage commit drains those aggregates into the encrypted
+audit chain.
+
+Authenticated requests have a separate body bound, fixed-shard per-identity
+rate budget, and global concurrency cap. Direct listeners derive the source
+only from the transport peer and ignore forwarding headers. Explicit proxy
+listeners use only the address accepted by the verified proxy boundary. If a
+proxy deployment does not provide a verified forwarded address, every client
+uses one shared bucket: one login flood can therefore rate-limit legitimate
+workload re-logins until the window resets. Operators should treat that mode
+as degraded and configure the verified forwarded-address path.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in
