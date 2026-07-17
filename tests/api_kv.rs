@@ -554,6 +554,41 @@ async fn final_router_dispatches_literal_list_and_get_list_true_with_strict_shap
 }
 
 #[tokio::test]
+async fn cli_write_empty_options_envelope_is_an_unconditional_write() {
+    let (auth, token) = auth_fixture();
+    let app = kv_router(
+        auth,
+        service(
+            &[Capability::SecretWrite, Capability::SecretReadCurrent],
+            false,
+        ),
+        InputHygieneState::new([9; 32]),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/secret/data/cli-write")
+                .header("x-vault-token", &token)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"data":{"value":"ok"},"options":{}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::get("/v1/secret/data/cli-write")
+                .header("x-vault-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn unsupported_surface_is_exact_enumerable_and_never_succeeds_empty() {
     let (auth, token) = auth_fixture();
     let app = kv_router(

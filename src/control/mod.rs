@@ -92,7 +92,12 @@ pub fn data_router_with_auth_and_kv_limits(
     hygiene: crate::input_hygiene::InputHygieneState,
     limits: crate::rate_limit::RateLimitService,
 ) -> Router {
-    data_router()
+    crate::sys_api::public_router(crate::sys_api::ReadinessState::default(), limits.clone())
+        .merge(crate::sys_api::protected_router(
+            auth.clone(),
+            hygiene.clone(),
+            limits.clone(),
+        ))
         .merge(crate::auth::auth_router_with_limits(
             auth.clone(),
             hygiene.clone(),

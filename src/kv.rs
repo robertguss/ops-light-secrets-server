@@ -1190,6 +1190,7 @@ fn parse_write(value: Value) -> Result<(Map<String, Value>, Option<u64>), KvErro
     };
     let cas = match root.remove("options") {
         None => None,
+        Some(Value::Object(options)) if options.is_empty() => None,
         Some(Value::Object(mut options)) if options.len() == 1 => match options.remove("cas") {
             Some(Value::Number(value)) => value.as_u64().ok_or(KvError::Invalid).map(Some)?,
             _ => return Err(KvError::Invalid),
