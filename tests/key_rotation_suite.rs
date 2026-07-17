@@ -5,23 +5,37 @@ use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeVal
 #[test]
 fn key_rotation_suite_registers_purpose_key_slices() {
     let producers = [
-        ("tests/recipient_rewrap.rs", "rewrap_changes_only_envelope_metadata_and_matching_audit"),
-        ("tests/credential_epoch.rs", "disclosure_precedes_atomic_epoch_identity_grant_credential_and_audit_commit"),
-        ("tests/reencrypt.rs", "fn "),
-        ("tests/keyring.rs", "metadata_integrity_key_rotation_advances_generation"),
-        ("tests/keyring.rs", "audit_payload_rotation_is_forward_only_and_limits_hard"),
-        ("tests/key_recovery.rs", "fn "),
+        (
+            "recipient-rewrap",
+            "tests/recipient_rewrap.rs",
+            "rewrap_changes_only_envelope_metadata_and_matching_audit",
+        ),
+        (
+            "credential-epoch",
+            "tests/credential_epoch.rs",
+            "disclosure_precedes_atomic_epoch_identity_grant_credential_and_audit_commit",
+        ),
+        ("reencrypt", "tests/reencrypt.rs", "fn "),
+        (
+            "metadata-integrity",
+            "tests/keyring.rs",
+            "metadata_integrity_key_rotation_advances_generation",
+        ),
+        (
+            "audit-payload",
+            "tests/keyring.rs",
+            "audit_payload_rotation_is_forward_only_and_limits_hard",
+        ),
+        ("key-recovery", "tests/key_recovery.rs", "fn "),
     ];
     let harness = Harness::builder("key-rotation-suite")
         .register_canary(b"key-rotation-suite-canary")
         .build()
         .unwrap();
-    for (path, needle) in producers {
+    for (case, path, needle) in producers {
         let source = std::fs::read_to_string(path).unwrap();
         assert!(source.contains(needle), "{path} missing {needle}");
-        let mut scenario = harness
-            .scenario_case("key-rotation", path, 1)
-            .unwrap();
+        let mut scenario = harness.scenario_case("key-rotation", case, 1).unwrap();
         scenario
             .step(
                 "producer",
