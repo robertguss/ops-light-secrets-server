@@ -96,12 +96,7 @@ fn version_summary_generation_bumps_for_every_state_change() {
     let sealed = clear.seal(&[31; 32], StoreId([7; 16]), &path).unwrap();
     assert_eq!(sealed.generation, 4);
     sealed
-        .verify(
-            &[31; 32],
-            b"secret_meta",
-            StoreId([7; 16]),
-            &path.encode().unwrap(),
-        )
+        .verify(&[31; 32], StoreId([7; 16]), &path.encode().unwrap())
         .unwrap();
 }
 
@@ -281,7 +276,6 @@ fn maintenance_and_rewrite_macs_bind_fixed_identity_and_reject_transplants() {
     marker
         .verify(
             &[5; 32],
-            b"maintenance.marker",
             StoreId([7; 16]),
             MAINTENANCE_MARKER_FILE.as_bytes(),
         )
@@ -290,7 +284,6 @@ fn maintenance_and_rewrite_macs_bind_fixed_identity_and_reject_transplants() {
         marker
             .verify(
                 &[5; 32],
-                b"maintenance.marker",
                 StoreId([8; 16]),
                 MAINTENANCE_MARKER_FILE.as_bytes(),
             )
@@ -315,21 +308,11 @@ fn maintenance_and_rewrite_macs_bind_fixed_identity_and_reject_transplants() {
     .seal(10, &[11; 32], StoreId([7; 16]))
     .unwrap();
     rewrite
-        .verify(
-            &[11; 32],
-            b"key_rewrite_job",
-            StoreId([7; 16]),
-            b"rewrite-1",
-        )
+        .verify(&[11; 32], StoreId([7; 16]), b"rewrite-1")
         .unwrap();
     assert!(
         rewrite
-            .verify(
-                &[11; 32],
-                b"key_rewrite_job",
-                StoreId([7; 16]),
-                b"rewrite-2",
-            )
+            .verify(&[11; 32], StoreId([7; 16]), b"rewrite-2",)
             .is_err()
     );
 }
@@ -416,33 +399,18 @@ fn clear_record_mac_rejects_wrong_key_store_path_and_offline_edit() {
     let sealed = clear.seal(&[4; 32], StoreId([7; 16]), &logical).unwrap();
     assert!(
         sealed
-            .verify(
-                &[5; 32],
-                b"secret_meta",
-                StoreId([7; 16]),
-                &logical.encode().unwrap(),
-            )
+            .verify(&[5; 32], StoreId([7; 16]), &logical.encode().unwrap(),)
             .is_err()
     );
     assert!(
         sealed
-            .verify(
-                &[4; 32],
-                b"secret_meta",
-                StoreId([8; 16]),
-                &logical.encode().unwrap(),
-            )
+            .verify(&[4; 32], StoreId([8; 16]), &logical.encode().unwrap(),)
             .is_err()
     );
     let other = LogicalPath::new("secret/other").unwrap();
     assert!(
         sealed
-            .verify(
-                &[4; 32],
-                b"secret_meta",
-                StoreId([7; 16]),
-                &other.encode().unwrap(),
-            )
+            .verify(&[4; 32], StoreId([7; 16]), &other.encode().unwrap(),)
             .is_err()
     );
 

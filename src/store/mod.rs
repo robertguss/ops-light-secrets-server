@@ -1,9 +1,15 @@
 //! Versioned canonical codecs and the single-file redb schema.
 
 mod codec;
+mod integrity;
 pub mod keyring;
 
 pub use codec::{Canonical, CodecError};
+pub use integrity::{
+    BulkTransitionKind, ClearRecord, EncryptedTable, IntegrityDiagnostic, IntegrityOperation,
+    IntegrityStatus, MAC_FORMAT_VERSION, MacConformanceReport, MacVerification, RecordClass,
+    StateDelta, StateDeltaSet, StateDigest, StateTuple, WholeStateTransition, mac_conformance,
+};
 
 use crate::clock::WatermarkCommand;
 use codec::{Decoder, Encoder};
@@ -29,7 +35,8 @@ const SECRET_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secret_
 const SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secrets");
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
-const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
+pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
+pub(crate) const PROVISIONAL_META_KEY: &[u8] = b"\x01provisional_meta";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoreId(pub [u8; 16]);
@@ -182,27 +189,45 @@ impl Canonical for PendingAnchor {
     }
 }
 
+impl ClearRecord for PendingAnchor {
+    const CLASS: RecordClass = RecordClass::PendingAnchor;
+    const SCHEMA_VERSION: u16 = 1;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Sealed<T> {
     pub generation: u64,
     pub value: T,
+    class: RecordClass,
+    schema_version: u16,
+    mac_format_version: u16,
     mac: [u8; 32],
 }
 
-impl<T: Canonical> Sealed<T> {
+impl<T: ClearRecord> Sealed<T> {
     pub fn seal(
         value: T,
         generation: u64,
         key: &[u8; 32],
-        domain: &[u8],
         store_id: StoreId,
         primary_key: &[u8],
     ) -> Result<Self, CodecError> {
         let encoded = value.encode()?;
-        let mac = record_mac(key, domain, store_id, primary_key, generation, &encoded);
+        let mac = integrity::record_mac(
+            key,
+            T::CLASS,
+            T::SCHEMA_VERSION,
+            store_id,
+            primary_key,
+            generation,
+            &encoded,
+        )?;
         Ok(Self {
             generation,
             value,
+            class: T::CLASS,
+            schema_version: T::SCHEMA_VERSION,
+            mac_format_version: MAC_FORMAT_VERSION,
             mac,
         })
     }
@@ -210,27 +235,54 @@ impl<T: Canonical> Sealed<T> {
     pub fn verify(
         &self,
         key: &[u8; 32],
-        domain: &[u8],
         store_id: StoreId,
         primary_key: &[u8],
     ) -> Result<(), CodecError> {
+        let verification = self.verify_with_work(key, store_id, primary_key)?;
+        verification.valid.then_some(()).ok_or(CodecError::Invalid)
+    }
+
+    pub fn verify_with_work(
+        &self,
+        key: &[u8; 32],
+        store_id: StoreId,
+        primary_key: &[u8],
+    ) -> Result<MacVerification, CodecError> {
+        if self.mac_format_version != MAC_FORMAT_VERSION
+            || self.class != T::CLASS
+            || self.schema_version != T::SCHEMA_VERSION
+        {
+            return Err(CodecError::Invalid);
+        }
         let encoded = self.value.encode()?;
-        let expected = record_mac(
+        let expected = integrity::record_mac(
             key,
-            domain,
+            self.class,
+            self.schema_version,
             store_id,
             primary_key,
             self.generation,
             &encoded,
-        );
-        constant_time_equal(&self.mac, &expected)
-            .then_some(())
-            .ok_or(CodecError::Invalid)
+        )?;
+        Ok(integrity::compare_tag(&self.mac, &expected))
+    }
+
+    pub fn state_tuple(&self, primary_key: &[u8]) -> Result<StateTuple, CodecError> {
+        integrity::validate_state_key(primary_key)?;
+        Ok(StateTuple::Clear {
+            class: self.class,
+            primary_key: primary_key.to_vec(),
+            generation: self.generation,
+            tag: self.mac,
+        })
     }
 
     fn encode(&self) -> Result<Vec<u8>, CodecError> {
         let value = self.value.encode()?;
         let mut out = Encoder::version(1);
+        out.u16(self.mac_format_version);
+        out.u16(self.class.code());
+        out.u16(self.schema_version);
         out.u64(self.generation);
         out.bytes(&value, MAX_CIPHERTEXT)?;
         out.fixed(&self.mac);
@@ -239,6 +291,15 @@ impl<T: Canonical> Sealed<T> {
 
     fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut input = Decoder::version(bytes, 1)?;
+        let mac_format_version = input.u16()?;
+        if mac_format_version != MAC_FORMAT_VERSION {
+            return Err(CodecError::UnknownVersion);
+        }
+        let class = RecordClass::from_code(input.u16()?)?;
+        let schema_version = input.u16()?;
+        if class != T::CLASS || schema_version != T::SCHEMA_VERSION {
+            return Err(CodecError::Invalid);
+        }
         let generation = input.u64()?;
         let value = T::decode(&input.bytes(MAX_CIPHERTEXT)?)?;
         let mac = input.fixed()?;
@@ -246,41 +307,12 @@ impl<T: Canonical> Sealed<T> {
         Ok(Self {
             generation,
             value,
+            class,
+            schema_version,
+            mac_format_version,
             mac,
         })
     }
-}
-
-fn record_mac(
-    key: &[u8; 32],
-    domain: &[u8],
-    store_id: StoreId,
-    primary_key: &[u8],
-    generation: u64,
-    value: &[u8],
-) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_keyed(key);
-    hasher.update(b"ops-light-secrets-server.clear-record.v1\0");
-    for field in [
-        domain,
-        &store_id.0,
-        primary_key,
-        &generation.to_be_bytes(),
-        value,
-    ] {
-        hasher.update(&(field.len() as u64).to_be_bytes());
-        hasher.update(field);
-    }
-    *hasher.finalize().as_bytes()
-}
-
-fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -290,6 +322,53 @@ pub struct MetaRecord {
     pub lifecycle: Lifecycle,
     pub high_water_unix_seconds: u64,
     pub pending_anchor: Option<Sealed<PendingAnchor>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProvisionalMetaRecord {
+    pub store_id: StoreId,
+    pub format_version: u32,
+    pub lifecycle: Lifecycle,
+    pub high_water_unix_seconds: u64,
+}
+
+impl ProvisionalMetaRecord {
+    pub fn from_meta(meta: &MetaRecord) -> Self {
+        Self {
+            store_id: meta.store_id,
+            format_version: meta.format_version,
+            lifecycle: meta.lifecycle,
+            high_water_unix_seconds: meta.high_water_unix_seconds,
+        }
+    }
+}
+
+impl Canonical for ProvisionalMetaRecord {
+    fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut out = Encoder::version(1);
+        out.fixed(&self.store_id.0);
+        out.u32(self.format_version);
+        out.u8(self.lifecycle as u8);
+        out.u64(self.high_water_unix_seconds);
+        Ok(out.finish())
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut input = Decoder::version(bytes, 1)?;
+        let value = Self {
+            store_id: StoreId(input.fixed()?),
+            format_version: input.u32()?,
+            lifecycle: Lifecycle::decode(input.u8()?)?,
+            high_water_unix_seconds: input.u64()?,
+        };
+        input.finish()?;
+        Ok(value)
+    }
+}
+
+impl ClearRecord for ProvisionalMetaRecord {
+    const CLASS: RecordClass = RecordClass::ProvisionalMeta;
+    const SCHEMA_VERSION: u16 = 1;
 }
 
 impl MetaRecord {
@@ -303,7 +382,6 @@ impl MetaRecord {
             anchor,
             generation,
             mac_key,
-            b"meta.pending_anchor",
             self.store_id,
             META_KEY,
         )?);
@@ -313,7 +391,7 @@ impl MetaRecord {
     pub fn verify_pending_anchor(&self, mac_key: &[u8; 32]) -> Result<(), CodecError> {
         match &self.pending_anchor {
             None => Ok(()),
-            Some(anchor) => anchor.verify(mac_key, b"meta.pending_anchor", self.store_id, META_KEY),
+            Some(anchor) => anchor.verify(mac_key, self.store_id, META_KEY),
         }
     }
 }
@@ -585,14 +663,7 @@ impl SecretMetadata {
         path: &LogicalPath,
     ) -> Result<Sealed<Self>, CodecError> {
         let generation = self.versions.generation;
-        Sealed::seal(
-            self,
-            generation,
-            mac_key,
-            b"secret_meta",
-            store_id,
-            &path.encode()?,
-        )
+        Sealed::seal(self, generation, mac_key, store_id, &path.encode()?)
     }
 }
 
@@ -683,6 +754,11 @@ impl Canonical for SecretMetadata {
             versions,
         })
     }
+}
+
+impl ClearRecord for SecretMetadata {
+    const CLASS: RecordClass = RecordClass::SecretMetadata;
+    const SCHEMA_VERSION: u16 = METADATA_SCHEMA_VERSION;
 }
 
 fn encode_optional_u64(out: &mut Encoder, value: Option<u64>) {
@@ -803,7 +879,6 @@ impl MaintenanceMarker {
             self,
             generation,
             mac_key,
-            b"maintenance.marker",
             store_id,
             MAINTENANCE_MARKER_FILE.as_bytes(),
         )
@@ -851,6 +926,11 @@ impl Canonical for MaintenanceMarker {
         input.finish()?;
         Ok(value)
     }
+}
+
+impl ClearRecord for MaintenanceMarker {
+    const CLASS: RecordClass = RecordClass::MaintenanceMarker;
+    const SCHEMA_VERSION: u16 = 1;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -937,14 +1017,7 @@ impl RewriteJob {
         store_id: StoreId,
     ) -> Result<Sealed<Self>, CodecError> {
         let primary_key = self.operation_id.clone();
-        Sealed::seal(
-            self,
-            generation,
-            mac_key,
-            b"key_rewrite_job",
-            store_id,
-            &primary_key,
-        )
+        Sealed::seal(self, generation, mac_key, store_id, &primary_key)
     }
 }
 
@@ -993,6 +1066,11 @@ impl Canonical for RewriteJob {
         input.finish()?;
         Ok(value)
     }
+}
+
+impl ClearRecord for RewriteJob {
+    const CLASS: RecordClass = RecordClass::RewriteJob;
+    const SCHEMA_VERSION: u16 = 1;
 }
 
 impl Canonical for SecretRecord {
@@ -1059,6 +1137,7 @@ impl From<CodecError> for StoreError {
 
 pub struct Store {
     database: Database,
+    integrity: integrity::IntegrityMonitor,
 }
 
 impl Store {
@@ -1086,11 +1165,19 @@ impl Store {
             }
             let encoded_meta = meta.encode()?;
             let encoded_keyring_metadata = prepared.metadata.encode()?;
+            let encoded_provisional_meta = prepared
+                .provisional_meta
+                .as_ref()
+                .ok_or(StoreError::Integrity)?
+                .encode()?;
             meta_table
                 .insert(META_KEY, encoded_meta.as_slice())
                 .map_err(|_| StoreError::Database)?;
             meta_table
                 .insert(KEYRING_METADATA_KEY, encoded_keyring_metadata.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            meta_table
+                .insert(PROVISIONAL_META_KEY, encoded_provisional_meta.as_slice())
                 .map_err(|_| StoreError::Database)?;
             let mut keyring_table = write
                 .open_table(SYSTEM_KEYRING)
@@ -1107,7 +1194,10 @@ impl Store {
                 .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
-        Ok(Self { database })
+        Ok(Self {
+            database,
+            integrity: integrity::IntegrityMonitor::default(),
+        })
     }
 
     pub fn create(path: impl AsRef<Path>, meta: &MetaRecord) -> Result<Self, StoreError> {
@@ -1140,12 +1230,18 @@ impl Store {
                 .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
-        Ok(Self { database })
+        Ok(Self {
+            database,
+            integrity: integrity::IntegrityMonitor::default(),
+        })
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let database = Database::open(path).map_err(|_| StoreError::Database)?;
-        let store = Self { database };
+        let store = Self {
+            database,
+            integrity: integrity::IntegrityMonitor::default(),
+        };
         let meta = store.meta()?;
         if meta.format_version != FORMAT_VERSION {
             return Err(StoreError::UnsupportedFormat(meta.format_version));
@@ -1173,7 +1269,14 @@ impl Store {
         expected: &MetaRecord,
         replacement: &MetaRecord,
     ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         if replacement.store_id != expected.store_id {
+            return Err(StoreError::Integrity);
+        }
+        if self.provisional_meta()?.is_some()
+            && ProvisionalMetaRecord::from_meta(expected)
+                != ProvisionalMetaRecord::from_meta(replacement)
+        {
             return Err(StoreError::Integrity);
         }
         let write = self
@@ -1199,6 +1302,70 @@ impl Store {
         write.commit().map_err(|_| StoreError::Database)
     }
 
+    pub fn set_meta_authenticated(
+        &self,
+        expected: &MetaRecord,
+        replacement: &MetaRecord,
+        mac_key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        if replacement.store_id != expected.store_id {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        {
+            let mut table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let current = table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Uninitialized)?
+                .value()
+                .to_vec();
+            if current != expected.encode()? {
+                return Err(StoreError::Integrity);
+            }
+            let sealed_bytes = table
+                .get(PROVISIONAL_META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?
+                .value()
+                .to_vec();
+            let current_sealed = Sealed::<ProvisionalMetaRecord>::decode(&sealed_bytes)?;
+            if current_sealed.value != ProvisionalMetaRecord::from_meta(expected)
+                || current_sealed
+                    .verify(mac_key, expected.store_id, PROVISIONAL_META_KEY)
+                    .is_err()
+            {
+                self.integrity
+                    .trip(RecordClass::ProvisionalMeta, PROVISIONAL_META_KEY, mac_key);
+                return Err(StoreError::Integrity);
+            }
+            let next_generation = current_sealed
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?;
+            let replacement_sealed = Sealed::seal(
+                ProvisionalMetaRecord::from_meta(replacement),
+                next_generation,
+                mac_key,
+                replacement.store_id,
+                PROVISIONAL_META_KEY,
+            )?;
+            let encoded_meta = replacement.encode()?;
+            let encoded_sealed = replacement_sealed.encode()?;
+            table
+                .insert(META_KEY, encoded_meta.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            table
+                .insert(PROVISIONAL_META_KEY, encoded_sealed.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        write.commit().map_err(|_| StoreError::Database)
+    }
+
     pub fn commit_clock_watermark(&self, command: &WatermarkCommand) -> Result<(), StoreError> {
         let expected = self.meta()?;
         if expected.high_water_unix_seconds != command.expected_high_water_unix_seconds
@@ -1212,7 +1379,25 @@ impl Store {
         self.set_meta(&expected, &replacement)
     }
 
+    pub fn commit_clock_watermark_authenticated(
+        &self,
+        command: &WatermarkCommand,
+        mac_key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        let expected = self.meta()?;
+        if expected.high_water_unix_seconds != command.expected_high_water_unix_seconds
+            || command.replacement_high_water_unix_seconds < expected.high_water_unix_seconds
+            || command.effective_unix_seconds > command.replacement_high_water_unix_seconds
+        {
+            return Err(StoreError::Integrity);
+        }
+        let mut replacement = expected.clone();
+        replacement.high_water_unix_seconds = command.replacement_high_water_unix_seconds;
+        self.set_meta_authenticated(&expected, &replacement, mac_key)
+    }
+
     pub fn put_keyring(&self, envelope: &KeyringEnvelope) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         self.put(SYSTEM_KEYRING, KEYRING_KEY, &envelope.encode()?)
     }
 
@@ -1228,19 +1413,26 @@ impl Store {
             .transpose()
     }
 
+    pub fn provisional_meta(&self) -> Result<Option<Sealed<ProvisionalMetaRecord>>, StoreError> {
+        self.get(META, PROVISIONAL_META_KEY)?
+            .map(|bytes| Sealed::decode(&bytes).map_err(StoreError::from))
+            .transpose()
+    }
+
     pub fn put_secret_metadata(
         &self,
         path: &LogicalPath,
         metadata: &Sealed<SecretMetadata>,
         mac_key: &[u8; 32],
     ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         let key = path.encode()?;
         let store_id = self.meta()?.store_id;
         if metadata.generation != metadata.value.versions.generation {
             return Err(StoreError::Integrity);
         }
         metadata
-            .verify(mac_key, b"secret_meta", store_id, &key)
+            .verify(mac_key, store_id, &key)
             .map_err(|_| StoreError::Integrity)?;
         self.put(SECRET_META, &key, &metadata.encode()?)
     }
@@ -1250,19 +1442,23 @@ impl Store {
         path: &LogicalPath,
         mac_key: &[u8; 32],
     ) -> Result<Option<Sealed<SecretMetadata>>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
         let key = path.encode()?;
         let store_id = self.meta()?.store_id;
         let Some(bytes) = self.get(SECRET_META, &key)? else {
             return Ok(None);
         };
         let value = Sealed::decode(&bytes)?;
-        value
-            .verify(mac_key, b"secret_meta", store_id, &key)
-            .map_err(|_| StoreError::Integrity)?;
+        if value.verify(mac_key, store_id, &key).is_err() {
+            self.integrity
+                .trip(RecordClass::SecretMetadata, &key, mac_key);
+            return Err(StoreError::Integrity);
+        }
         Ok(Some(value))
     }
 
     pub fn put_secret(&self, key: &SecretKey, record: &SecretRecord) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         if record.version != key.version {
             return Err(StoreError::Integrity);
         }
@@ -1270,6 +1466,7 @@ impl Store {
     }
 
     pub fn secret(&self, key: &SecretKey) -> Result<Option<SecretRecord>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
         let value = self
             .get(SECRETS, &key.encode()?)?
             .map(|bytes| SecretRecord::decode(&bytes).map_err(StoreError::from))
@@ -1281,6 +1478,30 @@ impl Store {
             return Err(StoreError::Integrity);
         }
         Ok(value)
+    }
+
+    pub fn integrity_status(&self) -> IntegrityStatus {
+        self.integrity.status()
+    }
+
+    pub fn integrity_operation_allowed(&self, operation: IntegrityOperation) -> bool {
+        self.integrity.operation_allowed(operation)
+    }
+
+    pub(crate) fn record_integrity_failure(
+        &self,
+        class: RecordClass,
+        primary_key: &[u8],
+        diagnostic_key: &[u8; 32],
+    ) {
+        self.integrity.trip(class, primary_key, diagnostic_key);
+    }
+
+    fn ensure_integrity_operation(&self, operation: IntegrityOperation) -> Result<(), StoreError> {
+        self.integrity
+            .operation_allowed(operation)
+            .then_some(())
+            .ok_or(StoreError::Integrity)
     }
 
     fn put(

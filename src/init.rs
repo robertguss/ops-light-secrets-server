@@ -18,7 +18,7 @@ use crate::store::keyring::parse_identity;
 use crate::store::keyring::{
     KeyringError, PreparedKeyring, RandomSource, prepare_keyring_for_init,
 };
-use crate::store::{MetaRecord, Store, StoreError};
+use crate::store::{MetaRecord, ProvisionalMetaRecord, Store, StoreError};
 use age::x25519;
 
 pub const MIN_BOOTSTRAP_TTL: Duration = Duration::from_secs(5 * 60);
@@ -208,7 +208,7 @@ impl KeyringInitTransaction {
         random: &mut impl RandomSource,
     ) -> Result<Self, KeyringError> {
         let prepared = prepare_keyring_for_init(
-            meta.store_id,
+            ProvisionalMetaRecord::from_meta(&meta),
             1,
             active_identity,
             recovery_recipient,

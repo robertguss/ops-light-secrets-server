@@ -1,7 +1,11 @@
 //! Fixed-purpose keyring protected by an age v0.12 envelope.
 
 use super::codec::{Canonical, CodecError, Decoder, Encoder};
-use super::{KeyringEnvelope, Sealed, StoreId};
+use super::{
+    ClearRecord, KeyringEnvelope, MetaRecord, ProvisionalMetaRecord, RecordClass, Sealed, Store,
+    StoreError, StoreId,
+};
+use crate::clock::WatermarkCommand;
 use age::x25519;
 use age::{Encryptor, Recipient};
 use secrecy::{ExposeSecret, SecretBox};
@@ -196,6 +200,38 @@ impl Keyring {
 
     pub(crate) fn metadata_integrity_key(&self) -> &[u8; 32] {
         self.metadata_integrity.expose()
+    }
+
+    pub fn set_meta_authenticated(
+        &self,
+        store: &Store,
+        expected: &MetaRecord,
+        replacement: &MetaRecord,
+    ) -> Result<(), StoreError> {
+        store.set_meta_authenticated(expected, replacement, self.metadata_integrity_key())
+    }
+
+    pub fn commit_clock_watermark(
+        &self,
+        store: &Store,
+        command: &WatermarkCommand,
+    ) -> Result<(), StoreError> {
+        store.commit_clock_watermark_authenticated(command, self.metadata_integrity_key())
+    }
+
+    pub(crate) fn seal_clear<T: ClearRecord>(
+        &self,
+        value: T,
+        generation: u64,
+        primary_key: &[u8],
+    ) -> Result<Sealed<T>, CodecError> {
+        Sealed::seal(
+            value,
+            generation,
+            self.metadata_integrity_key(),
+            self.store_id,
+            primary_key,
+        )
     }
 
     pub fn wrap(
@@ -414,10 +450,16 @@ impl Canonical for KeyringMetadata {
     }
 }
 
+impl ClearRecord for KeyringMetadata {
+    const CLASS: RecordClass = RecordClass::KeyringMetadata;
+    const SCHEMA_VERSION: u16 = 1;
+}
+
 pub struct PreparedKeyring {
     pub store_id: StoreId,
     pub envelope: KeyringEnvelope,
     pub metadata: Sealed<KeyringMetadata>,
+    pub provisional_meta: Option<Sealed<ProvisionalMetaRecord>>,
 }
 
 pub fn prepare_keyring(
@@ -439,32 +481,35 @@ pub fn prepare_keyring(
         },
         generation,
         keyring.metadata_integrity_key(),
-        b"keyring_metadata",
         store_id,
-        b"current",
+        super::KEYRING_METADATA_KEY,
     )?;
     Ok(PreparedKeyring {
         store_id,
         envelope,
         metadata,
+        provisional_meta: None,
     })
 }
 
 pub fn prepare_keyring_for_init(
-    store_id: StoreId,
+    provisional_meta: ProvisionalMetaRecord,
     generation: u64,
     active_identity: &x25519::Identity,
     recovery: Option<&x25519::Recipient>,
     random: &mut impl RandomSource,
 ) -> Result<PreparedKeyring, KeyringError> {
+    let store_id = provisional_meta.store_id;
     let active = active_identity.to_public();
-    let prepared = prepare_keyring(store_id, generation, &active, recovery, random)?;
-    KeyringOpener::default().open(
+    let mut prepared = prepare_keyring(store_id, generation, &active, recovery, random)?;
+    let opened = KeyringOpener::default().open(
         store_id,
         &prepared.envelope,
         &prepared.metadata,
         active_identity,
     )?;
+    prepared.provisional_meta =
+        Some(opened.seal_clear(provisional_meta, generation, super::PROVISIONAL_META_KEY)?);
     Ok(prepared)
 }
 
@@ -492,6 +537,23 @@ impl KeyringOpener {
         metadata: &Sealed<KeyringMetadata>,
         identity: &x25519::Identity,
     ) -> Result<Keyring, KeyringError> {
+        self.open_with_metadata_integrity_handler(
+            clear_store_id,
+            envelope,
+            metadata,
+            identity,
+            |_| {},
+        )
+    }
+
+    pub(crate) fn open_with_metadata_integrity_handler<F: FnOnce(&[u8; 32])>(
+        &self,
+        clear_store_id: StoreId,
+        envelope: &KeyringEnvelope,
+        metadata: &Sealed<KeyringMetadata>,
+        identity: &x25519::Identity,
+        on_integrity_failure: F,
+    ) -> Result<Keyring, KeyringError> {
         if self
             .attempts
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -508,14 +570,17 @@ impl KeyringOpener {
         if keyring.store_id != clear_store_id {
             return Err(KeyringError::StoreMismatch);
         }
-        metadata
+        if metadata
             .verify(
                 keyring.metadata_integrity_key(),
-                b"keyring_metadata",
                 clear_store_id,
-                b"current",
+                super::KEYRING_METADATA_KEY,
             )
-            .map_err(|_| KeyringError::MetadataIntegrity)?;
+            .is_err()
+        {
+            on_integrity_failure(keyring.metadata_integrity_key());
+            return Err(KeyringError::MetadataIntegrity);
+        }
         if metadata.generation != keyring.generation
             || metadata.value.generation != keyring.generation
             || metadata.value.format_version != KEYRING_FORMAT_VERSION
@@ -779,9 +844,8 @@ mod tests {
             },
             1,
             keyring.metadata_integrity_key(),
-            b"keyring_metadata",
             StoreId([7; 16]),
-            b"current",
+            super::super::KEYRING_METADATA_KEY,
         )
         .unwrap();
         let opener = KeyringOpener::default();
@@ -827,9 +891,8 @@ mod tests {
             },
             2,
             keyring.metadata_integrity_key(),
-            b"keyring_metadata",
             StoreId([7; 16]),
-            b"current",
+            super::super::KEYRING_METADATA_KEY,
         )
         .unwrap();
         assert_eq!(
@@ -847,9 +910,8 @@ mod tests {
             },
             1,
             &[99; 32],
-            b"keyring_metadata",
             StoreId([7; 16]),
-            b"current",
+            super::super::KEYRING_METADATA_KEY,
         )
         .unwrap();
         assert_eq!(

@@ -125,6 +125,41 @@ warning, plan an authenticated archive/prune operation plus a forward storage
 migration in a post-v0.1 release. v0.1 does not silently retire an audit key,
 expand the bound, or claim unbounded rotation.
 
+## Clear metadata integrity
+
+Secret values and audit payloads are encrypted. Security-relevant structural
+records remain readable in the database but carry a 32-byte keyed BLAKE3 MAC
+under a closed record-class registry. The authenticated frame binds MAC format,
+table and class IDs, class domain, record schema version, store ID, canonical
+primary key, monotonically changing record generation, and canonical value
+bytes. A valid record copied to another table, key, generation, class, schema,
+or store is invalid. This deliberately does not hide paths, identity names,
+grant topology, versions, or timestamps from someone who steals the database.
+If that topology is regulated data, v0.1 is unsuitable until an opaque-
+identifier storage migration exists.
+
+Store ID, schema/lifecycle, and the clock high-water mark are provisional boot
+inputs only. Immediately after the age keyring opens, the server verifies their
+sealed mirror and exact value agreement before readiness. Every other clear
+record is verified before use. A failure is sticky for the process: ordinary
+data traffic, management mutation, and bulk mutation stop. Only bounded
+diagnostics, read-only recovery verification, orderly shutdown, and offline
+restore/repair remain admitted. Diagnostics contain a stable reason, table,
+and keyed 16-hex-character key identifier; attacker-controlled keys, paths,
+labels, and values are never rendered. Investigate the storage boundary or
+restore from authenticated evidence; there is no warning-only bypass.
+
+Per-record MACs cannot alone expose deletion or replay of an older valid row.
+Checkpoint, backup, restore, migration, and full-doctor owners therefore use
+the deterministic state digest: sorted clear `(class, key, generation, MAC)`
+tuples plus encrypted `(table, key, digest(authenticated record bytes))`
+tuples. Ordinary audit events carry bounded sorted before/after tuple deltas so
+an authenticated tail can be reverse-applied to reconstruct a checkpoint
+state. Bulk rewrites instead bind explicit before/after whole-state digests.
+The unanchored audit tail retains the documented live-compromise limitation.
+A metadata-key rotation changes these tuples and is incomplete until its new
+state digest is externally checkpointed.
+
 ## Local control socket
 
 The management plane is a Unix socket owned by the service UID. Its parent

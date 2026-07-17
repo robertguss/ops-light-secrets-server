@@ -20,7 +20,7 @@ use crate::clock::{
 use crate::config::{Config, SecretInput, SecretSource};
 use crate::proxy::is_loopback;
 use crate::store::keyring::{Keyring, KeyringError, KeyringOpener, parse_identity};
-use crate::store::{Store, StoreError};
+use crate::store::{ProvisionalMetaRecord, RecordClass, Store, StoreError};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub const DRAIN_DEADLINE: Duration = Duration::from_secs(30);
@@ -30,6 +30,7 @@ pub enum KeyringBootError {
     IdentitySource,
     Store(StoreError),
     Keyring(KeyringError),
+    Integrity,
 }
 
 impl fmt::Display for KeyringBootError {
@@ -42,6 +43,7 @@ impl fmt::Display for KeyringBootError {
                 KeyringError::AlreadyOpened => "startup keyring open already attempted",
                 _ => "startup keyring open failed",
             },
+            Self::Integrity => "startup provisional metadata integrity failed",
         })
     }
 }
@@ -54,7 +56,8 @@ pub fn open_store_keyring<I: SecretInput>(
     input: &mut I,
     opener: &KeyringOpener,
 ) -> Result<Keyring, KeyringBootError> {
-    let clear_store_id = store.meta().map_err(KeyringBootError::Store)?.store_id;
+    let clear_meta = store.meta().map_err(KeyringBootError::Store)?;
+    let clear_store_id = clear_meta.store_id;
     let envelope = store
         .keyring()
         .map_err(KeyringBootError::Store)?
@@ -63,13 +66,46 @@ pub fn open_store_keyring<I: SecretInput>(
         .keyring_metadata()
         .map_err(KeyringBootError::Store)?
         .ok_or(KeyringBootError::Store(StoreError::Uninitialized))?;
+    let provisional_meta = store
+        .provisional_meta()
+        .map_err(KeyringBootError::Store)?
+        .ok_or(KeyringBootError::Store(StoreError::Uninitialized))?;
     let bytes = source
         .read("secrets.age_identity", input)
         .map_err(|_| KeyringBootError::IdentitySource)?;
     let identity = parse_identity(bytes.into_zeroizing()).map_err(KeyringBootError::Keyring)?;
-    opener
-        .open(clear_store_id, &envelope, &metadata, &identity)
-        .map_err(KeyringBootError::Keyring)
+    let keyring = opener
+        .open_with_metadata_integrity_handler(
+            clear_store_id,
+            &envelope,
+            &metadata,
+            &identity,
+            |diagnostic_key| {
+                store.record_integrity_failure(
+                    RecordClass::KeyringMetadata,
+                    super::store::KEYRING_METADATA_KEY,
+                    diagnostic_key,
+                );
+            },
+        )
+        .map_err(KeyringBootError::Keyring)?;
+    if provisional_meta
+        .verify(
+            keyring.metadata_integrity_key(),
+            clear_store_id,
+            super::store::PROVISIONAL_META_KEY,
+        )
+        .is_err()
+        || provisional_meta.value != ProvisionalMetaRecord::from_meta(&clear_meta)
+    {
+        store.record_integrity_failure(
+            RecordClass::ProvisionalMeta,
+            super::store::PROVISIONAL_META_KEY,
+            keyring.metadata_integrity_key(),
+        );
+        return Err(KeyringBootError::Integrity);
+    }
+    Ok(keyring)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

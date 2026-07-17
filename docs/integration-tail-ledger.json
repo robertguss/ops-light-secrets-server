@@ -72,11 +72,6 @@
       "verification": "Commit U6.3's bounded canonical clock-watermark and boot-override events in the same transaction as each accepted high-water update."
     },
     {
-      "contract": "clock.watermark_mac",
-      "owner": "olss-charter-qul.3.5",
-      "verification": "Seal and verify the clear clock high-water record with U2.5's KTD15 metadata-integrity MAC before startup admission or mutation."
-    },
-    {
       "contract": "shutdown.audit_event",
       "owner": "olss-charter-qul.4.3",
       "verification": "Implement flush plus final unsigned shutdown chain-head commit hook and clean/unclean marker assertions."
