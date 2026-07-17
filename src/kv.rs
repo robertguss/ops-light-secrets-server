@@ -1044,16 +1044,18 @@ pub fn kv_router_with_limits(
     hygiene: InputHygieneState,
     limits: crate::rate_limit::RateLimitService,
 ) -> Router {
-    Router::new()
-        .route("/v1/{*path}", routing::any(dispatch))
-        .layer(middleware::from_fn_with_state(
-            limits,
-            crate::rate_limit::authenticated_guard,
-        ))
-        .layer(middleware::from_fn_with_state(auth, token_auth_guard))
-        .layer(middleware::from_fn(raw_target_guard))
-        .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
-        .with_state(KvRouterState { service })
+    crate::http_security::apply(
+        Router::new()
+            .route("/v1/{*path}", routing::any(dispatch))
+            .layer(middleware::from_fn_with_state(
+                limits,
+                crate::rate_limit::authenticated_guard,
+            ))
+            .layer(middleware::from_fn_with_state(auth, token_auth_guard))
+            .with_state(KvRouterState { service }),
+    )
+    .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
+    .layer(middleware::from_fn(raw_target_guard))
 }
 
 async fn dispatch(

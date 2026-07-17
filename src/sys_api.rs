@@ -75,13 +75,15 @@ struct LeaderBody {
 }
 
 pub fn public_router(readiness: ReadinessState, limits: RateLimitService) -> Router {
-    Router::new()
-        .route("/v1/sys/health", routing::get(health))
-        .route("/v1/sys/seal-status", routing::get(seal_status))
-        .route("/v1/sys/leader", routing::get(leader))
-        .layer(middleware::from_fn(namespace_guard))
-        .layer(middleware::from_fn_with_state(limits, pre_verifier_guard))
-        .with_state(readiness)
+    crate::http_security::apply(
+        Router::new()
+            .route("/v1/sys/health", routing::get(health))
+            .route("/v1/sys/seal-status", routing::get(seal_status))
+            .route("/v1/sys/leader", routing::get(leader))
+            .layer(middleware::from_fn_with_state(limits, pre_verifier_guard))
+            .with_state(readiness),
+    )
+    .layer(middleware::from_fn(namespace_guard))
 }
 
 pub fn protected_router(
@@ -89,15 +91,17 @@ pub fn protected_router(
     hygiene: InputHygieneState,
     limits: RateLimitService,
 ) -> Router {
-    Router::new()
-        .route(
-            "/v1/sys/internal/ui/mounts/{*path}",
-            routing::get(mount_preflight),
-        )
-        .route_layer(middleware::from_fn_with_state(limits, authenticated_guard))
-        .route_layer(middleware::from_fn_with_state(auth, token_auth_guard))
-        .layer(middleware::from_fn(namespace_guard))
-        .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
+    crate::http_security::apply(
+        Router::new()
+            .route(
+                "/v1/sys/internal/ui/mounts/{*path}",
+                routing::get(mount_preflight),
+            )
+            .route_layer(middleware::from_fn_with_state(limits, authenticated_guard))
+            .route_layer(middleware::from_fn_with_state(auth, token_auth_guard)),
+    )
+    .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
+    .layer(middleware::from_fn(namespace_guard))
 }
 
 async fn health(State(readiness): State<ReadinessState>) -> Response {

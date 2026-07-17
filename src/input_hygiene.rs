@@ -19,6 +19,7 @@ pub const MAX_JSON_DEPTH: usize = 32;
 pub const MAX_JSON_KEYS: usize = 1024;
 pub const MAX_JSON_VALUES: usize = 4096;
 pub const MAX_HEADER_FIELDS: usize = 128;
+pub const MAX_HEADER_BYTES: usize = 32 * 1024;
 pub const MAX_QUERY_PARAMETERS: usize = 2;
 
 const DUPLICATE_KEY_MARKER: &str = "duplicate-json-key";
@@ -98,6 +99,7 @@ pub enum HygieneReason {
     TooManyJsonKeys,
     TooManyJsonValues,
     TooManyHeaders,
+    HeaderBytesTooLarge,
     MultipleTokenHeaders,
     CombinedTokenHeader,
     InvalidTokenHeader,
@@ -118,6 +120,7 @@ impl HygieneReason {
             Self::TooManyJsonKeys => "too_many_json_keys",
             Self::TooManyJsonValues => "too_many_json_values",
             Self::TooManyHeaders => "too_many_headers",
+            Self::HeaderBytesTooLarge => "header_bytes_too_large",
             Self::MultipleTokenHeaders => "multiple_token_headers",
             Self::CombinedTokenHeader => "combined_token_header",
             Self::InvalidTokenHeader => "invalid_token_header",
@@ -266,6 +269,17 @@ pub fn validate_token_headers(
             HygieneReason::TooManyHeaders,
             MAX_HEADER_FIELDS,
             b"header-inventory",
+            diagnostic_key,
+        ));
+    }
+    let bytes = headers.iter().fold(0_usize, |total, (name, value)| {
+        total.saturating_add(name.as_str().len() + value.as_bytes().len())
+    });
+    if bytes > MAX_HEADER_BYTES {
+        return Err(HygieneError::new(
+            HygieneReason::HeaderBytesTooLarge,
+            MAX_HEADER_BYTES,
+            b"header-bytes",
             diagnostic_key,
         ));
     }

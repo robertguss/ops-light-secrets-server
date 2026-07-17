@@ -8,10 +8,10 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware;
 use axum::{Extension, Router, routing::any};
 use ops_light_secrets_server::input_hygiene::{
-    HygieneReason, InputHygieneState, MAX_HEADER_FIELDS, MAX_JSON_BODY_BYTES, MAX_JSON_DEPTH,
-    MAX_JSON_KEYS, MAX_JSON_VALUES, MAX_QUERY_PARAMETERS, QueryShapeReason, StrictJsonBody,
-    ValidatedToken, input_hygiene_guard, parse_strict_json, validate_sensitive_query,
-    validate_token_headers,
+    HygieneReason, InputHygieneState, MAX_HEADER_BYTES, MAX_HEADER_FIELDS, MAX_JSON_BODY_BYTES,
+    MAX_JSON_DEPTH, MAX_JSON_KEYS, MAX_JSON_VALUES, MAX_QUERY_PARAMETERS, QueryShapeReason,
+    StrictJsonBody, ValidatedToken, input_hygiene_guard, parse_strict_json,
+    validate_sensitive_query, validate_token_headers,
 };
 use tower::ServiceExt;
 
@@ -182,6 +182,28 @@ fn token_header_case_combining_encoding_and_count_ambiguity_refuse() {
     assert_eq!(
         validate_token_headers(&invalid, &KEY).unwrap_err().reason(),
         HygieneReason::InvalidTokenHeader
+    );
+}
+
+#[test]
+fn total_header_bytes_hold_at_n_minus_one_n_and_n_plus_one() {
+    let name = HeaderName::from_static("x-size");
+    for total in [MAX_HEADER_BYTES - 1, MAX_HEADER_BYTES] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            name.clone(),
+            HeaderValue::from_bytes(&vec![b'a'; total - name.as_str().len()]).unwrap(),
+        );
+        assert!(validate_token_headers(&headers, &KEY).is_ok());
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        name.clone(),
+        HeaderValue::from_bytes(&vec![b'a'; MAX_HEADER_BYTES + 1 - name.as_str().len()]).unwrap(),
+    );
+    assert_eq!(
+        validate_token_headers(&headers, &KEY).unwrap_err().reason(),
+        HygieneReason::HeaderBytesTooLarge
     );
 }
 

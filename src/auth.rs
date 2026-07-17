@@ -898,15 +898,13 @@ pub fn auth_router_with_limits(
             service.clone(),
             token_auth_guard,
         ));
-    login
-        .merge(protected)
-        .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
-        .layer(middleware::from_fn_with_state(
-            limits,
-            crate::rate_limit::pre_verifier_guard,
-        ))
-        .layer(middleware::from_fn(vault_error_normalizer))
-        .with_state(service)
+    crate::http_security::apply(login.merge(protected).layer(middleware::from_fn_with_state(
+        limits,
+        crate::rate_limit::pre_verifier_guard,
+    )))
+    .layer(middleware::from_fn_with_state(hygiene, input_hygiene_guard))
+    .layer(middleware::from_fn(vault_error_normalizer))
+    .with_state(service)
 }
 
 async fn vault_error_normalizer(request: Request<axum::body::Body>, next: Next) -> Response {
