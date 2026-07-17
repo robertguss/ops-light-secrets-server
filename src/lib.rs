@@ -21,6 +21,7 @@ pub mod migration;
 pub mod proxy;
 pub mod rate_limit;
 pub mod raw_target;
+pub mod reconciliation;
 pub mod reencrypt;
 pub mod restore;
 pub mod startup;

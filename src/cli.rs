@@ -665,6 +665,13 @@ enum ConsumerCommand {
         #[arg(long)]
         reason: String,
     },
+    Reconcile {
+        resource: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     Instance {
         #[command(subcommand)]
         command: ConsumerInstanceCommand,

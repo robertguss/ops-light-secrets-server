@@ -771,6 +771,17 @@ Retire active child instances before their parent. A retired row no longer
 blocks rotation closeout. The registry stores bounded facts and notes only—never
 secret values, commands, scripts, webhooks, or executable configuration.
 
+`consumer reconcile <resource>` reads declarations, current identities/grants,
+and authenticated primary audit read events at one returned cutoff. It reports
+registry lifecycle, current authorization, and current-window observation as
+separate dimensions. Authorized identities are never hidden merely because they
+were not recently observed. Flags are a closed ordered set:
+`declared_unmigrated`, `declared_unauthorized`, `authorized_undeclared`,
+`migrated_unobserved`, `observed_undeclared`, `reconciled_observed`, and
+`retired_historical`. Observation includes reads exactly on either lookback
+boundary and reports the served version. A missing/corrupt source or unauthentic
+in-window event fails the whole view; no plausible partial list is returned.
+
 ## Fresh-host restore
 
 Restore only into an absent path inside an existing service-owned mode-0700
