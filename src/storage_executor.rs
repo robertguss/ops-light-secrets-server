@@ -239,6 +239,7 @@ impl std::error::Error for SubmitError {}
 #[derive(Debug, Eq, PartialEq)]
 pub enum ReceiveError<E> {
     Backend(E),
+    Cancelled,
     WorkerUnavailable,
 }
 
@@ -253,9 +254,15 @@ impl<R, E> Submission<R, E> {
     }
 
     pub async fn receive(self) -> Result<R, ReceiveError<E>> {
-        match self.receiver.await {
+        let Submission { receiver, state } = self;
+        match receiver.await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(error)) => Err(ReceiveError::Backend(error)),
+            Err(_)
+                if CommandState::load(state.load(Ordering::Acquire)) == CommandState::Cancelled =>
+            {
+                Err(ReceiveError::Cancelled)
+            }
             Err(_) => Err(ReceiveError::WorkerUnavailable),
         }
     }
@@ -460,7 +467,7 @@ where
         class: u16,
         watermark_deadline: Option<Instant>,
     ) -> Result<Submission<R, E>, SubmitError> {
-        if !self.is_healthy() {
+        if self.stopping.load(Ordering::Acquire) || !self.is_healthy() {
             return Err(SubmitError::WorkerUnavailable);
         }
         let lane = if operation == OperationClass::DataPlane {
@@ -506,6 +513,25 @@ where
             }
         }
     }
+
+    /// Atomically closes admission and asks the writer to cancel every command
+    /// that has not begun. A command already executing is allowed to finish.
+    pub fn stop_admission_and_cancel_queued(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.data.take();
+        self.urgent.take();
+        self.recovery.take();
+        self.worker.unpark();
+    }
+
+    /// Waits until the writer has finished any begun command and exited. After
+    /// this barrier returns no executor command can commit later.
+    pub fn cross_shutdown_barrier(&mut self) {
+        self.stop_admission_and_cancel_queued();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 impl<C, R, E> Drop for StorageExecutor<C, R, E> {
@@ -530,6 +556,12 @@ where
 {
     let mut recovery_streak = 0_u8;
     loop {
+        if inputs.stopping.load(Ordering::Acquire) {
+            cancel_pending(&inputs.data, &inputs.watermark);
+            cancel_pending(&inputs.urgent, &inputs.watermark);
+            cancel_pending(&inputs.recovery, &inputs.watermark);
+            return;
+        }
         let selected = select_message(
             &inputs.data,
             &inputs.urgent,
@@ -544,13 +576,15 @@ where
             thread::park_timeout(Duration::from_millis(1));
             continue;
         };
+        if inputs.stopping.load(Ordering::Acquire) {
+            cancel_message(message, &inputs.watermark);
+            cancel_pending(&inputs.data, &inputs.watermark);
+            cancel_pending(&inputs.urgent, &inputs.watermark);
+            cancel_pending(&inputs.recovery, &inputs.watermark);
+            return;
+        }
         if message.reply.is_closed() {
-            message
-                .state
-                .store(CommandState::Cancelled as u8, Ordering::Release);
-            if message.watermark {
-                inputs.watermark.finish();
-            }
+            cancel_message(message, &inputs.watermark);
             continue;
         }
         message
@@ -589,6 +623,21 @@ where
         if message.watermark {
             inputs.watermark.finish();
         }
+    }
+}
+
+fn cancel_pending<C, R, E>(receiver: &Receiver<WorkerMessage<C, R, E>>, watermark: &WatermarkGate) {
+    while let Ok(message) = receiver.try_recv() {
+        cancel_message(message, watermark);
+    }
+}
+
+fn cancel_message<C, R, E>(message: WorkerMessage<C, R, E>, watermark: &WatermarkGate) {
+    message
+        .state
+        .store(CommandState::Cancelled as u8, Ordering::Release);
+    if message.watermark {
+        watermark.finish();
     }
 }
 
@@ -1142,6 +1191,41 @@ mod tests {
             thread::yield_now();
         }
         assert!(fixture.order.lock().unwrap().contains(&3));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_queued_finishes_begun_and_crosses_last_commit_barrier() {
+        let mut fixture = fixture(ExecutorConfig {
+            data_capacity: 4,
+            recovery_capacity: 2,
+            ..ExecutorConfig::default()
+        });
+        let (begun_command, gate) = blocked(1);
+        let begun = fixture.executor.submit_data(begun_command, 1).unwrap();
+        wait_for_state(&begun, CommandState::Started);
+        let queued = fixture.executor.submit_data(Command::plain(2), 1).unwrap();
+        let queued_state = Arc::clone(&queued.state);
+
+        fixture.executor.stop_admission_and_cancel_queued();
+        assert!(matches!(
+            fixture.executor.submit_data(Command::plain(3), 1),
+            Err(SubmitError::WorkerUnavailable)
+        ));
+        release(&gate);
+        fixture.executor.cross_shutdown_barrier();
+
+        assert_eq!(begun.receive().await.unwrap().id, 1);
+        assert!(matches!(
+            queued.receive().await,
+            Err(ReceiveError::Cancelled)
+        ));
+        assert_eq!(
+            CommandState::load(queued_state.load(Ordering::Acquire)),
+            CommandState::Cancelled
+        );
+        assert_eq!(*fixture.order.lock().unwrap(), [1]);
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(*fixture.order.lock().unwrap(), [1]);
     }
 
     #[tokio::test]

@@ -699,11 +699,14 @@ On restart, the configured pair must match the committed expected fingerprint;
 a mismatch fails closed and instructs the operator to restore the files or
 perform an audited live reload.
 
-`axum-server` 0.8.0 with its provider-neutral rustls feature is provisionally
-adopted: HTTPS, plaintext refusal, SIGHUP, repeated/concurrent reload, and an
-in-flight request across a certificate swap are locally proven on the MSRV.
-U9.4 owns the final adopt-or-fallback verdict after the complete executor drain
-and shutdown-barrier suite; this provisional result does not pre-judge it.
+`axum-server` 0.8.0 with its provider-neutral rustls feature is adopted. Its
+composable rustls acceptor enforces the five-second handshake deadline and the
+128-connection cap before HTTP dispatch. HTTPS, plaintext refusal, bounded slow
+handshakes, SIGHUP, repeated/concurrent reload, an in-flight request across a
+certificate swap, drain visibility, queued cancellation, and the executor
+last-commit barrier are locally proven on the MSRV. The dependency remains
+community-maintained and pinned; changing it requires rerunning the transport
+suite before release.
 
 ## Reverse-proxy listener
 

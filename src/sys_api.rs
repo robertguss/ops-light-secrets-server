@@ -55,6 +55,13 @@ impl ReadinessState {
     pub fn replace(&self, value: ReadinessSnapshot) {
         *self.0.lock().unwrap_or_else(|error| error.into_inner()) = value;
     }
+
+    pub fn set_draining(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .draining = true;
+    }
 }
 
 #[derive(Serialize)]

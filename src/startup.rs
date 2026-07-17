@@ -757,8 +757,13 @@ pub trait ShutdownHooks {
     fn stop_admission_and_cancel_queued(&mut self);
     /// Lets begun transactions complete only inside the supplied deadline.
     fn drain_begun(&mut self, deadline: Duration) -> DrainResult;
+    /// Proves that no executor command can commit after this point.
+    fn cross_executor_barrier(&mut self) -> Result<(), ShutdownHookError>;
     fn flush(&mut self) -> Result<(), ShutdownHookError>;
+    /// Commits the final unsigned audit event and clean marker together.
     fn commit_unsigned_shutdown(&mut self) -> Result<(), ShutdownHookError>;
+    /// Durably closes the store and its parent state after the final commit.
+    fn close_store(&mut self) -> Result<(), ShutdownHookError>;
     fn mark_unclean(&mut self);
     fn zeroize_keys(&mut self);
 }
@@ -787,7 +792,11 @@ pub fn run_shutdown<H: ShutdownHooks>(hooks: &mut H, trigger: ShutdownTrigger) -
             clean_marker: false,
         };
     }
-    if hooks.flush().is_err() || hooks.commit_unsigned_shutdown().is_err() {
+    if hooks.cross_executor_barrier().is_err()
+        || hooks.flush().is_err()
+        || hooks.commit_unsigned_shutdown().is_err()
+        || hooks.close_store().is_err()
+    {
         hooks.mark_unclean();
         hooks.zeroize_keys();
         return ShutdownReport {

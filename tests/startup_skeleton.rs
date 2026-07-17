@@ -266,6 +266,10 @@ impl ShutdownHooks for Hooks {
         self.events.lock().unwrap().push("drain");
         self.drain
     }
+    fn cross_executor_barrier(&mut self) -> Result<(), ShutdownHookError> {
+        self.events.lock().unwrap().push("barrier");
+        Ok(())
+    }
     fn flush(&mut self) -> Result<(), ShutdownHookError> {
         self.events.lock().unwrap().push("flush");
         self.flush_ok.then_some(()).ok_or(ShutdownHookError)
@@ -273,6 +277,10 @@ impl ShutdownHooks for Hooks {
     fn commit_unsigned_shutdown(&mut self) -> Result<(), ShutdownHookError> {
         self.events.lock().unwrap().push("commit");
         self.commit_ok.then_some(()).ok_or(ShutdownHookError)
+    }
+    fn close_store(&mut self) -> Result<(), ShutdownHookError> {
+        self.events.lock().unwrap().push("close");
+        Ok(())
     }
     fn mark_unclean(&mut self) {
         self.events.lock().unwrap().push("unclean");
@@ -293,7 +301,9 @@ fn shutdown_order_deadline_and_second_signal_are_frozen() {
     assert!(result.clean_marker);
     assert_eq!(
         *clean.events.lock().unwrap(),
-        ["stop", "drain", "flush", "commit", "zeroize"]
+        [
+            "stop", "drain", "barrier", "flush", "commit", "close", "zeroize"
+        ]
     );
 
     let mut deadline = Hooks {
@@ -328,7 +338,7 @@ fn shutdown_order_deadline_and_second_signal_are_frozen() {
     assert_eq!(result.exit_status, 75);
     assert_eq!(
         *flush_failure.events.lock().unwrap(),
-        ["stop", "drain", "flush", "unclean", "zeroize"]
+        ["stop", "drain", "barrier", "flush", "unclean", "zeroize"]
     );
 
     let mut commit_failure = Hooks {
@@ -339,7 +349,9 @@ fn shutdown_order_deadline_and_second_signal_are_frozen() {
     assert_eq!(result.exit_status, 75);
     assert_eq!(
         *commit_failure.events.lock().unwrap(),
-        ["stop", "drain", "flush", "commit", "unclean", "zeroize"]
+        [
+            "stop", "drain", "barrier", "flush", "commit", "unclean", "zeroize"
+        ]
     );
 }
 

@@ -9,17 +9,26 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
+use axum::{Router, middleware};
+use axum_server::accept::Accept;
 use ops_light_secrets_server::config::{
     CheckpointConfig, Config, DEFAULT_CHECKPOINT_MAX_AGE_SECONDS,
     DEFAULT_CHECKPOINT_MAX_UNANCHORED_EVENTS, SecretMount, TlsFiles,
 };
+use ops_light_secrets_server::control::management::{ManagementCatalog, ManagementPrincipal};
+use ops_light_secrets_server::credential::CredentialAudience;
+use ops_light_secrets_server::identity::{
+    Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
+};
+use ops_light_secrets_server::rate_limit::{RateLimitConfig, RateLimitService};
+use ops_light_secrets_server::sys_api::{ReadinessState, public_router};
 use ops_light_secrets_server::transport::{
-    PreparedTlsConfig, TlsReason, TlsReloader, TlsSetting, TransportCommitError,
-    TransportFingerprint, TransportFingerprintCommit,
+    ConnectionCapAcceptor, ControlTlsReloadError, DrainAdmission, PreparedTlsConfig, TlsReason,
+    TlsReloader, TlsSetting, TransportCommitError, TransportFingerprint,
+    TransportFingerprintCommit, drain_admission_guard,
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -28,6 +37,21 @@ use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeVal
 
 const KEY: [u8; 32] = [0x73; 32];
 static SIGNAL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn plaintext_request(address: SocketAddr, path: &str) -> String {
+    let mut socket = TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        socket,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).unwrap();
+    response
+}
 
 struct Pair {
     cert_pem: String,
@@ -358,9 +382,10 @@ async fn https_plaintext_refusal_and_reload_preserve_inflight_request() {
         .with_state(state.clone());
     let handle = axum_server::Handle::new();
     let server_handle = handle.clone();
-    let config = reloader.rustls_config();
+    let acceptor = reloader.rustls_acceptor_with(128, Duration::from_millis(100));
     let server = tokio::spawn(async move {
-        axum_server::bind_rustls(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)), config)
+        axum_server::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .acceptor(acceptor)
             .handle(server_handle)
             .serve(application.into_make_service())
             .await
@@ -377,6 +402,7 @@ async fn https_plaintext_refusal_and_reload_preserve_inflight_request() {
     assert_eq!(peer, first.cert_der);
     assert!(response.contains("200 OK"));
 
+    let plaintext_started = std::time::Instant::now();
     let plaintext = tokio::task::spawn_blocking(move || {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
@@ -390,6 +416,7 @@ async fn https_plaintext_refusal_and_reload_preserve_inflight_request() {
     .await
     .unwrap();
     assert!(!plaintext.windows(6).any(|window| window == b"200 OK"));
+    assert!(plaintext_started.elapsed() < Duration::from_millis(500));
 
     let mut inflight = Vec::new();
     for _ in 0..12 {
@@ -503,3 +530,144 @@ async fn concurrent_reloads_coalesce_repeated_files_close_and_sighup_uses_same_p
         .unwrap();
     listener.abort();
 }
+
+fn reload_catalog(capability: Capability) -> ManagementCatalog {
+    let identity = IdentityRecord::new([1; 16], "operator".into(), IdentityKind::Human).unwrap();
+    let grant = GrantRecord::new(
+        [2; 16],
+        identity.id,
+        "sys".into(),
+        GrantScope::Exact,
+        Vec::new(),
+        BTreeSet::from([capability]),
+    )
+    .unwrap();
+    ManagementCatalog::new([identity], [grant]).unwrap()
+}
+
+fn reload_principal() -> ManagementPrincipal {
+    ManagementPrincipal {
+        identity_id: [1; 16],
+        audience: CredentialAudience::Control,
+        peer_uid: 1000,
+        expected_uid: 1000,
+        credential_active: true,
+    }
+}
+
+#[tokio::test]
+async fn owner_control_reload_requires_exact_transport_capability_and_preserves_old_on_denial() {
+    for capability in Capability::ALL
+        .into_iter()
+        .filter(|candidate| candidate.is_management())
+    {
+        let first = pair();
+        let second = pair();
+        let files = PairFiles::new(&first);
+        let commit = CommitSpy::default();
+        let reloader =
+            TlsReloader::start(files.cert.clone(), files.key.clone(), KEY, None, &commit).unwrap();
+        let old = reloader.current_fingerprint().unwrap();
+        files.replace(&second);
+        let mut catalog = reload_catalog(capability);
+        let result = reloader
+            .reload_control(
+                &mut catalog,
+                reload_principal(),
+                [capability as u8; 16],
+                &commit,
+            )
+            .await;
+        if capability == Capability::TransportManage {
+            assert_ne!(result.unwrap(), old);
+        } else {
+            assert!(matches!(result, Err(ControlTlsReloadError::Denied)));
+            assert_eq!(reloader.current_fingerprint().unwrap(), old);
+        }
+    }
+
+    for mutate in [
+        |principal: &mut ManagementPrincipal| principal.peer_uid = 2000,
+        |principal: &mut ManagementPrincipal| principal.audience = CredentialAudience::Data,
+        |principal: &mut ManagementPrincipal| principal.credential_active = false,
+    ] {
+        let first = pair();
+        let second = pair();
+        let files = PairFiles::new(&first);
+        let commit = CommitSpy::default();
+        let reloader =
+            TlsReloader::start(files.cert.clone(), files.key.clone(), KEY, None, &commit).unwrap();
+        let old = reloader.current_fingerprint().unwrap();
+        files.replace(&second);
+        let mut catalog = reload_catalog(Capability::TransportManage);
+        let mut principal = reload_principal();
+        mutate(&mut principal);
+        assert!(matches!(
+            reloader
+                .reload_control(&mut catalog, principal, [9; 16], &commit)
+                .await,
+            Err(ControlTlsReloadError::Denied)
+        ));
+        assert_eq!(reloader.current_fingerprint().unwrap(), old);
+    }
+}
+
+#[tokio::test]
+async fn live_acceptor_connection_cap_is_bounded() {
+    let acceptor = ConnectionCapAcceptor::new(1);
+    let (first_stream, _) = tokio::io::duplex(16);
+    let (guarded, ()) = acceptor.accept(first_stream, ()).await.unwrap();
+    let (refused_stream, _) = tokio::io::duplex(16);
+    let refusal = acceptor.accept(refused_stream, ()).await.err().unwrap();
+    assert_eq!(refusal.kind(), std::io::ErrorKind::ConnectionRefused);
+    drop(guarded);
+    let (next_stream, _) = tokio::io::duplex(16);
+    assert!(acceptor.accept(next_stream, ()).await.is_ok());
+}
+
+#[tokio::test]
+async fn drain_keeps_tcp_accept_alive_but_health_and_ordinary_work_return_503() {
+    let readiness = ReadinessState::default();
+    let admission = DrainAdmission::default();
+    let limits = RateLimitService::new(RateLimitConfig::default(), [0x91; 32]).unwrap();
+    let application = public_router(readiness.clone(), limits)
+        .route("/ordinary", get(|| async { StatusCode::OK }))
+        .layer(middleware::from_fn_with_state(
+            admission.clone(),
+            drain_admission_guard,
+        ));
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, application)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    assert!(
+        tokio::task::spawn_blocking(move || plaintext_request(address, "/ordinary"))
+            .await
+            .unwrap()
+            .contains("200 OK")
+    );
+    readiness.set_draining();
+    admission.begin();
+    for path in ["/ordinary", "/v1/sys/health"] {
+        let response = tokio::task::spawn_blocking(move || plaintext_request(address, path))
+            .await
+            .unwrap();
+        assert!(
+            response.contains("503 Service Unavailable"),
+            "{path}: {response}"
+        );
+    }
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+use std::collections::BTreeSet;

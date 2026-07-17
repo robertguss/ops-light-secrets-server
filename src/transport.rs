@@ -2,23 +2,149 @@
 
 use std::fmt;
 use std::fs::{File, Metadata, OpenOptions};
-use std::io::{BufReader, Cursor, Read};
+use std::future::Future;
+use std::io::{self, BufReader, Cursor, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
-use axum_server::tls_rustls::RustlsConfig;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum_server::accept::Accept;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ServerConfig, version};
 use rustls_pemfile::Item;
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
+use crate::control::management::ControlCommand;
+use crate::control::management::{ManagementCatalog, ManagementPrincipal};
 
 const MAX_CERT_BYTES: u64 = 1024 * 1024;
 const MAX_KEY_BYTES: u64 = 64 * 1024;
+pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_PENDING_TLS_HANDSHAKES: usize = 128;
+
+#[derive(Clone, Debug, Default)]
+pub struct DrainAdmission(Arc<AtomicU8>);
+
+impl DrainAdmission {
+    pub fn begin(&self) {
+        self.0.store(1, Ordering::Release);
+    }
+
+    pub fn close(&self) {
+        self.0.store(2, Ordering::Release);
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+}
+
+/// Keeps health observable during drain while refusing all ordinary work.
+pub async fn drain_admission_guard(
+    State(admission): State<DrainAdmission>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if admission.is_draining() && request.uri().path() != "/v1/sys/health" {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    next.run(request).await
+}
+
+#[derive(Clone, Debug)]
+pub struct ConnectionCapAcceptor {
+    permits: Arc<Semaphore>,
+}
+
+impl Default for ConnectionCapAcceptor {
+    fn default() -> Self {
+        Self::new(MAX_PENDING_TLS_HANDSHAKES)
+    }
+}
+
+impl ConnectionCapAcceptor {
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity != 0);
+        Self {
+            permits: Arc::new(Semaphore::new(capacity)),
+        }
+    }
+}
+
+pub struct CapacityGuardedStream<I> {
+    inner: I,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for CapacityGuardedStream<I> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(context, buffer)
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for CapacityGuardedStream<I> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.inner).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
+
+impl<I, S> Accept<I, S> for ConnectionCapAcceptor
+where
+    I: Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = CapacityGuardedStream<I>;
+    type Service = S;
+    type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, S)>> + Send>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let permit = self.permits.clone().try_acquire_owned();
+        Box::pin(async move {
+            let permit = permit.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "connection capacity reached",
+                )
+            })?;
+            Ok((
+                CapacityGuardedStream {
+                    inner: stream,
+                    _permit: permit,
+                },
+                service,
+            ))
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TlsSetting {
@@ -263,6 +389,18 @@ pub struct TlsReloader {
     serial: Mutex<()>,
 }
 
+#[derive(Debug)]
+pub enum ControlTlsReloadError {
+    Denied,
+    Tls(TlsReloadError),
+}
+
+impl From<TlsReloadError> for ControlTlsReloadError {
+    fn from(value: TlsReloadError) -> Self {
+        Self::Tls(value)
+    }
+}
+
 impl TlsReloader {
     pub fn start_configured<C: TransportFingerprintCommit>(
         config: &Config,
@@ -308,6 +446,21 @@ impl TlsReloader {
         self.config.clone()
     }
 
+    pub fn rustls_acceptor(&self) -> RustlsAcceptor<ConnectionCapAcceptor> {
+        self.rustls_acceptor_with(MAX_PENDING_TLS_HANDSHAKES, TLS_HANDSHAKE_TIMEOUT)
+    }
+
+    #[doc(hidden)]
+    pub fn rustls_acceptor_with(
+        &self,
+        capacity: usize,
+        handshake_timeout: Duration,
+    ) -> RustlsAcceptor<ConnectionCapAcceptor> {
+        RustlsAcceptor::new(self.rustls_config())
+            .handshake_timeout(handshake_timeout)
+            .acceptor(ConnectionCapAcceptor::new(capacity))
+    }
+
     pub fn current_fingerprint(&self) -> Result<TransportFingerprint, TlsReloadError> {
         self.current
             .read()
@@ -323,6 +476,37 @@ impl TlsReloader {
         let prepared =
             PreparedTlsConfig::load(&self.cert_path, &self.key_path, &self.diagnostic_key)?;
         let current = self.current_fingerprint()?;
+        if prepared.fingerprint == current {
+            return Ok(current);
+        }
+        let committed = prepared.commit(commit)?;
+        let fingerprint = committed.fingerprint();
+        self.config.reload_from_config(committed.0.config);
+        *self
+            .current
+            .write()
+            .map_err(|_| TlsReloadError::new(TlsSetting::Pair, TlsReason::StatePoisoned))? =
+            fingerprint;
+        Ok(fingerprint)
+    }
+
+    /// Owner-control-socket reload path. Authorization is checked after the
+    /// serial reload barrier and immediately before the audited fingerprint
+    /// commit; the only fallible certificate work happens before the live swap.
+    pub async fn reload_control<C: TransportFingerprintCommit>(
+        &self,
+        catalog: &mut ManagementCatalog,
+        principal: ManagementPrincipal,
+        request_id: [u8; 16],
+        commit: &C,
+    ) -> Result<TransportFingerprint, ControlTlsReloadError> {
+        let _guard = self.serial.lock().await;
+        let prepared =
+            PreparedTlsConfig::load(&self.cert_path, &self.key_path, &self.diagnostic_key)?;
+        let current = self.current_fingerprint()?;
+        catalog
+            .authorize_command(principal, ControlCommand::TlsReload, request_id)
+            .map_err(|_| ControlTlsReloadError::Denied)?;
         if prepared.fingerprint == current {
             return Ok(current);
         }
