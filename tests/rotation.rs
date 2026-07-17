@@ -801,3 +801,48 @@ fn rotation_cli_help_includes_status() {
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("status"));
 }
+
+#[test]
+fn secret_age_uses_completed_rotation_and_labels_hand_writes() {
+    use ops_light_secrets_server::rotation::{
+        RotationIntervalPolicy, clear_rotation_interval, secret_age_view, set_rotation_interval,
+    };
+    assert_eq!(set_rotation_interval(86400).unwrap(), 86400);
+    assert!(set_rotation_interval(0).is_err());
+    assert_eq!(clear_rotation_interval(), None);
+
+    let never_rotated = RotationIntervalPolicy {
+        interval_seconds: Some(100),
+        last_completed_rotation_unix_seconds: None,
+        created_unix_seconds: 1_000,
+        last_non_rotation_write_unix_seconds: Some(1_050),
+    };
+    let view = secret_age_view(&never_rotated, 1_200);
+    assert_eq!(view.age_basis, "creation");
+    assert_eq!(view.age_seconds, 200);
+    assert!(view.due);
+    assert!(view.changed_since_last_completed_rotation);
+
+    let rotated = RotationIntervalPolicy {
+        interval_seconds: Some(1_000),
+        last_completed_rotation_unix_seconds: Some(2_000),
+        created_unix_seconds: 1_000,
+        last_non_rotation_write_unix_seconds: Some(2_500),
+    };
+    let view = secret_age_view(&rotated, 2_400);
+    assert_eq!(view.age_basis, "last_completed_rotation");
+    assert_eq!(view.age_seconds, 400);
+    assert!(!view.due);
+    assert!(view.changed_since_last_completed_rotation);
+}
+
+#[test]
+fn rotation_cli_help_includes_interval() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+        .args(["rotation", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("interval"));
+}

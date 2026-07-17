@@ -1089,3 +1089,71 @@ fn decode_optional_u64(input: &mut Decoder<'_>) -> Result<Option<u64>, CodecErro
 fn encode_id(value: [u8; 16]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+/// Server-owned rotation interval (seconds). None means no interval configured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RotationIntervalPolicy {
+    pub interval_seconds: Option<u64>,
+    pub last_completed_rotation_unix_seconds: Option<u64>,
+    pub created_unix_seconds: u64,
+    pub last_non_rotation_write_unix_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretAgeView {
+    pub age_seconds: u64,
+    pub age_basis: &'static str,
+    pub interval_seconds: Option<u64>,
+    pub due: bool,
+    pub changed_since_last_completed_rotation: bool,
+}
+
+/// Age is time since last COMPLETED rotation, else since creation (R12).
+pub fn secret_age_view(policy: &RotationIntervalPolicy, now_unix_seconds: u64) -> SecretAgeView {
+    let (basis_time, age_basis) = match policy.last_completed_rotation_unix_seconds {
+        Some(completed) => (completed, "last_completed_rotation"),
+        None => (policy.created_unix_seconds, "creation"),
+    };
+    let age_seconds = now_unix_seconds.saturating_sub(basis_time);
+    let due = policy
+        .interval_seconds
+        .is_some_and(|interval| age_seconds >= interval);
+    let changed_since_last_completed_rotation = match (
+        policy.last_completed_rotation_unix_seconds,
+        policy.last_non_rotation_write_unix_seconds,
+    ) {
+        (Some(completed), Some(written)) => written > completed,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    SecretAgeView {
+        age_seconds,
+        age_basis,
+        interval_seconds: policy.interval_seconds,
+        due,
+        changed_since_last_completed_rotation,
+    }
+}
+
+/// Set/clear rotation interval (control-plane only; pure policy mutation).
+pub fn apply_interval_mutation(
+    current: Option<u64>,
+    next: Option<u64>,
+) -> Result<Option<u64>, RotationError> {
+    if next == Some(0) {
+        return Err(RotationError::Invalid);
+    }
+    Ok(next.or(current.and(None)).or(next))
+}
+
+pub fn set_rotation_interval(seconds: u64) -> Result<u64, RotationError> {
+    if seconds == 0 {
+        Err(RotationError::Invalid)
+    } else {
+        Ok(seconds)
+    }
+}
+
+pub fn clear_rotation_interval() -> Option<u64> {
+    None
+}

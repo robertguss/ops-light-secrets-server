@@ -856,6 +856,27 @@ enum RotationCommand {
         #[arg(long)]
         request_id: String,
     },
+    /// Set per-secret rotation interval (server-owned policy metadata, R12)
+    Interval {
+        #[command(subcommand)]
+        command: RotationIntervalCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RotationIntervalCommand {
+    Set {
+        resource: String,
+        /// Interval duration in seconds (must be > 0)
+        seconds: u64,
+        #[arg(long)]
+        request_id: String,
+    },
+    Clear {
+        resource: String,
+        #[arg(long)]
+        request_id: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
