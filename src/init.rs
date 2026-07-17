@@ -227,7 +227,7 @@ pub fn initialize<B: InitBackend, W: Write + AsFd>(
     let _lock = DataDirectoryLock::acquire(directory)
         .map_err(|_| InitError::new(InitCode::LockUnavailable))?;
     inspect_init_directory(directory, backend, diagnostic_key)?;
-    validate_sink(sink.as_fd())?;
+    validate_secret_sink(sink.as_fd())?;
 
     let prepared = backend
         .prepare(ttl)
@@ -329,7 +329,7 @@ fn foreign_detail(
     }
 }
 
-fn validate_sink(fd: BorrowedFd<'_>) -> Result<(), InitError> {
+pub fn validate_secret_sink(fd: BorrowedFd<'_>) -> Result<(), InitError> {
     let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd.as_raw_fd(), status.as_mut_ptr()) } != 0 {
         return Err(InitError::new(InitCode::UnsafeCredentialSink));

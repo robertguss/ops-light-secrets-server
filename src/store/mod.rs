@@ -5,6 +5,7 @@ pub mod keyring;
 
 pub use codec::{Canonical, CodecError};
 
+use crate::clock::WatermarkCommand;
 use codec::{Decoder, Encoder};
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
@@ -1193,6 +1194,19 @@ impl Store {
                 .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)
+    }
+
+    pub fn commit_clock_watermark(&self, command: &WatermarkCommand) -> Result<(), StoreError> {
+        let expected = self.meta()?;
+        if expected.high_water_unix_seconds != command.expected_high_water_unix_seconds
+            || command.replacement_high_water_unix_seconds < expected.high_water_unix_seconds
+            || command.effective_unix_seconds > command.replacement_high_water_unix_seconds
+        {
+            return Err(StoreError::Integrity);
+        }
+        let mut replacement = expected.clone();
+        replacement.high_water_unix_seconds = command.replacement_high_water_unix_seconds;
+        self.set_meta(&expected, &replacement)
     }
 
     pub fn put_keyring(&self, envelope: &KeyringEnvelope) -> Result<(), StoreError> {

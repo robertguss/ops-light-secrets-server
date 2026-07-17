@@ -52,9 +52,24 @@
       "verification": "Decrypt keyring once, compare embedded and clear store ids, and prove mismatch refuses before listener bind."
     },
     {
-      "contract": "startup.clock_high_water",
-      "owner": "olss-charter-qul.2.5",
-      "verification": "Feed persisted high-water/tolerance decisions into ClockState and prove behind/ahead refusal before bind."
+      "contract": "clock.repair_epoch_credential",
+      "owner": "olss-charter-qul.10.3",
+      "verification": "Back U1.5's validated clock-repair state machine and CLI with U8.3's full R41 primitive: disclose a replacement emergency control credential, atomically bump the credential epoch and repair the exact old mark, authenticate the replacement, and leave old credentials invalid."
+    },
+    {
+      "contract": "clock.coordinator_watermark",
+      "owner": "olss-charter-qul.4.2",
+      "verification": "Submit U1.5 application, idle, and clean-shutdown WatermarkCommand values through U6.2's single writer; atomically persist each accepted mark with state and enforce the 100 ms reserved-admission deadline."
+    },
+    {
+      "contract": "clock.watermark_audit_event",
+      "owner": "olss-charter-qul.4.3",
+      "verification": "Commit U6.3's bounded canonical clock-watermark and boot-override events in the same transaction as each accepted high-water update."
+    },
+    {
+      "contract": "clock.watermark_mac",
+      "owner": "olss-charter-qul.3.5",
+      "verification": "Seal and verify the clear clock high-water record with U2.5's KTD15 metadata-integrity MAC before startup admission or mutation."
     },
     {
       "contract": "shutdown.audit_event",

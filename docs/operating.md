@@ -1,5 +1,32 @@
 # Operating ops-light-secrets-server
 
+## Clock safety
+
+The server anchors effective time to wall and monotonic clocks at boot. Effective
+time never moves backward in-process. The fixed v0.1 clock tolerance is 2
+seconds. A runtime disagreement beyond that tolerance makes readiness false;
+readiness returns only after 10 continuous seconds of agreement. An anomalous
+wall observation is never written to the store.
+
+The coordinator persists the accepted high-water mark on durable transactions,
+clean shutdown, and every 30 seconds while idle. An idle checkpoint has a 100 ms
+commit deadline and is coalesced to at most one pending command. A missed
+deadline makes readiness false. From the measured durable-commit gate, the
+published maximum restart rollback/TTL-extension window is therefore 32.1
+seconds: 30 second checkpoint interval + 2 second tolerance + 100 ms commit
+deadline. This is not a claim of zero extension across arbitrary host crashes;
+that would require an external trusted time source.
+
+Boot refuses when wall time is more than 2 seconds behind the persisted mark.
+The one-invocation behind-mark override preserves that mark, clamps effective
+time to it, and must commit its audit event before readiness. A mark more than
+24 hours ahead is treated as implausible and cannot be overridden; use offline
+`clock repair` with the exact old mark, replacement time, audited reason, and an
+approved replacement-credential sink. The production repair adapter remains
+fail-closed until U8.3 supplies the full credential-epoch/replacement-credential
+primitive; the command never performs a mark-only repair that could lock out the
+operator.
+
 ## One-time initialization and credential custody
 
 `init` takes an exclusive owner-only data-directory lock. It refuses foreign

@@ -50,6 +50,41 @@ fn init_refuses_invalid_ttl_and_missing_sink_without_secret_output() {
 }
 
 #[test]
+fn clock_repair_help_and_pending_adapter_are_fail_closed() {
+    let help = binary()
+        .args(["clock", "repair", "--help"])
+        .output()
+        .expect("run binary");
+    let stdout = String::from_utf8(help.stdout).unwrap();
+    assert!(help.status.success());
+    assert!(stdout.contains("--exact-old-unix-seconds"));
+    assert!(stdout.contains("--replacement-unix-seconds"));
+    assert!(stdout.contains("--reason"));
+    assert!(stdout.contains("--credential-output-fd"));
+
+    let refused = binary()
+        .args([
+            "clock",
+            "repair",
+            "--exact-old-unix-seconds",
+            "2000",
+            "--replacement-unix-seconds",
+            "1000",
+            "--reason",
+            "operator correction",
+            "--credential-output-fd",
+            "3",
+        ])
+        .output()
+        .expect("run binary");
+    let stderr = String::from_utf8(refused.stderr).unwrap();
+    assert!(!refused.status.success());
+    assert!(stderr.contains("integration_pending"));
+    assert!(stderr.contains("U8.3"));
+    assert!(!stderr.contains("operator correction"));
+}
+
+#[test]
 fn serve_refuses_unknown_config_key_without_echoing_value() {
     use std::io::Write;
 

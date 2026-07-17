@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
 use ops_light_secrets_server::config::Config;
 use ops_light_secrets_server::startup::validate_serve_shell;
 use std::ffi::OsString;
@@ -37,6 +38,33 @@ enum Command {
     },
     /// Validate configuration and serve requests
     Serve,
+    /// Offline clock recovery operations
+    Clock {
+        #[command(subcommand)]
+        command: ClockCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClockCommand {
+    /// Replace a known-bad persisted clock mark (offline)
+    Repair {
+        /// Exact persisted mark expected in the store
+        #[arg(long)]
+        exact_old_unix_seconds: u64,
+
+        /// Replacement Unix time in seconds
+        #[arg(long)]
+        replacement_unix_seconds: u64,
+
+        /// Audited operator reason
+        #[arg(long)]
+        reason: String,
+
+        /// Pre-opened TTY, pipe, socket, or anonymous memory FD for replacement credential
+        #[arg(long)]
+        credential_output_fd: Option<i32>,
+    },
 }
 
 pub fn run() -> Result<(), String> {
@@ -63,6 +91,33 @@ pub fn run() -> Result<(), String> {
                 return Err(
                     "init_refused code=integration_pending setting=store.transaction".into(),
                 );
+            }
+            Command::Clock {
+                command:
+                    ClockCommand::Repair {
+                        exact_old_unix_seconds,
+                        replacement_unix_seconds,
+                        reason,
+                        credential_output_fd,
+                    },
+            } => {
+                if credential_output_fd.is_none() {
+                    return Err("clock_repair_refused code=credential_sink_required setting=credential_output_fd remediation='pass a pre-opened TTY, pipe, socket, or anonymous memory FD'".into());
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| "clock_repair_refused code=system_clock_before_epoch")?
+                    .as_secs();
+                validate_repair(
+                    &ClockRepairRequest {
+                        exact_old_high_water_unix_seconds: *exact_old_unix_seconds,
+                        replacement_unix_seconds: *replacement_unix_seconds,
+                        reason: reason.clone(),
+                    },
+                    now,
+                )
+                .map_err(|error| error.to_string())?;
+                return Err("clock_repair_refused code=integration_pending setting=credential_epoch_replacement remediation='complete U8.3 R41 primitive'".into());
             }
         }
     }

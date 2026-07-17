@@ -14,6 +14,9 @@ use axum::{Json, Router, routing::get};
 use serde::Serialize;
 use tokio::net::TcpListener;
 
+use crate::clock::{
+    BootOverrideAudit, BootOverrideAuditError, ClockError, ClockMonitor, ClockReading,
+};
 use crate::config::Config;
 use crate::proxy::is_loopback;
 
@@ -133,6 +136,33 @@ pub enum ClockState {
     Sound,
     BehindTolerance,
     ImplausiblyAhead,
+}
+
+struct RefuseOverrideAudit;
+
+impl BootOverrideAudit for RefuseOverrideAudit {
+    fn commit_boot_override(
+        &mut self,
+        _event: crate::clock::BootOverrideEvent,
+    ) -> Result<(), BootOverrideAuditError> {
+        Err(BootOverrideAuditError)
+    }
+}
+
+pub fn assess_startup_clock(
+    reading: ClockReading,
+    persisted_high_water_unix_seconds: u64,
+) -> ClockState {
+    match ClockMonitor::boot(
+        reading,
+        persisted_high_water_unix_seconds,
+        false,
+        &mut RefuseOverrideAudit,
+    ) {
+        Ok(_) => ClockState::Sound,
+        Err(ClockError::PersistedMarkImplausiblyAhead) => ClockState::ImplausiblyAhead,
+        Err(_) => ClockState::BehindTolerance,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
