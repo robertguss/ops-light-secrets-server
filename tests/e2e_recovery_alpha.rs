@@ -249,3 +249,14 @@ fn recovery_alpha_binary_owner_catalog_and_identity_sinks() {
             .starts_with("age1")
     );
 }
+
+#[test]
+fn source_full_profile_extends_recovery_alpha() {
+    let raw = include_str!("fixtures/e2e/source-full-stages-v1.json");
+    let value: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(value["profile"], "source-full");
+    assert_eq!(value["extends"], "recovery-alpha");
+    let script = std::fs::read_to_string("scripts/e2e.sh").unwrap();
+    assert!(script.contains("source-full"));
+    assert!(script.contains("artifact-smoke"));
+}

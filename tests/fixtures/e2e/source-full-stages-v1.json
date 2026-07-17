@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "profile": "source-full",
+  "extends": "recovery-alpha",
+  "extra_stages": ["rotation_suite_smoke", "release_smoke_init_help"]
+}

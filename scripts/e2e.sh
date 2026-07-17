@@ -8,7 +8,7 @@ binary="${OLSS_E2E_BINARY:-}"
 keep_run_dir=0
 
 usage() {
-    printf 'usage: %s --profile <recovery-alpha> [--binary PATH] [--keep-run-dir]\n' "$0" >&2
+    printf 'usage: %s --profile <recovery-alpha|source-full|artifact-smoke> [--binary PATH] [--keep-run-dir]\n' "$0" >&2
     exit 64
 }
 
@@ -37,10 +37,12 @@ done
 
 [ -n "$profile" ] || usage
 case $profile in
-    recovery-alpha) ;;
-    source-full | artifact-smoke)
-        printf 'profile %s is reserved for later units; only recovery-alpha is implemented here\n' "$profile" >&2
-        exit 64
+    recovery-alpha|source-full) ;;
+    artifact-smoke)
+        if [ -z "${binary}" ] && [ -z "${OLSS_E2E_BINARY:-}" ]; then
+            printf 'artifact-smoke requires --binary or OLSS_E2E_BINARY (no cargo build)\n' >&2
+            exit 64
+        fi
         ;;
     *)
         printf 'unknown profile: %s\n' "$profile" >&2
