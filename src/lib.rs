@@ -15,6 +15,7 @@ pub mod identity;
 pub mod init;
 pub mod input_hygiene;
 pub mod kv;
+pub mod migration;
 pub mod proxy;
 pub mod rate_limit;
 pub mod raw_target;

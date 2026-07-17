@@ -378,6 +378,50 @@ enum StoreCommand {
         #[command(subcommand)]
         command: StoreReserveCommand,
     },
+    /// Plan, apply, or abort a forward-only offline store migration
+    Migrate {
+        #[command(subcommand)]
+        command: StoreMigrateCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreMigrateCommand {
+    /// Produce a preliminary or audited offline-final migration plan
+    Plan {
+        #[arg(long)]
+        from: u32,
+        #[arg(long)]
+        to: u32,
+        #[arg(long)]
+        archive: Option<PathBuf>,
+        #[arg(long)]
+        recovery_receipt: Option<PathBuf>,
+        #[arg(long)]
+        offline_final: bool,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Verify the final plan and atomically install its built sibling
+    Apply {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        recovery_receipt: PathBuf,
+        #[arg(long)]
+        confirm: String,
+    },
+    /// Abort a verified pre-replacement migration job
+    Abort {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -779,6 +779,38 @@ warns and bulk rewrite, migration, compaction, another restore, and key jobs
 remain refused. Preserve archive, signature, authenticated signing lineage,
 off-host checkpoint, and restore receipt as recovery evidence.
 
+## Offline store migration
+
+Startup never migrates a store. A supported older format reports
+`migration_required {from,to}`; a newer version, downgrade, skipped version, or
+unregistered hop reports `unsupported_store_version` without writing the file.
+
+Use this order: run `store migrate plan` for an advisory capacity/version check;
+create the logical backup; register its detached manifest signature; complete
+and register a recovery-recipient full-rehearsal receipt; stop the daemon; take
+the no-follow exclusive store/parent lock; then run `store migrate plan
+--offline-final` with that archive and receipt. Only this audited final plan's
+digest-bound confirmation is accepted by `store migrate apply`. Apply rechecks
+control `store-maintenance` authority, credential lifetime, generations, the
+authenticated maintenance-only tail, free space after `recovery.reserve`, and
+the lock immediately before mutation and replacement.
+
+The engine writes and fsyncs an authenticated owned marker before entering
+`migrating`, builds a mode-0600 same-directory sibling from the authoritative
+table/codec registry, verifies it, preserves anchored history byte-for-byte,
+then atomically renames and fsyncs the parent. Before rename the original is
+authoritative and `store migrate abort` can restore `ready` before removing the
+owned marker and sibling. After rename rollback is restore-from-backup, never an
+automatic guess. The installed store is `ready` with
+`pending_anchor=migration`; complete checkpoint prepare/sign/register and a
+passing state verification to clear it. Until then doctor is non-green and all
+other bulk rewrite, restore, migration, compaction, and key jobs are refused.
+
+v0.1 has no real prior release. Its release evidence therefore uses the retained
+synthetic v0-to-v1 adjacent fixture exactly once. Starting with the next release,
+the committed fixture and actual prior released binary are mandatory migration
+and prior-binary-refusal evidence.
+
 ## Compatibility client pins
 
 Compatibility evidence applies only to the exact client archives in
