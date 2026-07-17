@@ -110,6 +110,9 @@ wires these frozen primitives.
 The G3-frozen logical archive, single-container publication, detached-signature,
 recipient, restore-epoch, trust-import, and source/RPO rules are normative in
 `docs/backup-format-v1.md`. A redb file copy is never a supported backup format.
+The cross-release format/domain registry and shared publication, signer,
+maintenance-preflight, and recovery evidence codecs are frozen in
+`docs/format-freeze-v1.md`.
 
 Audit payloads use schema version 1 and are encrypted under the keyring's
 current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct

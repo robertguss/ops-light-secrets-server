@@ -32,10 +32,11 @@ pub enum RecoveryEventType {
     UnsignedRestoreOverride = 7,
     RecoveryForkGenesis = 8,
     BackupRecipientSetChanged = 9,
+    EmergencyCredentialIssued = 10,
 }
 
 impl RecoveryEventType {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::BackupPublishing,
         Self::BackupPublished,
         Self::ManifestSignatureRegistered,
@@ -45,7 +46,35 @@ impl RecoveryEventType {
         Self::UnsignedRestoreOverride,
         Self::RecoveryForkGenesis,
         Self::BackupRecipientSetChanged,
+        Self::EmergencyCredentialIssued,
     ];
+}
+
+impl Canonical for RecoveryEventType {
+    fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut out = Encoder::version(1);
+        out.u16(*self as u16);
+        Ok(out.finish())
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        let mut input = Decoder::version(bytes, 1)?;
+        let value = match input.u16()? {
+            1 => Self::BackupPublishing,
+            2 => Self::BackupPublished,
+            3 => Self::ManifestSignatureRegistered,
+            4 => Self::ManifestAbandoned,
+            5 => Self::RecoveryReceiptRegistered,
+            6 => Self::RestoreActivated,
+            7 => Self::UnsignedRestoreOverride,
+            8 => Self::RecoveryForkGenesis,
+            9 => Self::BackupRecipientSetChanged,
+            10 => Self::EmergencyCredentialIssued,
+            _ => return Err(CodecError::Invalid),
+        };
+        input.finish()?;
+        Ok(value)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

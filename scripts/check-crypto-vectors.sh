@@ -5,7 +5,8 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 manifest=$root/tests/fixtures/crypto-fixtures-manifest-v1.json
 fixture=$root/tests/fixtures/crypto-vectors-v1.json
 temporary=$(mktemp "${TMPDIR:-/tmp}/olss-crypto-vectors.XXXXXX")
-trap 'rm -f "$temporary"' EXIT
+format_temporary=$(mktemp "${TMPDIR:-/tmp}/olss-format-vectors.XXXXXX")
+trap 'rm -f "$temporary" "$format_temporary"' EXIT
 
 cd "$root"
 jq -e '.schema == 1 and (.architectures | sort == ["aarch64", "x86_64"])' "$manifest" >/dev/null
@@ -20,12 +21,20 @@ done < <(jq -r '.fixtures[] | [.path, .sha256] | @tsv' "$manifest")
 cargo run --quiet --locked --example crypto_fixture_generator >"$temporary"
 if [[ ${1:-} == --regenerate ]]; then
     mv "$temporary" "$fixture"
+    rm -f "$format_temporary"
     trap - EXIT
     printf 'regenerated %s; update manifest hash only after reviewing byte drift\n' "$fixture"
     exit 0
 fi
 cmp "$temporary" "$fixture" || {
     printf 'crypto vector byte drift; explicit reviewed regeneration required\n' >&2
+    exit 1
+}
+cargo run --quiet --locked --example format_fixture_generator >"$format_temporary"
+diff -u \
+    <(jq -S . "$root/tests/fixtures/format-freeze-v1.json") \
+    <(jq -S . "$format_temporary") || {
+    printf 'format-freeze vector byte drift; explicit reviewed regeneration required\n' >&2
     exit 1
 }
 

@@ -7,6 +7,7 @@ pub mod clock;
 pub mod config;
 pub mod control;
 pub mod credential;
+pub mod format_registry;
 pub mod identity;
 pub mod init;
 pub mod input_hygiene;

@@ -129,7 +129,8 @@ Stable recovery event IDs are: backup publishing, published, manifest signature
 registered, manifest abandoned, receipt registered, restore activated, unsigned
 override, recovery fork genesis, and backup recipient set changed. Gate G2 owns
 their canonical audit payload realization without changing these meanings or
-IDs.
+IDs. Emergency credential issuance is ID 10 and records the mandatory
+replacement CONTROL credential disclosure without recording its secret.
 
 Golden hashes are in `tests/fixtures/backup-format-v1.json`; positive and
 negative coverage is in `tests/backup_format.rs`. The vectors cover signed and

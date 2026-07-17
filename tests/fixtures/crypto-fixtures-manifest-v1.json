@@ -16,7 +16,14 @@
   ],
   "fixtures": [
     {"path": "tests/fixtures/crypto-vectors-v1.json", "schema": 1, "sha256": "040999e418c7854b6aec09e38e273c0a3cd57ba6b29bcbdd09fd002f4456f68d"},
-    {"path": "tests/fixtures/keyring-age-v0.12.json", "schema": 1, "sha256": "dacda1606cd553e96a0008f6e6bfc91ce643ea54b28f0ac194696d703728f1d4"}
+    {"path": "tests/fixtures/keyring-age-v0.12.json", "schema": 1, "sha256": "dacda1606cd553e96a0008f6e6bfc91ce643ea54b28f0ac194696d703728f1d4"},
+    {"path": "tests/fixtures/audit-event-v1.json", "schema": 1, "sha256": "008b111e0e3f924516a294ee22f19f237248fa0ee764d0b0cfd0d15aad81bc91"},
+    {"path": "tests/fixtures/audit-envelope-v1.json", "schema": 1, "sha256": "0df455c616ae8e284d0a49e8ceab061e7677a253a55025dd08b7421f3791df63"},
+    {"path": "tests/fixtures/checkpoint-descriptor-v2.json", "schema": 2, "sha256": "f24e2cd2bc5b65edf0e8a45dfdce8d806251ec4bf5d0913373120c00b0d2f450"},
+    {"path": "tests/fixtures/state-digest-v1.json", "schema": 1, "sha256": "b77cf4cdb507025619ddf4cde6b5e110bbb462f4fa2d50fe0e05ff54ac2817fb"},
+    {"path": "tests/fixtures/signing-trust-v1.json", "schema": 1, "sha256": "10a86bc195bd81b2ee3b92c6e124084b14896b68bc348869860c8aade95b82f3"},
+    {"path": "tests/fixtures/backup-format-v1.json", "schema": 1, "sha256": "dfc6a905d889b25f05ac7158e739409ca3df016a6588d7e606fa520e322f14c2"},
+    {"path": "tests/fixtures/format-freeze-v1.json", "schema": 1, "sha256": "c5503c8db76f18f9b75456146ef3aaddce1b532cbd1f2937879e9d09ac61203c"}
   ],
   "negative_cases": [
     "header.magic",
