@@ -432,6 +432,99 @@ async fn final_router_dispatches_literal_list_and_get_list_true_with_strict_shap
     );
 }
 
+#[tokio::test]
+async fn unsupported_surface_is_exact_enumerable_and_never_succeeds_empty() {
+    let (auth, token) = auth_fixture();
+    let app = kv_router(
+        auth,
+        service(
+            &[
+                Capability::SecretReadCurrent,
+                Capability::SecretWrite,
+                Capability::SecretList,
+            ],
+            false,
+        ),
+        InputHygieneState::new([19; 32]),
+    );
+    for (method, uri, status, message) in [
+        (
+            Method::PATCH,
+            "/v1/secret/data/apps/key",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "unsupported endpoint: PATCH /v1/:mount/data/:path",
+        ),
+        (
+            Method::DELETE,
+            "/v1/secret/metadata/apps/key",
+            StatusCode::NOT_IMPLEMENTED,
+            "unsupported endpoint: DELETE /v1/:mount/metadata/:path",
+        ),
+        (
+            Method::GET,
+            "/v1/other/data/apps/key",
+            StatusCode::NOT_FOUND,
+            "unsupported endpoint: GET /v1/:mount/data/:path",
+        ),
+        (
+            Method::GET,
+            "/v1/secret/transit/apps/key",
+            StatusCode::METHOD_NOT_ALLOWED,
+            "unsupported endpoint: GET /v1/:mount/:operation/:path",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-vault-token", &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body, json!({"errors": [message]}));
+    }
+
+    let namespaced = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/secret/data/apps/key")
+                .header("x-vault-token", &token)
+                .header("x-vault-namespace", "attacker-canary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(namespaced.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(namespaced.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"errors": ["unsupported endpoint: GET namespaced /v1 request"]})
+    );
+
+    let missing = app
+        .oneshot(
+            Request::get("/v1/secret/data/apps/missing")
+                .header("x-vault-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(missing.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body, json!({"errors": ["secret not found"]}));
+}
+
 #[test]
 fn kv_value_bounds_hold_at_n_minus_one_n_and_n_plus_one() {
     let service = service(&[Capability::SecretWrite], false);

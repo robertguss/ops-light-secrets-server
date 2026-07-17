@@ -225,6 +225,13 @@ pub async fn raw_target_guard(mut request: Request<Body>, next: Next) -> Respons
             request.extensions_mut().insert(endpoint);
             next.run(request).await
         }
+        Err(error) if error.reason == ParseReason::InvalidEndpoint => {
+            crate::compat_error::response(
+                crate::compat_error::ErrorCase::UnsupportedOperation,
+                Some(request.method()),
+                Some(crate::compat_error::SafeRoute::KvUnknown),
+            )
+        }
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }

@@ -7,6 +7,7 @@ pub mod backup_verify;
 pub mod capacity;
 pub mod clock;
 pub mod compaction;
+pub mod compat_error;
 pub mod config;
 pub mod consumer;
 pub mod control;

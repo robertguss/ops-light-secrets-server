@@ -460,7 +460,7 @@ async fn vault_routes_have_stable_envelopes_strict_json_and_explicit_renewal_ref
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     assert_eq!(
         body.as_ref(),
-        br#"{"errors":["token renewal is not supported"]}"#
+        br#"{"errors":["unsupported endpoint: POST /v1/auth/token/renew-self"]}"#
     );
 
     let duplicate = format!(

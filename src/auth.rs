@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, middleware, routing};
@@ -1036,6 +1036,7 @@ async fn lookup_self(
 async fn renew_self(
     State(service): State<AuthService>,
     headers: HeaderMap,
+    method: Method,
     token: Option<Extension<ValidatedToken>>,
 ) -> Response {
     let Some(Extension(token)) = token else {
@@ -1051,9 +1052,10 @@ async fn renew_self(
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     }
     service.with_catalog(|catalog| catalog.renew_unsupported(request_id(&headers)));
-    vault_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "token renewal is not supported",
+    crate::compat_error::response(
+        crate::compat_error::ErrorCase::TokenRenewal,
+        Some(&method),
+        Some(crate::compat_error::SafeRoute::TokenRenewSelf),
     )
 }
 

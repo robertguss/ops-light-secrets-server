@@ -1056,7 +1056,11 @@ async fn dispatch(
         .get("x-vault-namespace")
         .is_some_and(|value| !value.as_bytes().is_empty())
     {
-        return vault_error(StatusCode::BAD_REQUEST, "namespaces are not supported");
+        return crate::compat_error::response(
+            crate::compat_error::ErrorCase::Namespace,
+            Some(&method),
+            Some(crate::compat_error::SafeRoute::Namespaced),
+        );
     }
     let response = match (endpoint.kind, method.as_str()) {
         (EndpointKind::Data, "GET") => match state.service.read(token.identity_id, &endpoint) {
@@ -1068,7 +1072,7 @@ async fn dispatch(
                 }})),
             )
                 .into_response(),
-            Err(error) => error_response(error),
+            Err(error) => error_response(error, &method, endpoint.kind),
         },
         (EndpointKind::Data, "POST" | "PUT") => {
             let Some(Extension(body)) = body else {
@@ -1083,7 +1087,7 @@ async fn dispatch(
                     Json(json!({"data": version_metadata(result.created, result.version)})),
                 )
                     .into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
         (EndpointKind::Data, "DELETE") => {
@@ -1092,7 +1096,7 @@ async fn dispatch(
                 .soft_delete_latest(token.identity_id, &endpoint)
             {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
         (EndpointKind::Delete | EndpointKind::Undelete | EndpointKind::Destroy, "POST") => {
@@ -1113,13 +1117,13 @@ async fn dispatch(
                 .mutate_versions(token.identity_id, &endpoint, &versions, action)
             {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
         (EndpointKind::Metadata, "GET") => {
             match state.service.metadata(token.identity_id, &endpoint) {
                 Ok(metadata) => (StatusCode::OK, Json(json!({"data": metadata}))).into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
         (EndpointKind::Metadata, "POST" | "PUT") => {
@@ -1134,20 +1138,25 @@ async fn dispatch(
                 .update_metadata(token.identity_id, &endpoint, update)
             {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
-        (EndpointKind::Metadata, "DELETE") => vault_error(
-            StatusCode::NOT_IMPLEMENTED,
-            "remote metadata deletion is not supported",
+        (EndpointKind::Metadata, "DELETE") => crate::compat_error::response(
+            crate::compat_error::ErrorCase::MetadataDelete,
+            Some(&method),
+            Some(crate::compat_error::SafeRoute::KvMetadata),
         ),
         (EndpointKind::List, "LIST" | "GET") => {
             match state.service.list(token.identity_id, &endpoint) {
                 Ok(keys) => (StatusCode::OK, Json(json!({"data": {"keys": keys}}))).into_response(),
-                Err(error) => error_response(error),
+                Err(error) => error_response(error, &method, endpoint.kind),
             }
         }
-        _ => vault_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported operation"),
+        _ => crate::compat_error::response(
+            crate::compat_error::ErrorCase::UnsupportedOperation,
+            Some(&method),
+            Some(endpoint.kind.into()),
+        ),
     };
     secret_response_hygiene(response)
 }
@@ -1277,16 +1286,24 @@ fn version_metadata(created: u64, version: u64) -> Value {
     })
 }
 
-fn error_response(error: KvError) -> Response {
+fn error_response(error: KvError, method: &Method, kind: EndpointKind) -> Response {
     match error {
         KvError::Invalid => vault_error(StatusCode::BAD_REQUEST, "invalid request"),
-        KvError::UnsupportedMount => vault_error(StatusCode::NOT_FOUND, "unsupported mount"),
+        KvError::UnsupportedMount => crate::compat_error::response(
+            crate::compat_error::ErrorCase::UnsupportedMount,
+            Some(method),
+            Some(kind.into()),
+        ),
         KvError::PermissionDenied => vault_error(StatusCode::FORBIDDEN, "permission denied"),
         KvError::CasConflict => vault_error(
             StatusCode::BAD_REQUEST,
             "check-and-set parameter did not match the current version",
         ),
-        KvError::NotFound => vault_error(StatusCode::NOT_FOUND, "secret not found"),
+        KvError::NotFound => crate::compat_error::response(
+            crate::compat_error::ErrorCase::SecretNotFound,
+            None,
+            None,
+        ),
         KvError::VersionUnavailable {
             version,
             deletion_time,
