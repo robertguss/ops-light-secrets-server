@@ -1,5 +1,6 @@
 //! Owner-only control-plane listener and router separation.
 
+pub mod credential_management;
 pub mod management;
 
 use axum::serve::Listener;

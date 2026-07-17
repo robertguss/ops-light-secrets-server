@@ -4,19 +4,38 @@ use std::process::Command;
 use axum::body::Body;
 use axum::http::Method;
 use axum::http::{Request, StatusCode};
+use ops_light_secrets_server::auth::{AppRoleRecord, AuthCatalog};
+use ops_light_secrets_server::control::credential_management::{
+    CredentialManagementCatalog, IssueResult, RoleDeleteRequest, SecretIdIssueRequest,
+    TokenIssueRequest,
+};
 use ops_light_secrets_server::control::data_router;
 use ops_light_secrets_server::control::management::{
     CommandPhase, ControlCommand, MANAGEMENT_OUTPUT_SCHEMA, MAX_PAGE_SIZE, ManagementCatalog,
     ManagementError, ManagementPrincipal, command_authorization,
 };
-use ops_light_secrets_server::credential::CredentialAudience;
+use ops_light_secrets_server::credential::{
+    CredentialAudience, DIRECT_TOKEN_MIN_TTL_SECONDS, SECRET_ID_MIN_TTL_SECONDS,
+};
 use ops_light_secrets_server::identity::{
     AuthorizationRequest, Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
     SecretAction,
 };
 use ops_light_secrets_server::raw_target::parse_raw_target;
+use ops_light_secrets_server::store::StoreId;
+use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
 use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary};
 use tower::ServiceExt;
+
+struct Counter(u8);
+
+impl RandomSource for Counter {
+    fn fill(&mut self, output: &mut [u8]) -> Result<(), KeyringError> {
+        self.0 = self.0.wrapping_add(1);
+        output.fill(self.0);
+        Ok(())
+    }
+}
 
 fn capabilities(values: &[Capability]) -> BTreeSet<Capability> {
     values.iter().copied().collect()
@@ -50,6 +69,20 @@ fn catalog(capabilities: &[Capability]) -> ManagementCatalog {
         [grant(1, 1, capabilities)],
     )
     .unwrap()
+}
+
+fn credential_catalog(capabilities: &[Capability]) -> CredentialManagementCatalog<Counter> {
+    let operator = IdentityRecord::new([1; 16], "operator".into(), IdentityKind::Human).unwrap();
+    let workload = IdentityRecord::new([2; 16], "workload".into(), IdentityKind::Workload).unwrap();
+    let authorization = ManagementCatalog::new(
+        [operator.clone(), workload.clone()],
+        [grant(1, 1, capabilities)],
+    )
+    .unwrap();
+    let mut auth = AuthCatalog::new(StoreId([7; 16]), [8; 32], 1, 100).unwrap();
+    auth.insert_identity(operator).unwrap();
+    auth.insert_identity(workload).unwrap();
+    CredentialManagementCatalog::new(authorization, auth, Counter(10))
 }
 
 #[test]
@@ -413,12 +446,273 @@ async fn remote_router_has_no_identity_grant_or_explain_routes() {
         "/v1/sys/identities/01010101010101010101010101010101",
         "/v1/sys/grants",
         "/v1/sys/authz/explain",
+        "/v1/sys/tokens",
+        "/v1/sys/approle/roles",
+        "/v1/sys/approle/secret-ids",
     ] {
         let response = data_router()
             .oneshot(Request::post(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[test]
+fn token_disclosure_once_authenticate_revoke_and_lost_reply_recovery() {
+    let mut state = credential_catalog(&[
+        Capability::CredentialIssue,
+        Capability::CredentialRevoke,
+        Capability::IdentityGrantManage,
+    ]);
+    let request = TokenIssueRequest {
+        request_id: [11; 16],
+        id: [12; 16],
+        identity_id: [1; 16],
+        audience: CredentialAudience::Control,
+        ttl_seconds: DIRECT_TOKEN_MIN_TTL_SECONDS,
+        label: "operator-successor".into(),
+    };
+    let issued = match state.token_issue(principal(1), request.clone()).unwrap() {
+        IssueResult::Disclosed(value) => value,
+        IssueResult::Existing(_) => panic!("first issuance must disclose"),
+    };
+    let raw = issued.expose_once().to_owned();
+    let accessor = issued.record.accessor;
+    assert!(
+        state
+            .auth()
+            .authenticated_credential(&raw, CredentialAudience::Control)
+            .is_some()
+    );
+
+    let retry = state.token_issue(principal(1), request).unwrap();
+    let existing = match retry {
+        IssueResult::Existing(value) => value,
+        IssueResult::Disclosed(_) => panic!("retry must never redisclose"),
+    };
+    assert_eq!(existing.accessor, accessor.encode());
+    let metadata_json = serde_json::to_string(&existing).unwrap();
+    assert!(!metadata_json.contains(&raw));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&metadata_json).unwrap()["schema"],
+        1
+    );
+
+    let listed = state.token_list(principal(1), [13; 16], None, 50).unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].label, "operator-successor");
+    let revoked = state
+        .credential_revoke(
+            principal(1),
+            [14; 16],
+            accessor,
+            "successor validation complete",
+        )
+        .unwrap();
+    assert_eq!(revoked.status, "revoked");
+    assert!(
+        state
+            .auth()
+            .authenticated_credential(&raw, CredentialAudience::Control)
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .credential_revoke(principal(1), [15; 16], accessor, "idempotent retry")
+            .unwrap()
+            .status,
+        "revoked"
+    );
+    assert!(
+        state
+            .management_audit()
+            .iter()
+            .any(|event| event.allowed && event.command == ControlCommand::CredentialIssue)
+    );
+    assert!(
+        state
+            .management_audit()
+            .iter()
+            .any(|event| event.allowed && event.reason.as_deref() == Some("idempotent retry"))
+    );
+}
+
+#[test]
+fn approle_secret_id_is_consumed_listed_revoked_and_role_delete_is_confirmed() {
+    let mut state = credential_catalog(&[
+        Capability::CredentialIssue,
+        Capability::CredentialRevoke,
+        Capability::IdentityGrantManage,
+    ]);
+    let role = AppRoleRecord::new(
+        [21; 16],
+        "payments-role".into(),
+        "payments".into(),
+        [2; 16],
+        Some(300),
+    )
+    .unwrap();
+    state.role_create(principal(1), [22; 16], role).unwrap();
+    let issue = |request_id, id, instance| SecretIdIssueRequest {
+        request_id: [request_id; 16],
+        id: [id; 16],
+        role_id: "payments-role".into(),
+        ttl_seconds: SECRET_ID_MIN_TTL_SECONDS,
+        use_count: 2,
+        consumer_instance_id: Some([instance; 16]),
+        identity_only_tracking_accepted: false,
+        label: format!("payments-{id}"),
+    };
+    let first = match state
+        .secret_id_issue(principal(1), issue(23, 24, 25))
+        .unwrap()
+    {
+        IssueResult::Disclosed(value) => value,
+        IssueResult::Existing(_) => panic!("first issuance"),
+    };
+    let first_raw = first.expose_once().to_owned();
+    let first_accessor = first.record.accessor;
+    let login = state
+        .auth_mut()
+        .login("payments-role", &first_raw, [26; 16], &mut Counter(100))
+        .unwrap();
+    assert_eq!(login.identity_id, [2; 16]);
+    assert_eq!(
+        state.auth().usage(first_accessor).unwrap().remaining_uses,
+        1
+    );
+
+    let orphan = match state
+        .secret_id_issue(principal(1), issue(27, 28, 29))
+        .unwrap()
+    {
+        IssueResult::Disclosed(value) => value,
+        IssueResult::Existing(_) => panic!("first issuance"),
+    };
+    let orphan_accessor = orphan.record.accessor;
+    drop(orphan);
+    let listed = state
+        .secret_id_list(principal(1), [30; 16], "payments-role", None, 50)
+        .unwrap();
+    assert_eq!(listed.items.len(), 2);
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.accessor == orphan_accessor.encode())
+    );
+    state
+        .credential_revoke(
+            principal(1),
+            [31; 16],
+            orphan_accessor,
+            "issuance response lost",
+        )
+        .unwrap();
+
+    let confirmation = CredentialManagementCatalog::<Counter>::role_delete_confirmation(
+        "payments-role",
+        1,
+        1,
+        "retire workload login",
+    );
+    let deleted = state
+        .role_delete(
+            principal(1),
+            RoleDeleteRequest {
+                request_id: [32; 16],
+                role_id: "payments-role".into(),
+                expected_generation: 1,
+                invalidated_count: 1,
+                reason: "retire workload login".into(),
+                confirmation,
+            },
+        )
+        .unwrap();
+    assert_eq!(deleted.status, "deleted");
+    assert!(
+        state
+            .auth_mut()
+            .login("payments-role", &first_raw, [33; 16], &mut Counter(120))
+            .is_err()
+    );
+}
+
+#[test]
+fn credential_capability_and_anti_impersonation_boundaries_fail_closed() {
+    let request = TokenIssueRequest {
+        request_id: [41; 16],
+        id: [42; 16],
+        identity_id: [1; 16],
+        audience: CredentialAudience::Data,
+        ttl_seconds: DIRECT_TOKEN_MIN_TTL_SECONDS,
+        label: "self".into(),
+    };
+    let mut wrong = credential_catalog(&[Capability::AuditRead]);
+    assert!(matches!(
+        wrong.token_issue(principal(1), request.clone()),
+        Err(ManagementError::Denied)
+    ));
+
+    let mut issue_only = credential_catalog(&[Capability::CredentialIssue]);
+    let crossing = TokenIssueRequest {
+        identity_id: [2; 16],
+        ..request
+    };
+    assert!(matches!(
+        issue_only.token_issue(principal(1), crossing),
+        Err(ManagementError::Denied)
+    ));
+    let role = AppRoleRecord::new(
+        [43; 16],
+        "crossing".into(),
+        "crossing".into(),
+        [2; 16],
+        Some(300),
+    )
+    .unwrap();
+    assert_eq!(
+        issue_only.role_create(principal(1), [44; 16], role),
+        Err(ManagementError::Denied)
+    );
+}
+
+#[test]
+fn credential_cli_surface_requires_descriptors_and_raw_output_fds() {
+    for (arguments, expected) in [
+        (vec!["token", "issue", "--help"], "--credential-output-fd"),
+        (
+            vec!["approle", "secret-id", "issue", "--help"],
+            "--credential-output-fd",
+        ),
+        (vec!["token", "revoke", "--help"], "--reason"),
+        (
+            vec!["approle", "role", "delete", "--help"],
+            "--confirmation",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains(expected));
+        assert!(!stdout.contains("--token-value"));
+        assert!(!stdout.contains("--secret-id-value"));
+    }
+    for group in ["token", "approle"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ops-light-secrets-server"))
+            .args([group, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("--control-credential-source")
+        );
     }
 }
 

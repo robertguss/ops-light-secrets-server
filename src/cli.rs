@@ -89,6 +89,133 @@ enum Command {
         #[command(subcommand)]
         command: AuthzCommand,
     },
+    /// Issue, list, and revoke direct tokens through the owner-only control socket
+    Token {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+    /// Manage AppRole roles and disclosure-once secret IDs
+    Approle {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: AppRoleCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    Issue {
+        #[arg(long)]
+        identity_id: String,
+        #[arg(long, value_parser = ["data", "control"])]
+        audience: String,
+        #[arg(long)]
+        ttl: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        request_id: String,
+        /// Approved TTY, pipe, socket, or anonymous-memory FD; stdout gets metadata only
+        #[arg(long, value_parser = parse_private_fd)]
+        credential_output_fd: i32,
+    },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    Revoke {
+        accessor: String,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppRoleCommand {
+    Role {
+        #[command(subcommand)]
+        command: AppRoleRoleCommand,
+    },
+    SecretId {
+        #[command(subcommand)]
+        command: AppRoleSecretIdCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppRoleRoleCommand {
+    Create {
+        #[arg(long)]
+        role_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        identity_id: String,
+        #[arg(long)]
+        token_ttl: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Delete {
+        role_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        invalidated_secret_id_count: usize,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirmation: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppRoleSecretIdCommand {
+    Issue {
+        #[arg(long)]
+        role_id: String,
+        #[arg(long)]
+        ttl: String,
+        #[arg(long)]
+        use_count: u32,
+        #[arg(long)]
+        consumer_instance_id: Option<String>,
+        #[arg(long)]
+        accept_identity_only_tracking: bool,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        request_id: String,
+        /// Approved TTY, pipe, socket, or anonymous-memory FD; stdout gets metadata only
+        #[arg(long, value_parser = parse_private_fd)]
+        credential_output_fd: i32,
+    },
+    List {
+        #[arg(long)]
+        role_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Revoke {
+        accessor: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -513,7 +640,11 @@ pub fn run() -> Result<(), String> {
             Command::Audit { .. } => {
                 return Err("signing_trust_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete live signing-trust persistence adapter'".into());
             }
-            Command::Identity { .. } | Command::Grant { .. } | Command::Authz { .. } => {
+            Command::Identity { .. }
+            | Command::Grant { .. }
+            | Command::Authz { .. }
+            | Command::Token { .. }
+            | Command::Approle { .. } => {
                 return Err("control_command_refused code=integration_pending setting=authenticated_request_coordinator remediation='complete U4.2 control-credential middleware and coordinator adapter'".into());
             }
         }

@@ -375,6 +375,52 @@ impl ManagementCatalog {
         &self.audit
     }
 
+    pub fn principal_has_capability(
+        &self,
+        principal: ManagementPrincipal,
+        capability: Capability,
+    ) -> bool {
+        principal.audience == CredentialAudience::Control
+            && principal.peer_uid == principal.expected_uid
+            && principal.credential_active
+            && self
+                .identities
+                .get(&principal.identity_id)
+                .is_some_and(|identity| identity.status == IdentityStatus::Active)
+            && authorize(
+                &AuthorizationRequest::management(capability)
+                    .expect("management capability is registered"),
+                self.grants
+                    .values()
+                    .filter(|grant| grant.owner_identity_id == principal.identity_id),
+            )
+            .allow
+    }
+
+    pub fn record_command_success(
+        &mut self,
+        principal: ManagementPrincipal,
+        request_id: [u8; 16],
+        command: ControlCommand,
+        target: [u8; 16],
+        reason: Option<String>,
+    ) -> Result<(), ManagementError> {
+        if self.completed(request_id, command, target)? {
+            return Ok(());
+        }
+        self.succeed(principal, request_id, command, target, reason);
+        Ok(())
+    }
+
+    pub fn command_request_completed(
+        &self,
+        request_id: [u8; 16],
+        command: ControlCommand,
+        target: [u8; 16],
+    ) -> Result<bool, ManagementError> {
+        self.completed(request_id, command, target)
+    }
+
     pub fn authorize_command(
         &mut self,
         principal: ManagementPrincipal,

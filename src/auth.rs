@@ -375,6 +375,22 @@ impl AuthCatalog {
         Ok(())
     }
 
+    pub fn store_id(&self) -> StoreId {
+        self.store_id
+    }
+
+    pub fn verifier_key(&self) -> &[u8; 32] {
+        &self.verifier_key
+    }
+
+    pub fn current_epoch(&self) -> u64 {
+        self.current_epoch
+    }
+
+    pub fn effective_seconds(&self) -> u64 {
+        self.effective_seconds
+    }
+
     pub fn insert_role(&mut self, role: AppRoleRecord) -> Result<(), AuthError> {
         role.validate().map_err(|_| AuthError::InvalidInput)?;
         if !self
@@ -486,6 +502,68 @@ impl AuthCatalog {
         self.credentials
             .values()
             .find(|credential| credential.issuance_request_id == request_id)
+    }
+
+    pub fn identity(&self, id: [u8; 16]) -> Option<&IdentityRecord> {
+        self.identities.get(&id)
+    }
+
+    pub fn role(&self, public_role_id: &str) -> Option<&AppRoleRecord> {
+        self.roles_by_public_id.get(public_role_id)
+    }
+
+    pub fn roles(&self) -> impl Iterator<Item = &AppRoleRecord> {
+        self.roles_by_public_id.values()
+    }
+
+    pub fn credentials(&self) -> impl Iterator<Item = &CredentialRecord> {
+        self.credentials.values()
+    }
+
+    pub fn credential(&self, accessor: CredentialAccessor) -> Option<&CredentialRecord> {
+        self.credentials.get(&accessor)
+    }
+
+    pub fn replace_credential(&mut self, replacement: CredentialRecord) -> Result<(), AuthError> {
+        let current = self
+            .credentials
+            .get(&replacement.accessor)
+            .ok_or(AuthError::Conflict)?;
+        if replacement.id != current.id
+            || replacement.generation
+                != current
+                    .generation
+                    .checked_add(1)
+                    .ok_or(AuthError::Conflict)?
+        {
+            return Err(AuthError::Conflict);
+        }
+        self.credentials.insert(replacement.accessor, replacement);
+        Ok(())
+    }
+
+    pub fn remove_secret_ids_for_role(
+        &mut self,
+        role_record_id: [u8; 16],
+    ) -> Result<usize, AuthError> {
+        let accessors = self
+            .usages
+            .values()
+            .filter(|usage| usage.role_id == role_record_id)
+            .map(|usage| usage.accessor)
+            .collect::<Vec<_>>();
+        for accessor in &accessors {
+            if let Some(current) = self.credentials.get(accessor).cloned() {
+                if current.status == crate::identity::TokenStatus::Active {
+                    self.replace_credential(
+                        current
+                            .revoke(current.generation)
+                            .map_err(|_| AuthError::Conflict)?,
+                    )?;
+                }
+            }
+        }
+        Ok(accessors.len())
     }
 
     pub fn login(

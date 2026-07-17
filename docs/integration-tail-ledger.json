@@ -33,8 +33,8 @@
     },
     {
       "contract": "startup.online_disclosure_handshake",
-      "owner": "olss-charter-qul.6.5",
-      "verification": "Reuse U1.2's sink validation and disclosure-before-commit ordering with the owner-socket nonce/digest ACK handshake for later control-token issuance."
+      "owner": "olss-charter-qul.7.7",
+      "verification": "In the assembled owner-socket flow, reuse U1.2's sink validation and disclosure-before-commit ordering with the nonce/digest ACK handshake for control-token and AppRole secret-id issuance; prove lost-response recovery exposes metadata only and leaves the orphan discoverable/revocable by accessor."
     },
     {
       "contract": "startup.store_schema_lifecycle_marker",
@@ -118,8 +118,8 @@
     },
     {
       "contract": "auth.approle_durable_coordinator",
-      "owner": "olss-charter-qul.6.5",
-      "verification": "Persist U4.2 AppRole roles and secret-id usage records from U4.5's lifecycle commands, hydrate AuthCatalog at serve startup, and adapt login so the usage CAS, token verifier insertion, canonical audit append, and reply commit through one real redb coordinator transaction."
+      "owner": "olss-charter-qul.7.7",
+      "verification": "Persist U4.2 AppRole roles, direct tokens, secret-id usage records, request-id receipts, and reasoned revocations from U4.5's lifecycle kernel; hydrate AuthCatalog at serve startup; bind the frozen token/approle CLI to the authenticated owner socket; and adapt login so usage CAS, token verifier insertion, canonical audit append, and reply commit through one real redb coordinator transaction. Exercise issue/authenticate/revoke and orphan list/revoke through the assembled binary."
     },
     {
       "contract": "kv.durable_coordinator_router",

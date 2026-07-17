@@ -393,6 +393,33 @@ Control audience, owner UID, active credential, active identity, current grants,
 operation, and audit outcome are evaluated at the final coordinator barrier.
 The remote data router contains none of these routes.
 
+Credential administration uses `token issue|list|revoke`, `approle role
+create|list|delete`, and `approle secret-id issue|list|revoke`. Issuance needs
+`credential-issue`; discovery and revocation need `credential-revoke`. A
+cross-identity token or role binding additionally needs
+`identity-grant-manage`, and ordinary authority can never mint an emergency or
+more-privileged control credential. Token and secret-ID issue commands require
+a unique public label, a request ID, bounded TTL, and an approved
+`--credential-output-fd`; stable stdout contains metadata only. Retrying a
+committed request returns metadata without the bearer. Find an issuance whose
+reply was lost by label/accessor, revoke it with a non-secret reason, then issue
+a fresh credential. There is no re-disclosure command.
+
+Secret IDs use a bounded use count and normally require a stable
+`consumer_instance_id`; accepting identity-only tracking is an explicit
+operator choice. Role deletion requires the current generation, the exact
+bounded count of active secret IDs it invalidates, a reason, and the canonical
+digest confirmation. It revokes those secret IDs but does not revoke tokens
+already minted by earlier logins. Lists are stable, cursor-paginated, capped at
+100 rows, and contain accessors and lifecycle metadata only.
+
+For finite control-token rollover, issue a labeled successor to the same human
+identity, authenticate it on a read-only owner-socket command, then revoke the
+predecessor by accessor and prove rejection. Never revoke the last tested
+admin-capable credential first. The production owner-socket/redb adapter is
+fail-closed until the U5.7 assembled-server slice wires the frozen lifecycle
+kernel to the coordinator; no remote route substitutes for that adapter.
+
 ### Token and AppRole authentication
 
 The remote authentication surface is deliberately limited to
