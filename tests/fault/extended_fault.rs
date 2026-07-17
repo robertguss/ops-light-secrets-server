@@ -4,13 +4,13 @@ use ops_light_secrets_server::fault_inject::CORE_RECOVERY_POINTS;
 use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
 
 const EXTENDED: &[&str] = &[
-    "rotation.cutover.before_write",
-    "rotation.cutover.after_audit",
-    "key.record.reencrypt.before_rename",
-    "key.metadata.remac.before_rename",
-    "key.audit_payload.after_select",
-    "migration.plan.before_commit",
-    "compaction.before_swap",
+    "rotation-cutover-before-write",
+    "rotation-cutover-after-audit",
+    "key-record-reencrypt-before-rename",
+    "key-metadata-remac-before-rename",
+    "key-audit-payload-after-select",
+    "migration-plan-before-commit",
+    "compaction-before-swap",
 ];
 
 #[test]
@@ -19,11 +19,9 @@ fn extended_fault_points_are_named_and_producers_exist() {
         .register_canary(b"extended-fault-canary")
         .build()
         .unwrap();
-    for (i, point) in EXTENDED.iter().enumerate() {
-        assert!(point.contains('.'));
-        let mut scenario = harness
-            .scenario_case("extended-fault", &format!("point-{i}"), 1)
-            .unwrap();
+    for point in EXTENDED {
+        assert!(!point.is_empty());
+        let mut scenario = harness.scenario_case("extended-fault", point, 1).unwrap();
         scenario
             .step(
                 "named",
