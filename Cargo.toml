@@ -80,3 +80,7 @@ path = "tests/key_rotation_suite.rs"
 [[test]]
 name = "acceptance"
 path = "tests/acceptance/mod.rs"
+
+[[test]]
+name = "extended_fault"
+path = "tests/fault/extended_fault.rs"
