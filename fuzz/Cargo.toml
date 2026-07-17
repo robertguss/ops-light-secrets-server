@@ -52,3 +52,17 @@ path = "fuzz_targets/checkpoint_descriptor.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "backup_archive"
+path = "fuzz_targets/backup_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audit_export"
+path = "fuzz_targets/audit_export.rs"
+test = false
+doc = false
+bench = false

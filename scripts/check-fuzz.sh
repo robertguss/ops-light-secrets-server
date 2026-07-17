@@ -6,7 +6,7 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 test -f fuzz/Cargo.toml
-targets='token_credential raw_target json_body record_header checkpoint_descriptor'
+targets='token_credential raw_target json_body record_header checkpoint_descriptor backup_archive audit_export'
 for target in $targets; do
     test -f "fuzz/fuzz_targets/${target}.rs"
     test -d "fuzz/corpus/${target}"
