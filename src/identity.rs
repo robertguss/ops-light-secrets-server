@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::raw_target::{EndpointKind, EndpointRequest, Resource};
 use crate::store::{
@@ -13,6 +14,7 @@ pub const GRANT_SCHEMA_VERSION: u16 = 1;
 pub const CAPABILITY_REGISTRY_VERSION: u16 = 1;
 pub const MANAGEMENT_MOUNT: &str = "sys";
 pub const BOOTSTRAP_IDENTITY_NAME: &str = "bootstrap-management";
+pub const TOKEN_MODEL_VERSION: u16 = 1;
 const MAX_NAME: usize = 255;
 const MAX_MOUNT: usize = 128;
 const MAX_SEGMENT: usize = 1024;
@@ -39,6 +41,222 @@ pub enum GrantStatus {
     Active = 1,
     Removed = 2,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenStatus {
+    Active,
+    Revoked,
+}
+
+/// Server-authoritative token state. Bearer bytes and verifier/accessor
+/// encoding intentionally belong to U4.1 and cannot carry these fields.
+///
+/// ```compile_fail
+/// use ops_light_secrets_server::identity::TokenServerRecord;
+/// fn bake_grants(mut token: TokenServerRecord) { token.grants = Vec::new(); }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenServerRecord {
+    pub id: [u8; 16],
+    pub identity_id: [u8; 16],
+    pub issued_at_effective_seconds: u64,
+    pub expires_at_effective_seconds: u64,
+    pub issue_epoch: u64,
+    pub status: TokenStatus,
+    pub generation: u64,
+    pub display_name: String,
+}
+
+impl TokenServerRecord {
+    pub fn issue(
+        id: [u8; 16],
+        identity_id: [u8; 16],
+        issued_at_effective_seconds: u64,
+        ttl_seconds: u64,
+        issue_epoch: u64,
+        display_name: String,
+    ) -> Result<Self, TokenError> {
+        let expires_at_effective_seconds = issued_at_effective_seconds
+            .checked_add(ttl_seconds)
+            .ok_or(TokenError::Invalid)?;
+        if id == [0; 16]
+            || identity_id == [0; 16]
+            || issued_at_effective_seconds == 0
+            || ttl_seconds == 0
+            || issue_epoch == 0
+            || !valid_label(&display_name)
+        {
+            return Err(TokenError::Invalid);
+        }
+        Ok(Self {
+            id,
+            identity_id,
+            issued_at_effective_seconds,
+            expires_at_effective_seconds,
+            issue_epoch,
+            status: TokenStatus::Active,
+            generation: 1,
+            display_name,
+        })
+    }
+
+    pub fn revoke(&self, expected_generation: u64) -> Result<Self, TokenError> {
+        if self.status != TokenStatus::Active || self.generation != expected_generation {
+            return Err(TokenError::StaleGeneration);
+        }
+        let mut replacement = self.clone();
+        replacement.status = TokenStatus::Revoked;
+        replacement.generation = replacement
+            .generation
+            .checked_add(1)
+            .ok_or(TokenError::Invalid)?;
+        Ok(replacement)
+    }
+}
+
+/// Opaque credential material only. No identity, expiry, epoch, or grant API.
+/// Wrapper is non-Clone and non-Debug and clears its allocation on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct TokenBearer(Vec<u8>);
+
+impl TokenBearer {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, TokenError> {
+        if bytes.is_empty() {
+            return Err(TokenError::Invalid);
+        }
+        Ok(Self(bytes))
+    }
+
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenDenyReason {
+    CredentialNotFound,
+    Revoked,
+    Expired,
+    EpochChanged,
+    IdentityNotFound,
+    IdentityDisabled,
+    NoGrantForMount,
+    PrefixBoundaryMiss,
+    MissingCapability,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenAuthorizationDecision {
+    pub allow: bool,
+    pub identity_id: Option<[u8; 16]>,
+    pub matched_grant: Option<[u8; 16]>,
+    pub deny_reason: Option<TokenDenyReason>,
+    /// Denials are security events and must be appended before commit/reply.
+    pub audit_required: bool,
+}
+
+/// Immutable view loaded inside one storage transaction. Creating a new view
+/// after an admin commit necessarily supplies current identity and grant rows.
+pub struct TokenAuthorizationSnapshot<'a> {
+    token: Option<&'a TokenServerRecord>,
+    identity: Option<&'a IdentityRecord>,
+    grants: &'a [GrantRecord],
+    effective_seconds: u64,
+    credential_epoch: u64,
+}
+
+impl<'a> TokenAuthorizationSnapshot<'a> {
+    pub fn new(
+        token: Option<&'a TokenServerRecord>,
+        identity: Option<&'a IdentityRecord>,
+        grants: &'a [GrantRecord],
+        effective_seconds: u64,
+        credential_epoch: u64,
+    ) -> Self {
+        Self {
+            token,
+            identity,
+            grants,
+            effective_seconds,
+            credential_epoch,
+        }
+    }
+
+    pub fn authorize(&self, request: &AuthorizationRequest) -> TokenAuthorizationDecision {
+        let Some(token) = self.token else {
+            return denied(None, TokenDenyReason::CredentialNotFound);
+        };
+        if token.status == TokenStatus::Revoked {
+            return denied(Some(token.identity_id), TokenDenyReason::Revoked);
+        }
+        if self.effective_seconds >= token.expires_at_effective_seconds {
+            return denied(Some(token.identity_id), TokenDenyReason::Expired);
+        }
+        if self.credential_epoch != token.issue_epoch {
+            return denied(Some(token.identity_id), TokenDenyReason::EpochChanged);
+        }
+        let Some(identity) = self
+            .identity
+            .filter(|identity| identity.id == token.identity_id)
+        else {
+            return denied(Some(token.identity_id), TokenDenyReason::IdentityNotFound);
+        };
+        if identity.status != IdentityStatus::Active {
+            return denied(Some(token.identity_id), TokenDenyReason::IdentityDisabled);
+        }
+        let decision = authorize(
+            request,
+            self.grants
+                .iter()
+                .filter(|grant| grant.owner_identity_id == identity.id),
+        );
+        if decision.allow {
+            TokenAuthorizationDecision {
+                allow: true,
+                identity_id: Some(identity.id),
+                matched_grant: decision.matched_grant,
+                deny_reason: None,
+                audit_required: true,
+            }
+        } else {
+            denied(
+                Some(identity.id),
+                match decision.deny_reason.expect("denial always has reason") {
+                    DenyReason::NoGrantForMount => TokenDenyReason::NoGrantForMount,
+                    DenyReason::PrefixBoundaryMiss => TokenDenyReason::PrefixBoundaryMiss,
+                    DenyReason::MissingCapability => TokenDenyReason::MissingCapability,
+                },
+            )
+        }
+    }
+}
+
+fn denied(identity_id: Option<[u8; 16]>, reason: TokenDenyReason) -> TokenAuthorizationDecision {
+    TokenAuthorizationDecision {
+        allow: false,
+        identity_id,
+        matched_grant: None,
+        deny_reason: Some(reason),
+        audit_required: true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenError {
+    Invalid,
+    StaleGeneration,
+}
+
+impl fmt::Display for TokenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "token record invalid",
+            Self::StaleGeneration => "token generation stale",
+        })
+    }
+}
+
+impl std::error::Error for TokenError {}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u16)]

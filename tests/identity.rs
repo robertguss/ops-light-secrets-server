@@ -5,8 +5,9 @@ use axum::http::Method;
 use ops_light_secrets_server::identity::{
     AuthorizationRequest, BOOTSTRAP_IDENTITY_NAME, CAPABILITY_REGISTRY_VERSION, Capability,
     CapabilityBundle, DenyReason, GrantRecord, GrantScope, GrantStatus, IdentityError,
-    IdentityKind, IdentityRecord, IdentityStatus, MANAGEMENT_MOUNT, SecretAction, authorize,
-    validate_catalog,
+    IdentityKind, IdentityRecord, IdentityStatus, MANAGEMENT_MOUNT, SecretAction,
+    TOKEN_MODEL_VERSION, TokenAuthorizationSnapshot, TokenBearer, TokenDenyReason,
+    TokenServerRecord, authorize, validate_catalog,
 };
 use ops_light_secrets_server::init::KeyringInitTransaction;
 use ops_light_secrets_server::raw_target::parse_raw_target;
@@ -14,6 +15,7 @@ use ops_light_secrets_server::store::keyring::{KeyringError, KeyringOpener, Rand
 use ops_light_secrets_server::store::{
     Canonical, CodecError, FORMAT_VERSION, Lifecycle, MetaRecord, StoreId, mac_conformance,
 };
+use zeroize::Zeroize;
 
 const ACTIVE_IDENTITY: &str =
     "AGE-SECRET-KEY-1GQ9778VQXMMJVE8SK7J6VT8UJ4HDQAJUVSFCWCM02D8GEWQ72PVQ2Y5J33";
@@ -59,6 +61,117 @@ fn identity(id: u8, name: &str) -> IdentityRecord {
         status: IdentityStatus::Active,
         generation: 1,
     }
+}
+
+fn read_request(path: &str) -> AuthorizationRequest {
+    let endpoint = parse_raw_target(&Method::GET, path).unwrap();
+    AuthorizationRequest::secret(&endpoint, SecretAction::Read).unwrap()
+}
+
+#[test]
+fn token_ttl_revocation_identity_and_epoch_are_server_authoritative() {
+    assert_eq!(TOKEN_MODEL_VERSION, 1);
+    let identity = identity(2, "alice");
+    let grant = grant(
+        7,
+        2,
+        "kv",
+        GrantScope::Subtree,
+        &["apps"],
+        &[Capability::SecretReadCurrent],
+    );
+    let request = read_request("/v1/kv/data/apps/canvas/key");
+    let token =
+        TokenServerRecord::issue([9; 16], identity.id, 100, 100, 4, "deploy".into()).unwrap();
+
+    let at = |effective, epoch, token: &TokenServerRecord, identity: &IdentityRecord| {
+        TokenAuthorizationSnapshot::new(
+            Some(token),
+            Some(identity),
+            std::slice::from_ref(&grant),
+            effective,
+            epoch,
+        )
+        .authorize(&request)
+    };
+    assert!(at(199, 4, &token, &identity).allow);
+    for effective in [200, 201] {
+        let denied = at(effective, 4, &token, &identity);
+        assert_eq!(denied.deny_reason, Some(TokenDenyReason::Expired));
+        assert!(denied.audit_required);
+    }
+    let revoked = token.revoke(1).unwrap();
+    assert_eq!(
+        at(150, 4, &revoked, &identity).deny_reason,
+        Some(TokenDenyReason::Revoked)
+    );
+    let retired = identity.retire(1).unwrap();
+    assert_eq!(
+        at(150, 4, &token, &retired).deny_reason,
+        Some(TokenDenyReason::IdentityDisabled)
+    );
+    assert_eq!(
+        at(150, 5, &token, &identity).deny_reason,
+        Some(TokenDenyReason::EpochChanged)
+    );
+}
+
+#[test]
+fn transaction_snapshots_prove_next_request_observes_grant_reduction() {
+    let identity = identity(2, "alice");
+    let broad = grant(
+        7,
+        2,
+        "kv",
+        GrantScope::Subtree,
+        &["apps"],
+        &[Capability::SecretReadCurrent],
+    );
+    let reduced = grant(
+        8,
+        2,
+        "kv",
+        GrantScope::Subtree,
+        &["apps", "other"],
+        &[Capability::SecretReadCurrent],
+    );
+    let token =
+        TokenServerRecord::issue([9; 16], identity.id, 100, 100, 4, "deploy".into()).unwrap();
+    let request = read_request("/v1/kv/data/apps/canvas/key");
+    let broad_rows = [broad];
+    let reduced_rows = [reduced];
+
+    let before_admin_commit =
+        TokenAuthorizationSnapshot::new(Some(&token), Some(&identity), &broad_rows, 150, 4);
+    let after_admin_commit =
+        TokenAuthorizationSnapshot::new(Some(&token), Some(&identity), &reduced_rows, 150, 4);
+
+    assert!(before_admin_commit.authorize(&request).allow);
+    let next = after_admin_commit.authorize(&request);
+    assert!(!next.allow);
+    assert_eq!(next.deny_reason, Some(TokenDenyReason::PrefixBoundaryMiss));
+    assert!(next.audit_required);
+}
+
+#[test]
+fn committed_orphan_remains_discoverable_revocable_and_bearer_cleans_up() {
+    let identity = identity(2, "alice");
+    let committed =
+        TokenServerRecord::issue([9; 16], identity.id, 100, 100, 4, "orphan".into()).unwrap();
+    let mut bearer = TokenBearer::new(b"opaque-token-canary".to_vec()).unwrap();
+    assert_eq!(bearer.expose(), b"opaque-token-canary");
+    bearer.zeroize();
+    assert!(bearer.expose().is_empty());
+
+    assert_eq!(committed.id, [9; 16]);
+    assert_eq!(committed.revoke(1).unwrap().generation, 2);
+    let missing = TokenAuthorizationSnapshot::new(None, None, &[], 150, 4)
+        .authorize(&read_request("/v1/kv/data/apps/canvas/key"));
+    assert_eq!(
+        missing.deny_reason,
+        Some(TokenDenyReason::CredentialNotFound)
+    );
+    assert!(missing.audit_required);
 }
 
 #[test]

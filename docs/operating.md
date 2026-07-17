@@ -242,6 +242,21 @@ max events; equality remains fresh. Mirror detached checkpoints off-host with
 operator-owned rsync, cron, or systemd path units. Server sends no webhook or
 object-store traffic.
 
+## Capability-thin tokens
+
+Bearer value is opaque credential material only. Identity, effective-time
+expiry, revocation status, issue epoch, and public display metadata live in
+server records; grants never live in bearer or token record. Authorization
+loads token record, current identity status, and current grants within one
+storage transaction snapshot. Therefore grant removal, identity retirement,
+credential revocation, and credential-epoch replacement affect every request
+whose transaction begins after admin commit; an already-linearized request may
+finish. Expiry denies at `effective_time >= expires_at`, using clock model's
+non-regressing effective time rather than raw wall time. All denial decisions
+are marked audit-required. If client disconnects after issuance commit, durable
+record remains discoverable and revocable; server does not pretend commit
+rolled back.
+
 ## Encrypted record format
 
 Encrypted records use the fixed, NCC-audited RustCrypto XChaCha20-Poly1305
