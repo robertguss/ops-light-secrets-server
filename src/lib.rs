@@ -25,6 +25,7 @@ pub mod proxy;
 pub mod rate_limit;
 pub mod raw_target;
 pub mod reconciliation;
+pub mod recovery_fork;
 pub mod reencrypt;
 pub mod restore;
 pub mod rotation;
