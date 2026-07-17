@@ -8,5 +8,6 @@ pub mod input_hygiene;
 pub mod proxy;
 pub mod raw_target;
 pub mod startup;
+pub mod storage_executor;
 pub mod store;
 pub mod transport;

@@ -67,6 +67,21 @@
       "verification": "Submit U1.5 application, idle, and clean-shutdown WatermarkCommand values through U6.2's single writer; atomically persist each accepted mark with state and enforce the 100 ms reserved-admission deadline."
     },
     {
+      "contract": "storage.writer_coordinator_adapter",
+      "owner": "olss-charter-qul.4.2",
+      "verification": "Implement U6.2's typed state-plus-audit backend behind U6.1 StorageBackend so the named writer thread exclusively owns every redb write transaction and persists overload aggregates atomically."
+    },
+    {
+      "contract": "storage.audit_snapshot_adapter",
+      "owner": "olss-charter-qul.4.7",
+      "verification": "Back U6.7 audit query/export with U6.1 SnapshotService cursors, enforcing its concurrency, deadline, cancellation, buffered-byte, and no-raw-handle boundaries against real redb MVCC reads."
+    },
+    {
+      "contract": "storage.backup_snapshot_adapter",
+      "owner": "olss-charter-qul.11.2",
+      "verification": "Back U10.2 logical backup with U6.1 SnapshotService cursors and prove consistent real-redb MVCC reads release pinned pages on cancellation, expiration, and completion."
+    },
+    {
       "contract": "clock.watermark_audit_event",
       "owner": "olss-charter-qul.4.3",
       "verification": "Commit U6.3's bounded canonical clock-watermark and boot-override events in the same transaction as each accepted high-water update."

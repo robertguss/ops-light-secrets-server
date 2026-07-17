@@ -27,6 +27,37 @@ fail-closed until U8.3 supplies the full credential-epoch/replacement-credential
 primitive; the command never performs a mark-only repair that could lock out the
 operator.
 
+## Storage executor
+
+All synchronous writes run on the single named `olss-storage-writer` OS thread.
+The default pre-decrypt data lane holds 64 commands. The reserved recovery lane
+holds 16 commands and is split into bounded urgent and ordinary sublanes;
+watermarks, reserve status/release/recreate, shutdown, identity disable, grant
+reduction, and credential revocation are urgent. Recovery receives at most three
+consecutive dispatches while data is waiting, so neither side can starve the
+other. Reserve work runs synchronously on the sole writer: once release begins,
+its two-transaction backend budget cannot be consumed by unrelated commands.
+
+Saturation returns `storage_overloaded` before payload decryption. Rejections
+enter at most 64 in-memory aggregate buckets; further distinct buckets collapse
+into one catch-all count. The next successful transaction on either lane commits
+the snapshot of those counters. A failed transaction requeues them. Counts still
+pending when the process crashes are lost; this bounded, explicitly accepted R13
+loss window lasts only until the next successful command. v0.1 batching is
+disabled.
+
+Cancellation while accepted prevents execution. Once started, a command commits
+or aborts according to the transaction even if its receiver disappears; an
+undeliverable successful response is zeroized. Worker panic and a missed
+clock-watermark deadline make readiness fail closed.
+
+Audit query and backup use the internal snapshot service rather than exporting
+raw database handles. It defaults to two named workers, eight queued requests, a
+30-second cursor lifetime, and a 1 MiB buffered-result ceiling. Cursors receive a
+deadline and remaining-byte budget on every chunk; expiration, cancellation, or
+overflow drops the cursor promptly, releasing pinned pages. Snapshot buffers
+have redacted debug output and zeroize on drop.
+
 ## One-time initialization and credential custody
 
 `init` takes an exclusive owner-only data-directory lock. It refuses foreign
