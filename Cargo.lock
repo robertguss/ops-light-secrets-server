@@ -1534,6 +1534,7 @@ dependencies = [
  "age",
  "axum",
  "axum-server",
+ "bech32",
  "blake3",
  "clap",
  "getrandom 0.3.4",

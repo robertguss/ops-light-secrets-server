@@ -12,11 +12,6 @@
       "verification": "Implement U1.2's staged transaction with store id, schema, lifecycle stamp and one atomic authoritative commit; distinguish uncommitted from initialized store.redb during retry."
     },
     {
-      "contract": "startup.init_keyring_self_test",
-      "owner": "olss-charter-qul.3.3",
-      "verification": "Derive the supplied active identity recipient, validate an optional distinct recovery recipient, encrypt and decrypt-self-test the fixed-purpose keyring before returning U1.2's PreparedInit."
-    },
-    {
       "contract": "startup.init_first_identity_grant",
       "owner": "olss-charter-qul.5.2",
       "verification": "Stage the first management identity plus finite admin-bundle grant in U1.2's single transaction and activate the init CLI only after the complete backend is assembled."
@@ -45,16 +40,6 @@
       "contract": "startup.store_schema_lifecycle_marker",
       "owner": "olss-charter-qul.3.2",
       "verification": "Wire redb meta schema/lifecycle/operation-marker reads into StartupSnapshot; run old/new/no-path, marker agreement, pending-anchor and no-write pre-bind cases against real bytes."
-    },
-    {
-      "contract": "startup.keyring_store_id",
-      "owner": "olss-charter-qul.3.3",
-      "verification": "Decrypt keyring once, compare embedded and clear store ids, and prove mismatch refuses before listener bind."
-    },
-    {
-      "contract": "startup.secret_source_consumption",
-      "owner": "olss-charter-qul.3.3",
-      "verification": "Consume stdin, inherited-FD, runtime systemd-credential, and TTY age identities through the real U2.3 keyring-open path; prove readiness only after one successful decrypt and zeroization."
     },
     {
       "contract": "clock.repair_epoch_credential",

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::env;
 use std::fmt;
 use std::io::{self, Read};
-use std::os::fd::BorrowedFd;
+use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use zeroize::Zeroizing;
@@ -58,6 +58,10 @@ impl SecretBytes {
     pub fn expose(&self) -> &[u8] {
         &self.0
     }
+
+    pub(crate) fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
 }
 
 impl fmt::Debug for SecretBytes {
@@ -102,10 +106,12 @@ impl SecretInput for SystemSecretInput {
     fn read_file_descriptor(&mut self, fd: u32) -> io::Result<Vec<u8>> {
         let raw = i32::try_from(fd)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "descriptor out of range"))?;
-        // SAFETY: the typed source parser accepts inherited descriptors only;
-        // borrowing is non-owning and try_clone_to_owned creates our read handle.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(raw) };
-        let mut file = std::fs::File::from(borrowed.try_clone_to_owned()?);
+        let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+        if duplicate < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful F_DUPFD_CLOEXEC returns a new descriptor owned by us.
+        let mut file = unsafe { std::fs::File::from_raw_fd(duplicate) };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
@@ -579,6 +585,12 @@ mod tests {
         let mut input = SystemSecretInput::from_credentials_directory(None);
         let value = source.read("secrets.age_identity", &mut input).unwrap();
         assert_eq!(value.expose(), b"inherited-fd-value");
+
+        assert!(
+            SecretSource::FileDescriptor(999_999)
+                .read("secrets.age_identity", &mut input)
+                .is_err()
+        );
     }
 
     #[test]

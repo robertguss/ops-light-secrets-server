@@ -17,11 +17,60 @@ use tokio::net::TcpListener;
 use crate::clock::{
     BootOverrideAudit, BootOverrideAuditError, ClockError, ClockMonitor, ClockReading,
 };
-use crate::config::Config;
+use crate::config::{Config, SecretInput, SecretSource};
 use crate::proxy::is_loopback;
+use crate::store::keyring::{Keyring, KeyringError, KeyringOpener, parse_identity};
+use crate::store::{Store, StoreError};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub const DRAIN_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum KeyringBootError {
+    IdentitySource,
+    Store(StoreError),
+    Keyring(KeyringError),
+}
+
+impl fmt::Display for KeyringBootError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::IdentitySource => "startup age identity source failed",
+            Self::Store(_) => "startup keyring store read failed",
+            Self::Keyring(error) => match error {
+                KeyringError::StoreMismatch => "startup keyring store id mismatch",
+                KeyringError::AlreadyOpened => "startup keyring open already attempted",
+                _ => "startup keyring open failed",
+            },
+        })
+    }
+}
+
+impl std::error::Error for KeyringBootError {}
+
+pub fn open_store_keyring<I: SecretInput>(
+    store: &Store,
+    source: &SecretSource,
+    input: &mut I,
+    opener: &KeyringOpener,
+) -> Result<Keyring, KeyringBootError> {
+    let clear_store_id = store.meta().map_err(KeyringBootError::Store)?.store_id;
+    let envelope = store
+        .keyring()
+        .map_err(KeyringBootError::Store)?
+        .ok_or(KeyringBootError::Store(StoreError::Uninitialized))?;
+    let metadata = store
+        .keyring_metadata()
+        .map_err(KeyringBootError::Store)?
+        .ok_or(KeyringBootError::Store(StoreError::Uninitialized))?;
+    let bytes = source
+        .read("secrets.age_identity", input)
+        .map_err(|_| KeyringBootError::IdentitySource)?;
+    let identity = parse_identity(bytes.into_zeroizing()).map_err(KeyringBootError::Keyring)?;
+    opener
+        .open(clear_store_id, &envelope, &metadata, &identity)
+        .map_err(KeyringBootError::Keyring)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryState {

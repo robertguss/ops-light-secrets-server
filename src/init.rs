@@ -12,7 +12,14 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+use crate::config::{SecretInput, SecretSource};
 use crate::startup::{DataDirectoryLock, DirectoryState, inspect_data_directory};
+use crate::store::keyring::parse_identity;
+use crate::store::keyring::{
+    KeyringError, PreparedKeyring, RandomSource, prepare_keyring_for_init,
+};
+use crate::store::{MetaRecord, Store, StoreError};
+use age::x25519;
 
 pub const MIN_BOOTSTRAP_TTL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_BOOTSTRAP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -186,6 +193,69 @@ pub struct PreparedInit<T> {
     pub credential: Zeroizing<Vec<u8>>,
     pub expires_at_unix: u64,
     pub transaction: T,
+}
+
+pub struct KeyringInitTransaction {
+    meta: MetaRecord,
+    prepared: PreparedKeyring,
+}
+
+impl KeyringInitTransaction {
+    pub fn prepare(
+        meta: MetaRecord,
+        active_identity: &x25519::Identity,
+        recovery_recipient: Option<&x25519::Recipient>,
+        random: &mut impl RandomSource,
+    ) -> Result<Self, KeyringError> {
+        let prepared = prepare_keyring_for_init(
+            meta.store_id,
+            1,
+            active_identity,
+            recovery_recipient,
+            random,
+        )?;
+        Ok(Self { meta, prepared })
+    }
+
+    pub fn commit(self, path: impl AsRef<Path>) -> Result<Store, StoreError> {
+        Store::create_with_keyring(path, &self.meta, &self.prepared)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyringInitSourceError {
+    IdentitySource,
+    Keyring(KeyringError),
+}
+
+impl fmt::Display for KeyringInitSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::IdentitySource => "init age identity source failed",
+            Self::Keyring(_) => "init keyring preparation failed",
+        })
+    }
+}
+
+impl std::error::Error for KeyringInitSourceError {}
+
+/// Prepares the keyring portion of U1.2's outer staged transaction. No store
+/// bytes are created until `KeyringInitTransaction::commit` joins the atomic
+/// redb creation transaction.
+pub fn prepare_keyring_init_from_source<I: SecretInput>(
+    meta: MetaRecord,
+    active_source: &SecretSource,
+    input: &mut I,
+    recovery_recipient: Option<&x25519::Recipient>,
+    random: &mut impl RandomSource,
+) -> Result<KeyringInitTransaction, KeyringInitSourceError> {
+    let bytes = active_source
+        .read("secrets.age_identity", input)
+        .map_err(|_| KeyringInitSourceError::IdentitySource)?;
+    let identity =
+        parse_identity(bytes.into_zeroizing()).map_err(KeyringInitSourceError::Keyring)?;
+    KeyringInitTransaction::prepare(meta, &identity, recovery_recipient, random)
+        .map_err(KeyringInitSourceError::Keyring)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

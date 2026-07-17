@@ -1070,6 +1070,9 @@ impl Store {
         if meta.format_version != FORMAT_VERSION {
             return Err(StoreError::UnsupportedFormat(meta.format_version));
         }
+        if prepared.store_id != meta.store_id {
+            return Err(StoreError::Integrity);
+        }
         let database = Database::create(path).map_err(|_| StoreError::Database)?;
         let write = database.begin_write().map_err(|_| StoreError::Database)?;
         {

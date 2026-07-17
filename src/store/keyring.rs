@@ -5,9 +5,12 @@ use super::{KeyringEnvelope, Sealed, StoreId};
 use age::x25519;
 use age::{Encryptor, Recipient};
 use secrecy::{ExposeSecret, SecretBox};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
+use std::os::fd::AsFd;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
@@ -77,7 +80,7 @@ impl RecipientSet {
         self,
         active: &'a x25519::Recipient,
         recovery: Option<&'a x25519::Recipient>,
-    ) -> Vec<&'a dyn Recipient> {
+    ) -> Vec<(RecipientFingerprint, &'a dyn Recipient)> {
         let mut recipients: Vec<(RecipientFingerprint, &'a dyn Recipient)> =
             vec![(self.active, active)];
         if let (Some(fingerprint), Some(recipient)) = (self.recovery, recovery) {
@@ -85,9 +88,6 @@ impl RecipientSet {
         }
         recipients.sort_by_key(|(fingerprint, _)| *fingerprint);
         recipients
-            .into_iter()
-            .map(|(_, recipient)| recipient)
-            .collect()
     }
 }
 
@@ -207,9 +207,13 @@ impl Keyring {
             return Err(KeyringError::RecipientSet);
         }
         let plaintext = Zeroizing::new(self.encode_plaintext()?);
-        let recipients = self.recipients.ordered(active, recovery);
-        let encryptor = Encryptor::with_recipients(recipients.into_iter())
-            .map_err(|_| KeyringError::Encrypt)?;
+        let recipients = self
+            .recipients
+            .ordered(active, recovery)
+            .into_iter()
+            .map(|(_, recipient)| recipient);
+        let encryptor =
+            Encryptor::with_recipients(recipients).map_err(|_| KeyringError::Encrypt)?;
         let mut ciphertext = Vec::new();
         let mut writer = encryptor
             .wrap_output(&mut ciphertext)
@@ -411,6 +415,7 @@ impl Canonical for KeyringMetadata {
 }
 
 pub struct PreparedKeyring {
+    pub store_id: StoreId,
     pub envelope: KeyringEnvelope,
     pub metadata: Sealed<KeyringMetadata>,
 }
@@ -438,7 +443,29 @@ pub fn prepare_keyring(
         store_id,
         b"current",
     )?;
-    Ok(PreparedKeyring { envelope, metadata })
+    Ok(PreparedKeyring {
+        store_id,
+        envelope,
+        metadata,
+    })
+}
+
+pub fn prepare_keyring_for_init(
+    store_id: StoreId,
+    generation: u64,
+    active_identity: &x25519::Identity,
+    recovery: Option<&x25519::Recipient>,
+    random: &mut impl RandomSource,
+) -> Result<PreparedKeyring, KeyringError> {
+    let active = active_identity.to_public();
+    let prepared = prepare_keyring(store_id, generation, &active, recovery, random)?;
+    KeyringOpener::default().open(
+        store_id,
+        &prepared.envelope,
+        &prepared.metadata,
+        active_identity,
+    )?;
+    Ok(prepared)
 }
 
 pub struct KeyringOpener {
@@ -504,6 +531,118 @@ pub fn parse_identity(bytes: Zeroizing<Vec<u8>>) -> Result<x25519::Identity, Key
     let value = std::str::from_utf8(&bytes).map_err(|_| KeyringError::Identity)?;
     value.trim().parse().map_err(|_| KeyringError::Identity)
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityPurpose {
+    Active,
+    Recovery,
+    AuditExport,
+}
+
+impl IdentityPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Recovery => "recovery",
+            Self::AuditExport => "audit-export",
+        }
+    }
+}
+
+impl FromStr for IdentityPurpose {
+    type Err = AgeIdentityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "active" => Ok(Self::Active),
+            "recovery" => Ok(Self::Recovery),
+            "audit-export" => Ok(Self::AuditExport),
+            _ => Err(AgeIdentityError::Purpose),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AgeIdentityMetadata {
+    pub purpose: &'static str,
+    pub algorithm: &'static str,
+    pub recipient: String,
+    pub fingerprint: String,
+    pub sink_outcome_id: String,
+}
+
+pub fn generate_age_identity<W: Write + AsFd>(
+    purpose: IdentityPurpose,
+    sink: &mut W,
+    random: &mut impl RandomSource,
+) -> Result<AgeIdentityMetadata, AgeIdentityError> {
+    crate::init::validate_secret_sink(sink.as_fd()).map_err(|_| AgeIdentityError::UnsafeSink)?;
+
+    let mut seed = Zeroizing::new([0_u8; 32]);
+    random
+        .fill(seed.as_mut())
+        .map_err(|_| AgeIdentityError::Random)?;
+    let hrp = bech32::Hrp::parse("age-secret-key-").map_err(|_| AgeIdentityError::Encoding)?;
+    let encoded = bech32::encode::<bech32::Bech32>(hrp, seed.as_ref())
+        .map_err(|_| AgeIdentityError::Encoding)?;
+    let encoded = Zeroizing::new(encoded.to_uppercase());
+    let identity = x25519::Identity::from_str(&encoded).map_err(|_| AgeIdentityError::Encoding)?;
+    let recipient = identity.to_public();
+    let fingerprint = RecipientFingerprint::of(&recipient);
+    let fingerprint = encode_hex(&fingerprint.0);
+    let mut outcome = blake3::Hasher::new();
+    outcome.update(b"ops-light-secrets-server.age-identity-sink.v1\0");
+    outcome.update(purpose.as_str().as_bytes());
+    outcome.update(fingerprint.as_bytes());
+    let sink_outcome_id = encode_hex(&outcome.finalize().as_bytes()[..8]);
+
+    let private = identity.to_string();
+    sink.write_all(private.expose_secret().as_bytes())
+        .and_then(|()| sink.write_all(b"\n"))
+        .and_then(|()| sink.flush())
+        .map_err(|_| AgeIdentityError::Disclosure)?;
+
+    Ok(AgeIdentityMetadata {
+        purpose: purpose.as_str(),
+        algorithm: "age-x25519",
+        recipient: recipient.to_string(),
+        fingerprint,
+        sink_outcome_id,
+    })
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgeIdentityError {
+    Purpose,
+    UnsafeSink,
+    Random,
+    Encoding,
+    Disclosure,
+}
+
+impl fmt::Display for AgeIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Purpose => "age identity purpose invalid",
+            Self::UnsafeSink => "age identity private sink unsafe",
+            Self::Random => "age identity random source failed",
+            Self::Encoding => "age identity encoding failed",
+            Self::Disclosure => "age identity private disclosure failed",
+        })
+    }
+}
+
+impl std::error::Error for AgeIdentityError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyringError {
@@ -787,5 +926,65 @@ mod tests {
         let active_plain = Zeroizing::new(age::decrypt(&active, &envelope.0).unwrap());
         let recovery_plain = Zeroizing::new(age::decrypt(&recovery, &envelope.0).unwrap());
         assert_eq!(&*active_plain, &*recovery_plain);
+    }
+
+    #[test]
+    fn recipient_stanzas_use_canonical_fingerprint_order() {
+        let active: x25519::Identity = IDENTITY.parse().unwrap();
+        let recovery = x25519::Identity::generate();
+        let active_recipient = active.to_public();
+        let recovery_recipient = recovery.to_public();
+        let set = RecipientSet::new(&active_recipient, Some(&recovery_recipient)).unwrap();
+        let actual = set
+            .ordered(&active_recipient, Some(&recovery_recipient))
+            .into_iter()
+            .map(|(fingerprint, _)| fingerprint)
+            .collect::<Vec<_>>();
+        let mut expected = vec![set.active, set.recovery.unwrap()];
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn two_final_slot_contenders_cannot_exceed_capacity() {
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let (_, mut keyring) = generated();
+        let mut random = Counter(20);
+        while keyring.audit_payload_generations() < 31 {
+            let generation = keyring.generation();
+            keyring
+                .append_audit_payload_key(generation, &mut random)
+                .unwrap();
+        }
+        let expected_generation = keyring.generation();
+        let shared = Arc::new(Mutex::new(keyring));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for seed in [100, 150] {
+            let shared = Arc::clone(&shared);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .append_audit_payload_key(expected_generation, &mut Counter(seed))
+            }));
+        }
+        barrier.wait();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| **result == Err(KeyringError::GenerationMismatch))
+                .count(),
+            1
+        );
+        assert_eq!(shared.lock().unwrap().audit_payload_generations(), 32);
     }
 }

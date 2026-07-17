@@ -28,6 +28,7 @@ fn init_help_freezes_ttl_and_approved_sink_flags() {
     assert!(output.status.success());
     assert!(stdout.contains("--bootstrap-ttl"));
     assert!(stdout.contains("--credential-output-fd"));
+    assert!(stdout.contains("--recovery-recipient"));
     assert!(stdout.contains("5m minimum, 7d maximum"));
     assert!(stdout.contains("TTY, pipe, socket, or anonymous memory FD"));
 }

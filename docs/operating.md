@@ -87,6 +87,44 @@ credential operation owned by U8.3. It accepts the store-unwrapping identity,
 bumps the credential epoch, and uses the same disclosure-before-commit sink
 protocol. There is no network bootstrap route.
 
+## Age identity and keyring custody
+
+Generate each custody role separately. The command is stateless and does not
+need a configuration file or an initialized store:
+
+```text
+ops-light-secrets-server key age-identity generate \
+  --purpose active \
+  --private-output-fd 3 \
+  --output json 3>PRIVATE-SINK
+```
+
+Use `active`, `recovery`, and `audit-export` in separate invocations. The
+private identity is written only to the pre-opened TTY, pipe, socket, or
+anonymous-memory descriptor. Standard output contains only purpose, algorithm,
+public recipient, fingerprint, and an opaque sink outcome ID. Persistent
+plaintext files, argv, environment variables, application-managed sidecars,
+and logs are forbidden custody locations. A systemd credentials directory is
+accepted only as its runtime/tmpfs delivery endpoint; persistent provisioning
+must use `LoadCredentialEncrypted=` or an equivalent encrypted-at-rest path.
+Success metadata is the final local acknowledgment and is emitted only after
+the private sink flushes. A short write, flush failure, cancellation, or lost
+final reply never creates store state. A retry generates a fresh identity; the
+custody process must discard or replace any partial or complete orphan.
+
+The store contains one opaque age v0.12 envelope addressed to the active
+recipient and, optionally, one distinct recovery recipient. Boot reads the
+typed identity source, decrypts the envelope once, compares its embedded store
+ID with the clear store ID before accepting other records, verifies the clear
+keyring-metadata record, then drops the identity input. Wrong, absent, duplicate,
+or transplanted material fails readiness without logging private bytes.
+
+Audit-payload key generations are retained because v0.1 retains every audit
+event. Capacity is 32 generations and operator warning begins at 24. At the
+warning, plan an authenticated archive/prune operation plus a forward storage
+migration in a post-v0.1 release. v0.1 does not silently retire an audit key,
+expand the bound, or claim unbounded rotation.
+
 ## Local control socket
 
 The management plane is a Unix socket owned by the service UID. Its parent
