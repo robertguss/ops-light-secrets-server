@@ -2,8 +2,9 @@ use super::keyring::{KeyId, KeyringError, RandomSource};
 use super::{Canonical, CodecError, LogicalPath, StoreId};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use secrecy::SecretBox;
+use secrecy::{ExposeSecret, SecretBox};
 use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const RECORD_FORMAT_VERSION: u16 = 1;
 pub const CIPHER_SUITE_XCHACHA20_POLY1305: u16 = 1;
@@ -14,6 +15,45 @@ const MAX_PATH_SEGMENTS: usize = 256;
 const MAX_LOGICAL_ID: usize = 256;
 const MAX_HEADER: usize = 4096;
 const MAX_CIPHERTEXT: usize = 8 * 1024 * 1024;
+
+/// Owned server plaintext with no `Clone` or `Debug` implementation.
+///
+/// ```compile_fail
+/// use ops_light_secrets_server::store::PlaintextSecret;
+/// let secret = PlaintextSecret::new(vec![1]);
+/// let _copy = secret.clone();
+/// ```
+///
+/// ```compile_fail
+/// use ops_light_secrets_server::store::PlaintextSecret;
+/// let secret = PlaintextSecret::new(vec![1]);
+/// println!("{secret:?}");
+/// ```
+pub struct PlaintextSecret(SecretBox<Vec<u8>>);
+
+impl PlaintextSecret {
+    pub fn new(value: Vec<u8>) -> Self {
+        Self(SecretBox::new(Box::new(value)))
+    }
+
+    pub(crate) fn from_secret_box(value: SecretBox<Vec<u8>>) -> Self {
+        Self(value)
+    }
+}
+
+impl ExposeSecret<Vec<u8>> for PlaintextSecret {
+    fn expose_secret(&self) -> &Vec<u8> {
+        self.0.expose_secret()
+    }
+}
+
+impl Zeroize for PlaintextSecret {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PlaintextSecret {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -67,6 +107,14 @@ impl RecordBinding {
 
     pub fn domain(&self) -> RecordDomain {
         self.domain
+    }
+
+    pub fn version(&self) -> Option<u64> {
+        self.version
+    }
+
+    pub fn created_unix_milliseconds(&self) -> u64 {
+        self.created_unix_milliseconds
     }
 
     fn validate(&self) -> Result<(), RecordCryptoError> {

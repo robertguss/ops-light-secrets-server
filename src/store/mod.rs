@@ -6,8 +6,8 @@ mod integrity;
 pub mod keyring;
 
 pub use aead::{
-    CIPHER_SUITE_XCHACHA20_POLY1305, EncryptedRecord, RECORD_FORMAT_VERSION, RecordBinding,
-    RecordCryptoError, RecordDomain, RecordHeader,
+    CIPHER_SUITE_XCHACHA20_POLY1305, EncryptedRecord, PlaintextSecret, RECORD_FORMAT_VERSION,
+    RecordBinding, RecordCryptoError, RecordDomain, RecordHeader,
 };
 pub use codec::{Canonical, CodecError};
 pub use integrity::{
@@ -1119,6 +1119,41 @@ pub enum StoreError {
     Integrity,
 }
 
+#[derive(Debug)]
+pub enum SecretDataError {
+    Store(StoreError),
+    Crypto(RecordCryptoError),
+}
+
+impl fmt::Display for SecretDataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Store(_) => "secret storage operation failed",
+            Self::Crypto(_) => "secret cryptographic operation failed",
+        })
+    }
+}
+
+impl std::error::Error for SecretDataError {}
+
+impl From<StoreError> for SecretDataError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<RecordCryptoError> for SecretDataError {
+    fn from(error: RecordCryptoError) -> Self {
+        Self::Crypto(error)
+    }
+}
+
+impl From<CodecError> for SecretDataError {
+    fn from(error: CodecError) -> Self {
+        Self::Store(StoreError::Codec(error))
+    }
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -1127,7 +1162,7 @@ impl fmt::Display for StoreError {
             Self::Uninitialized => "store is uninitialized",
             Self::AlreadyInitialized => "store is already initialized",
             Self::UnsupportedFormat(_) => "store format is unsupported",
-            Self::Integrity => "store clear-record integrity failed",
+            Self::Integrity => "store integrity verification failed",
         })
     }
 }
@@ -1460,6 +1495,136 @@ impl Store {
             return Err(StoreError::Integrity);
         }
         Ok(Some(value))
+    }
+
+    pub(crate) fn commit_encrypted_secret_append(
+        &self,
+        path: &LogicalPath,
+        expected: Option<&Sealed<SecretMetadata>>,
+        replacement: &Sealed<SecretMetadata>,
+        record: &EncryptedRecord,
+        mac_key: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        let metadata_key = path.encode()?;
+        let store_id = self.meta()?.store_id;
+        replacement.verify(mac_key, store_id, &metadata_key)?;
+        let version = replacement.value.versions.current_version;
+        if version == 0
+            || replacement.generation != replacement.value.versions.generation
+            || record.header().store_id() != store_id
+            || record.header().binding().version() != Some(version)
+        {
+            return Err(StoreError::Integrity);
+        }
+        match expected {
+            None if replacement.generation != 1 || version != 1 => {
+                return Err(StoreError::Integrity);
+            }
+            Some(previous)
+                if replacement.generation
+                    != previous
+                        .generation
+                        .checked_add(1)
+                        .ok_or(StoreError::Integrity)?
+                    || version
+                        != previous
+                            .value
+                            .versions
+                            .max_version
+                            .checked_add(1)
+                            .ok_or(StoreError::Integrity)? =>
+            {
+                return Err(StoreError::Integrity);
+            }
+            _ => {}
+        }
+        let secret_key = SecretKey {
+            path: path.clone(),
+            version,
+        }
+        .encode()?;
+        let expected_bytes = expected.map(|value| value.encode()).transpose()?;
+        let replacement_bytes = replacement.encode()?;
+        let record_bytes = record.encode()?;
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        {
+            let mut metadata_table = write
+                .open_table(SECRET_META)
+                .map_err(|_| StoreError::Database)?;
+            let current = metadata_table
+                .get(metadata_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .map(|value| value.value().to_vec());
+            if current != expected_bytes {
+                return Err(StoreError::Integrity);
+            }
+            let mut secrets = write
+                .open_table(SECRETS)
+                .map_err(|_| StoreError::Database)?;
+            if secrets
+                .get(secret_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            metadata_table
+                .insert(metadata_key.as_slice(), replacement_bytes.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            secrets
+                .insert(secret_key.as_slice(), record_bytes.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        write.commit().map_err(|_| StoreError::Database)
+    }
+
+    pub(crate) fn encrypted_secret_version(
+        &self,
+        path: &LogicalPath,
+        requested: Option<u64>,
+        mac_key: &[u8; 32],
+    ) -> Result<Option<(u64, EncryptedRecord)>, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::Data)?;
+        let Some(metadata) = self.secret_metadata(path, mac_key)? else {
+            return Ok(None);
+        };
+        let selected = requested.unwrap_or(metadata.value.versions.current_version);
+        if selected == 0 || selected > metadata.value.versions.max_version {
+            return Ok(None);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let table = read.open_table(SECRETS).map_err(|_| StoreError::Database)?;
+        let mut rows = BTreeMap::new();
+        let iterator = table.iter().map_err(|_| StoreError::Database)?;
+        for entry in iterator {
+            let (key, value) = entry.map_err(|_| StoreError::Database)?;
+            let key = SecretKey::decode(key.value())?;
+            if key.path == *path
+                && (key.version > metadata.value.versions.max_version
+                    || rows
+                        .insert(key.version, EncryptedRecord::decode(value.value())?)
+                        .is_some())
+            {
+                self.integrity
+                    .trip_table("secrets", &path.encode()?, mac_key);
+                return Err(StoreError::Integrity);
+            }
+        }
+        for (version, state) in &metadata.value.versions.states {
+            if *state != VersionState::Destroyed && !rows.contains_key(version) {
+                self.integrity
+                    .trip_table("secrets", &path.encode()?, mac_key);
+                return Err(StoreError::Integrity);
+            }
+        }
+        Ok(rows.remove(&selected).map(|record| (selected, record)))
     }
 
     pub fn put_secret(&self, key: &SecretKey, record: &SecretRecord) -> Result<(), StoreError> {

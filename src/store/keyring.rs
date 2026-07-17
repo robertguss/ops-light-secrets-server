@@ -2,9 +2,10 @@
 
 use super::codec::{Canonical, CodecError, Decoder, Encoder};
 use super::{
-    ClearRecord, EncryptedRecord, KeyringEnvelope, MetaRecord, ProvisionalMetaRecord,
-    RecordBinding, RecordClass, RecordCryptoError, RecordDomain, Sealed, Store, StoreError,
-    StoreId,
+    ClearRecord, EncryptedRecord, KeyringEnvelope, LogicalPath, METADATA_SCHEMA_VERSION,
+    MetaRecord, PlaintextSecret, ProvisionalMetaRecord, RecordBinding, RecordClass,
+    RecordCryptoError, RecordDomain, RotationState, Sealed, SecretDataError, SecretMetadata, Store,
+    StoreError, StoreId, VersionSetSummary,
 };
 use crate::clock::WatermarkCommand;
 use age::x25519;
@@ -118,6 +119,7 @@ pub struct Keyring {
     metadata_integrity: PurposeKey,
     audit_payload: Vec<PurposeKey>,
     audit_index: PurposeKey,
+    record_decrypt_attempts: AtomicUsize,
 }
 
 impl Keyring {
@@ -141,6 +143,7 @@ impl Keyring {
             metadata_integrity: generate_key(random, &mut ids)?,
             audit_payload: vec![generate_key(random, &mut ids)?],
             audit_index: generate_key(random, &mut ids)?,
+            record_decrypt_attempts: AtomicUsize::new(0),
         })
     }
 
@@ -202,6 +205,7 @@ impl Keyring {
         binding: &RecordBinding,
         record: &EncryptedRecord,
     ) -> Result<SecretBox<Vec<u8>>, RecordCryptoError> {
+        self.record_decrypt_attempts.fetch_add(1, Ordering::Relaxed);
         if record.header().store_id() != self.store_id || record.header().binding() != binding {
             return Err(RecordCryptoError::Binding);
         }
@@ -218,6 +222,87 @@ impl Keyring {
         }
         .ok_or(RecordCryptoError::KeyUnavailable)?;
         super::aead::decrypt(self.store_id, binding, record, key.expose())
+    }
+
+    pub fn record_decrypt_attempts(&self) -> usize {
+        self.record_decrypt_attempts.load(Ordering::Relaxed)
+    }
+
+    pub fn write_secret(
+        &self,
+        store: &Store,
+        mount: &str,
+        path: &LogicalPath,
+        plaintext: &PlaintextSecret,
+        created_unix_milliseconds: u64,
+        random: &mut impl RandomSource,
+    ) -> Result<u64, SecretDataError> {
+        let storage_path = storage_path(mount, path)?;
+        let expected = store.secret_metadata(&storage_path, self.metadata_integrity_key())?;
+        let mut metadata = expected
+            .as_ref()
+            .map_or_else(default_secret_metadata, |sealed| sealed.value.clone());
+        let version = metadata.versions.append()?;
+        let replacement =
+            metadata.seal(self.metadata_integrity_key(), self.store_id, &storage_path)?;
+        let binding = RecordBinding::new(
+            RecordDomain::SecretValue,
+            mount,
+            path.clone(),
+            b"secret-value.v1",
+            Some(version),
+            created_unix_milliseconds,
+        )?;
+        let record = self.encrypt_record(&binding, plaintext.expose_secret(), random)?;
+        store.commit_encrypted_secret_append(
+            &storage_path,
+            expected.as_ref(),
+            &replacement,
+            &record,
+            self.metadata_integrity_key(),
+        )?;
+        Ok(version)
+    }
+
+    pub fn read_secret(
+        &self,
+        store: &Store,
+        mount: &str,
+        path: &LogicalPath,
+        version: Option<u64>,
+    ) -> Result<Option<PlaintextSecret>, SecretDataError> {
+        let storage_path = storage_path(mount, path)?;
+        let Some((version, record)) = store.encrypted_secret_version(
+            &storage_path,
+            version,
+            self.metadata_integrity_key(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let binding = RecordBinding::new(
+            RecordDomain::SecretValue,
+            mount,
+            path.clone(),
+            b"secret-value.v1",
+            Some(version),
+            record.header().binding().created_unix_milliseconds(),
+        )?;
+        Ok(Some(PlaintextSecret::from_secret_box(
+            self.decrypt_record(&binding, &record)?,
+        )))
+    }
+
+    pub fn secret_metadata_query(
+        &self,
+        store: &Store,
+        mount: &str,
+        path: &LogicalPath,
+    ) -> Result<Option<SecretMetadata>, SecretDataError> {
+        let storage_path = storage_path(mount, path)?;
+        Ok(store
+            .secret_metadata(&storage_path, self.metadata_integrity_key())?
+            .map(|sealed| sealed.value))
     }
 
     pub fn append_audit_payload_key(
@@ -373,6 +458,7 @@ impl Keyring {
             metadata_integrity,
             audit_payload,
             audit_index,
+            record_decrypt_attempts: AtomicUsize::new(0),
         };
         value.validate()?;
         Ok(value)
@@ -410,6 +496,24 @@ impl Keyring {
                 .expect("keyring validation requires one audit key"),
             RecordDomain::SecretValue | RecordDomain::CredentialMaterial => &self.record_current,
         }
+    }
+}
+
+fn storage_path(mount: &str, path: &LogicalPath) -> Result<LogicalPath, SecretDataError> {
+    Ok(LogicalPath::new(format!("{mount}/{}", path.as_str()))?)
+}
+
+fn default_secret_metadata() -> SecretMetadata {
+    SecretMetadata {
+        schema_version: METADATA_SCHEMA_VERSION,
+        custom: Default::default(),
+        max_versions: 10,
+        cas_required: false,
+        last_completed_rotation_unix_seconds: None,
+        rotation_interval_seconds: None,
+        rotation_state: RotationState::Idle,
+        rotation_protection: None,
+        versions: VersionSetSummary::empty(),
     }
 }
 

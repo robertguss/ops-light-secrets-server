@@ -182,6 +182,14 @@ authentication tag is appended by the suite). Diagnostics may report a bounded
 case ID, length, redacted key ID, or digest, but never plaintext, a full path,
 or nonce and key material together.
 
+Decrypted values are owned by a non-`Clone`, non-`Debug` zeroizing wrapper and
+are decrypted anew for each value read; the server keeps no cross-request
+plaintext cache. Metadata-only queries verify the clear-record MAC and never
+invoke record decryption. This guarantee covers server-owned age-identity,
+keyring, and decrypted-value buffers. It does not claim erasure of copies made
+inside the allocator, kernel, HTTP/TLS stack, or client. Process-dump hardening
+is best effort and does not expand that boundary.
+
 ## Local control socket
 
 The management plane is a Unix socket owned by the service UID. Its parent

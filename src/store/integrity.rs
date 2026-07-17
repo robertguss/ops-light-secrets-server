@@ -298,9 +298,34 @@ pub(crate) struct IntegrityMonitor {
 
 impl IntegrityMonitor {
     pub(crate) fn trip(&self, class: RecordClass, primary_key: &[u8], diagnostic_key: &[u8; 32]) {
+        self.trip_named(
+            class.table(),
+            &class.code().to_be_bytes(),
+            primary_key,
+            diagnostic_key,
+        );
+    }
+
+    pub(crate) fn trip_table(
+        &self,
+        table: &'static str,
+        primary_key: &[u8],
+        diagnostic_key: &[u8; 32],
+    ) {
+        self.trip_named(table, table.as_bytes(), primary_key, diagnostic_key);
+    }
+
+    fn trip_named(
+        &self,
+        table: &'static str,
+        diagnostic_domain: &[u8],
+        primary_key: &[u8],
+        diagnostic_key: &[u8; 32],
+    ) {
         let mut hasher = blake3::Hasher::new_keyed(diagnostic_key);
         hasher.update(b"ops-light-secrets-server.integrity-key-id.v1\0");
-        hasher.update(&class.code().to_be_bytes());
+        hasher.update(&(diagnostic_domain.len() as u64).to_be_bytes());
+        hasher.update(diagnostic_domain);
         hasher.update(&(primary_key.len() as u64).to_be_bytes());
         hasher.update(primary_key);
         let masked_key_id = encode_hex(&hasher.finalize().as_bytes()[..8]);
@@ -310,7 +335,7 @@ impl IntegrityMonitor {
             .unwrap_or_else(|error| error.into_inner());
         failure.get_or_insert(IntegrityDiagnostic {
             code: "clear_record_integrity_failure",
-            table: class.table(),
+            table,
             masked_key_id,
         });
     }
