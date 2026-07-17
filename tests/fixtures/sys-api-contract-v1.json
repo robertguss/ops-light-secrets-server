@@ -1,0 +1,1 @@
+{"mount_preflight":{"data":{"options":{"version":"2"},"path":"secret/","type":"kv"}},"probe":{"initialized":true,"sealed":false,"standby":false,"version":"0.1.0"},"leader":{"ha_enabled":false,"is_self":true,"leader_address":"","leader_cluster_address":"","performance_standby":false}}

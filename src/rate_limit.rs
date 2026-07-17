@@ -383,7 +383,9 @@ pub async fn pre_verifier_guard(
 ) -> Response {
     let class = match request.uri().path() {
         "/v1/auth/approle/login" => Some(UnauthenticatedClass::Login),
-        "/v1/sys/health" | "/v1/sys/seal-status" => Some(UnauthenticatedClass::Probe),
+        "/v1/sys/health" | "/v1/sys/seal-status" | "/v1/sys/leader" => {
+            Some(UnauthenticatedClass::Probe)
+        }
         _ => None,
     };
     let Some(class) = class else {

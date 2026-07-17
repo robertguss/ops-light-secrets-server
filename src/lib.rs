@@ -29,5 +29,6 @@ pub mod rotation;
 pub mod startup;
 pub mod storage_executor;
 pub mod store;
+pub mod sys_api;
 pub mod transaction_coordinator;
 pub mod transport;

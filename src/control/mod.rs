@@ -21,7 +21,12 @@ static UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Router reachable by remote data-plane transports.
 pub fn data_router() -> Router {
-    Router::new().route("/v1/sys/health", get(health))
+    let limits = crate::rate_limit::RateLimitService::new(
+        crate::rate_limit::RateLimitConfig::default(),
+        [0x53; 32],
+    )
+    .expect("default rate limit configuration is valid");
+    crate::sys_api::public_router(crate::sys_api::ReadinessState::default(), limits)
 }
 
 /// Remote router with the declared v0.1 authentication surface installed.
@@ -29,7 +34,12 @@ pub fn data_router_with_auth(
     service: crate::auth::AuthService,
     hygiene: crate::input_hygiene::InputHygieneState,
 ) -> Router {
-    data_router().merge(crate::auth::auth_router(service, hygiene))
+    let limits = crate::rate_limit::RateLimitService::new(
+        crate::rate_limit::RateLimitConfig::default(),
+        [0x44; 32],
+    )
+    .expect("default rate limit configuration is valid");
+    data_router_with_auth_and_limits(service, hygiene, limits)
 }
 
 pub fn data_router_with_auth_and_limits(
@@ -37,9 +47,29 @@ pub fn data_router_with_auth_and_limits(
     hygiene: crate::input_hygiene::InputHygieneState,
     limits: crate::rate_limit::RateLimitService,
 ) -> Router {
-    data_router().merge(crate::auth::auth_router_with_limits(
-        service, hygiene, limits,
-    ))
+    data_router_with_auth_and_limits_and_readiness(
+        service,
+        hygiene,
+        limits,
+        crate::sys_api::ReadinessState::default(),
+    )
+}
+
+pub fn data_router_with_auth_and_limits_and_readiness(
+    service: crate::auth::AuthService,
+    hygiene: crate::input_hygiene::InputHygieneState,
+    limits: crate::rate_limit::RateLimitService,
+    readiness: crate::sys_api::ReadinessState,
+) -> Router {
+    crate::sys_api::public_router(readiness, limits.clone())
+        .merge(crate::sys_api::protected_router(
+            service.clone(),
+            hygiene.clone(),
+            limits.clone(),
+        ))
+        .merge(crate::auth::auth_router_with_limits(
+            service, hygiene, limits,
+        ))
 }
 
 /// Remote router with authentication and the final KV v2 data dispatcher.
@@ -74,20 +104,20 @@ pub fn data_router_with_auth_and_kv_limits(
 /// Router reachable only through the owner control socket.
 pub fn control_router() -> Router {
     Router::new()
-        .route("/v1/sys/health", get(health))
+        .route("/v1/sys/health", get(control_health))
         .route("/v1/sys/control/status", get(control_status))
 }
 
 #[derive(Serialize)]
-struct Health {
+struct ControlHealth {
     initialized: bool,
     sealed: bool,
 }
 
-async fn health() -> Json<Health> {
-    Json(Health {
-        initialized: false,
-        sealed: true,
+async fn control_health() -> Json<ControlHealth> {
+    Json(ControlHealth {
+        initialized: true,
+        sealed: false,
     })
 }
 
