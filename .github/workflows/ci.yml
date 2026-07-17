@@ -34,6 +34,7 @@ jobs:
           - differential
           - deny
           - fuzz
+          - compatibility-doc
           - lock-msrv
           - crypto-vectors
           - fmt

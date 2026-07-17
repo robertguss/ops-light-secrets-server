@@ -86,6 +86,22 @@ needed for v0.1. Rung 3 remains a functional fallback: Vault 2.0.3 is
 so a stack requiring it must not be described as fully OSI-licensed. A custom
 shim is post-v0.1 work only if later evidence invalidates the cheaper rungs.
 
+## Differential fidelity (R1)
+
+The fixture suites prove what clients send. The differential suite
+(`tests/differential/`, `./scripts/verify.sh differential`) replays a normalized
+corpus against a pinned OpenBao 2.6.0 reference oracle and this implementation.
+Deliberate R3 divergences are structured allowlist entries with reasons; an
+unexplained divergence fails the suite. Regenerating this document does not
+replace that suite.
+
+## Client pin provenance
+
+Pinned Linux amd64 archives and SHA-256 digests are the versioned matrix at
+`research/compat/client-matrix.json` (Vault OSS 2.0.3, OpenBao 2.6.0, fnox
+1.29.0/1.30.0). CI runs `./scripts/verify.sh compat-pins` before capture and
+document generation.
+
 ## Evidence maintenance
 
 Run `./scripts/check-compat-capture.sh` locally. It replays the observations,

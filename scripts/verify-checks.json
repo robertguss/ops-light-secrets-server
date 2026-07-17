@@ -159,6 +159,14 @@
       "program": "./scripts/check-fuzz.sh",
       "args": [],
       "toolchain": "default"
+    },
+    {
+      "id": "compatibility-doc",
+      "program": "./scripts/generate-compatibility-doc.sh",
+      "args": [
+        "check"
+      ],
+      "toolchain": "default"
     }
   ]
 }
