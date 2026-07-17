@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "manifest_blake3": "4350114f2652507b3ee7a0c7ce9db57adcba20c1df6a80426e22acf3b11dcff2",
+  "header_blake3": "bb363804d8ee0f41a1fd8f868228d12e6ea4a46686d878b90eb6af5f641504bd",
+  "container_blake3": "9c0fdb27f3d90ea3a8cd2914cb0f4bd2292734755e4c9eae7ac392570ed9ad35",
+  "signature_message_blake3": "8b47d22e8445ca2d552f84efbeb50beb84b3c50b60db347375023149547d604b"
+}

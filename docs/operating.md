@@ -107,6 +107,10 @@ band, held counts, and next action—never a raw path. The assembled online and
 offline coordinator adapters remain fail-closed until the recovery E2E owner
 wires these frozen primitives.
 
+The G3-frozen logical archive, single-container publication, detached-signature,
+recipient, restore-epoch, trust-import, and source/RPO rules are normative in
+`docs/backup-format-v1.md`. A redb file copy is never a supported backup format.
+
 Audit payloads use schema version 1 and are encrypted under the keyring's
 current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct
 `audit-event` record domain. The AAD-bound logical id contains the audit epoch,

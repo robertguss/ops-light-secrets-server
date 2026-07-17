@@ -77,6 +77,20 @@ const CHECKPOINT_PREPARED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("checkpoint_prepared");
 const CHECKPOINT_REGISTERED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("checkpoint_registered");
+pub const DURABLE_TABLE_NAMES: [&str; 12] = [
+    "meta",
+    "system_keyring",
+    "secret_meta",
+    "secrets",
+    "audit_events",
+    "audit_head",
+    "identities",
+    "grants",
+    "credentials",
+    "credential_epoch",
+    "checkpoint_prepared",
+    "checkpoint_registered",
+];
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
