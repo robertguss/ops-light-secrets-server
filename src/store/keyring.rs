@@ -831,6 +831,12 @@ pub struct PreparedRecipientRewrap {
     pub new_recipients: RecipientSet,
 }
 
+pub struct PreparedRecordKeyRotation {
+    pub keyring: Keyring,
+    pub old_key_id: KeyId,
+    pub new_key_id: KeyId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecipientRewrapFault {
     None,
@@ -894,6 +900,56 @@ pub fn recipient_rewrap_confirmation(
 }
 
 impl Keyring {
+    pub fn prepare_record_key_rotation(
+        mut self,
+        expected_generation: u64,
+        random: &mut impl RandomSource,
+    ) -> Result<PreparedRecordKeyRotation, KeyringError> {
+        if self.generation != expected_generation {
+            return Err(KeyringError::GenerationMismatch);
+        }
+        let old_key_id = self.record_current.id();
+        let mut ids = self.all_keys().map(PurposeKey::id).collect::<BTreeSet<_>>();
+        let replacement = generate_key(random, &mut ids)?;
+        let new_key_id = replacement.id();
+        let predecessor = std::mem::replace(&mut self.record_current, replacement);
+        self.record_predecessors.push(predecessor);
+        self.generation = self.generation.checked_add(1).ok_or(KeyringError::Limit)?;
+        self.validate()?;
+        Ok(PreparedRecordKeyRotation {
+            keyring: self,
+            old_key_id,
+            new_key_id,
+        })
+    }
+
+    pub fn finish_record_key_rotation(
+        &mut self,
+        active: &x25519::Recipient,
+        recovery: Option<&x25519::Recipient>,
+        last_audit_sequence: u64,
+    ) -> Result<(KeyringEnvelope, Sealed<KeyringMetadata>), KeyringError> {
+        if last_audit_sequence == 0 {
+            return Err(KeyringError::Invalid);
+        }
+        self.record_predecessors.clear();
+        self.validate()?;
+        let envelope = self.wrap(active, recovery)?;
+        let metadata = Sealed::seal(
+            KeyringMetadata {
+                generation: self.generation,
+                format_version: KEYRING_FORMAT_VERSION,
+                recipients: self.recipients,
+                last_rewrap_audit_sequence: last_audit_sequence,
+            },
+            self.generation,
+            self.metadata_integrity_key(),
+            self.store_id,
+            super::KEYRING_METADATA_KEY,
+        )?;
+        Ok((envelope, metadata))
+    }
+
     pub fn prepare_recipient_rewrap(
         mut self,
         new_active_identity: &x25519::Identity,

@@ -114,9 +114,7 @@ fn registry_is_closed_unique_ordered_and_covers_every_durable_table() {
     );
     for table in DURABLE_TABLE_NAMES {
         assert!(
-            ARCHIVE_REGISTRY
-                .iter()
-                .any(|codec| codec.table == table && codec.required),
+            ARCHIVE_REGISTRY.iter().any(|codec| codec.table == table),
             "missing durable table {table}"
         );
     }

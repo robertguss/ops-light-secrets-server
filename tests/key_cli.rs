@@ -24,6 +24,38 @@ fn age_identity_help_freezes_closed_purpose_sink_and_output_contract() {
 }
 
 #[test]
+fn record_key_rotation_help_requires_typed_custody_and_exact_evidence() {
+    let key = binary().args(["key", "--help"]).output().unwrap();
+    assert!(String::from_utf8(key.stdout).unwrap().contains("record"));
+    let rotate = binary()
+        .args(["key", "record", "rotate", "--help"])
+        .output()
+        .unwrap();
+    assert!(rotate.status.success());
+    let rotate = String::from_utf8(rotate.stdout).unwrap();
+    for field in [
+        "--identity-source",
+        "--control-credential-source",
+        "--active-recipient",
+        "--archive-digest",
+        "--signature-digest",
+        "--recovery-receipt-digest",
+        "--expected-generation",
+        "--confirm",
+    ] {
+        assert!(rotate.contains(field));
+    }
+    assert!(!rotate.contains("--identity <"));
+    let abort = binary()
+        .args(["key", "record", "abort", "--help"])
+        .output()
+        .unwrap();
+    let abort = String::from_utf8(abort.stdout).unwrap();
+    assert!(abort.contains("--identity-source"));
+    assert!(abort.contains("--control-credential-source"));
+}
+
+#[test]
 fn stateless_cli_writes_private_identity_only_to_fd_and_public_json_to_stdout() {
     let (private_sink, mut private_reader) = std::os::unix::net::UnixStream::pair().unwrap();
     let source_fd = private_sink.as_raw_fd();

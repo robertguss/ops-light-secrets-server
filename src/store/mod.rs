@@ -79,7 +79,8 @@ const CHECKPOINT_PREPARED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("checkpoint_prepared");
 const CHECKPOINT_REGISTERED: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("checkpoint_registered");
-pub const DURABLE_TABLE_NAMES: [&str; 12] = [
+const REWRITE_JOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rewrite_jobs");
+pub const DURABLE_TABLE_NAMES: [&str; 13] = [
     "meta",
     "system_keyring",
     "secret_meta",
@@ -92,9 +93,10 @@ pub const DURABLE_TABLE_NAMES: [&str; 12] = [
     "credential_epoch",
     "checkpoint_prepared",
     "checkpoint_registered",
+    "rewrite_jobs",
 ];
-const META_KEY: &[u8] = b"\x01store";
-const KEYRING_KEY: &[u8] = b"\x01current";
+pub(crate) const META_KEY: &[u8] = b"\x01store";
+pub(crate) const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
 pub(crate) const PROVISIONAL_META_KEY: &[u8] = b"\x01provisional_meta";
 const AUDIT_HEAD_KEY: &[u8] = b"\x01current";
@@ -349,7 +351,7 @@ impl<T: ClearRecord> Sealed<T> {
         })
     }
 
-    fn encode(&self) -> Result<Vec<u8>, CodecError> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, CodecError> {
         let value = self.value.encode()?;
         let mut out = Encoder::version(1);
         out.u16(self.mac_format_version);
@@ -1273,6 +1275,349 @@ pub(crate) struct NormalRestoreActivation {
 }
 
 impl Store {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_record_rotation_lifecycle(
+        &self,
+        keyring: &keyring::Keyring,
+        expected_lifecycle: Lifecycle,
+        replacement_lifecycle: Lifecycle,
+        event_id: [u8; 16],
+        request_id: [u8; 16],
+        owner_id: [u8; 16],
+        effective_timestamp_milliseconds: u64,
+        random: &mut impl keyring::RandomSource,
+    ) -> Result<(), StoreError> {
+        if event_id == [0; 16]
+            || request_id == [0; 16]
+            || owner_id == [0; 16]
+            || effective_timestamp_milliseconds == 0
+            || !matches!(
+                (expected_lifecycle, replacement_lifecycle),
+                (Lifecycle::Ready, Lifecycle::Reencrypting)
+                    | (Lifecycle::Reencrypting, Lifecycle::Ready)
+            )
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let mut meta = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Uninitialized)?;
+            MetaRecord::decode(value.value())?
+        };
+        if meta.lifecycle != expected_lifecycle
+            || meta.pending_anchor.is_some()
+            || meta.store_id != keyring.store_id()
+        {
+            return Err(StoreError::Integrity);
+        }
+        let current_provisional = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(PROVISIONAL_META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<ProvisionalMetaRecord>::decode(value.value())?
+        };
+        current_provisional.verify(
+            keyring.metadata_integrity_key(),
+            meta.store_id,
+            PROVISIONAL_META_KEY,
+        )?;
+        meta.lifecycle = replacement_lifecycle;
+        let replacement_provisional = Sealed::seal(
+            ProvisionalMetaRecord::from_meta(&meta),
+            current_provisional
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?,
+            keyring.metadata_integrity_key(),
+            meta.store_id,
+            PROVISIONAL_META_KEY,
+        )?;
+        let delta = StateDeltaSet::new([StateDelta::replace(
+            current_provisional.state_tuple(PROVISIONAL_META_KEY)?,
+            replacement_provisional.state_tuple(PROVISIONAL_META_KEY)?,
+        )?])?;
+        let head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            AuditEnvelope::decode(value.value())?
+        };
+        if effective_timestamp_milliseconds < head.effective_timestamp_milliseconds {
+            return Err(StoreError::Integrity);
+        }
+        let sequence = head
+            .epoch_sequence
+            .checked_add(1)
+            .ok_or(StoreError::Integrity)?;
+        let event = AuditEvent {
+            event_id,
+            request_id,
+            authentication: AuditAuthentication {
+                method: AuditAuthMethod::LocalPeer,
+                identity_id: Some(owner_id),
+                credential_accessor: None,
+                succeeded: true,
+                failure_reason: None,
+            },
+            authorization: AuditAuthorization {
+                capability: Some(AuditCapability::StoreKeyRotate),
+                allowed: true,
+                reason: AuditReason::None,
+            },
+            consumer_instance_id: None,
+            resource: Some(AuditResource::Canonical(match replacement_lifecycle {
+                Lifecycle::Reencrypting => "store/record-key/enter".into(),
+                Lifecycle::Ready => "store/record-key/abort".into(),
+                _ => return Err(StoreError::Integrity),
+            })),
+            operation: AuditOperation::KeyringChange,
+            outcome: AuditOutcome::Succeeded,
+            reason: AuditReason::OperatorRequested,
+            effective_timestamp_milliseconds,
+            wall_clock_observation_milliseconds: effective_timestamp_milliseconds,
+            secret_version: None,
+            state: AuditStateCommitment::Delta(delta),
+            previous_epoch_terminal: None,
+            flood: None,
+            overload_counts: Vec::new(),
+        };
+        let entry = StoredAuditEntry::prepare(
+            keyring,
+            &event,
+            head.audit_epoch,
+            sequence,
+            head.chain_hash()?,
+            random,
+        )
+        .map_err(|_| StoreError::Integrity)?;
+        {
+            let mut table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            table
+                .insert(META_KEY, meta.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            table
+                .insert(
+                    PROVISIONAL_META_KEY,
+                    replacement_provisional.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
+        }
+        write
+            .open_table(AUDIT_EVENTS)
+            .map_err(|_| StoreError::Database)?
+            .insert(
+                audit_key(&entry.envelope).as_slice(),
+                entry.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(AUDIT_HEAD)
+            .map_err(|_| StoreError::Database)?
+            .insert(AUDIT_HEAD_KEY, entry.envelope.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write.commit().map_err(|_| StoreError::Database)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_record_rotation_completion(
+        &self,
+        keyring: &keyring::Keyring,
+        operation_id: [u8; 16],
+        owner_id: [u8; 16],
+        plan_digest: [u8; 32],
+        before: StateDigest,
+        effective_timestamp_milliseconds: u64,
+        random: &mut impl keyring::RandomSource,
+    ) -> Result<StateDigest, StoreError> {
+        if operation_id == [0; 16]
+            || owner_id == [0; 16]
+            || plan_digest == [0; 32]
+            || effective_timestamp_milliseconds == 0
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let mut meta = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Uninitialized)?;
+            MetaRecord::decode(value.value())?
+        };
+        if meta.lifecycle != Lifecycle::Reencrypting
+            || meta.pending_anchor.is_some()
+            || meta.store_id != keyring.store_id()
+        {
+            return Err(StoreError::Integrity);
+        }
+        let head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            AuditEnvelope::decode(value.value())?
+        };
+        if effective_timestamp_milliseconds < head.effective_timestamp_milliseconds {
+            return Err(StoreError::Integrity);
+        }
+        let sequence = head
+            .epoch_sequence
+            .checked_add(1)
+            .ok_or(StoreError::Integrity)?;
+        let current_provisional = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let value = table
+                .get(PROVISIONAL_META_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?;
+            Sealed::<ProvisionalMetaRecord>::decode(value.value())?
+        };
+        current_provisional.verify(
+            keyring.metadata_integrity_key(),
+            meta.store_id,
+            PROVISIONAL_META_KEY,
+        )?;
+        meta.lifecycle = Lifecycle::Ready;
+        let replacement_provisional = Sealed::seal(
+            ProvisionalMetaRecord::from_meta(&meta),
+            current_provisional
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?,
+            keyring.metadata_integrity_key(),
+            meta.store_id,
+            PROVISIONAL_META_KEY,
+        )?;
+        {
+            let mut table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            table
+                .insert(META_KEY, meta.encode()?.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            table
+                .insert(
+                    PROVISIONAL_META_KEY,
+                    replacement_provisional.encode()?.as_slice(),
+                )
+                .map_err(|_| StoreError::Database)?;
+        }
+        let installed = checkpoint::state_digest_in_write(&write)?;
+        meta.seal_pending_anchor(
+            PendingAnchor {
+                kind: PendingAnchorKind::RecordKey,
+                operation_id: operation_id.to_vec(),
+                plan_or_activation_digest: plan_digest,
+                installed_state: AnchorInstalledState::KeyringGeneration(keyring.generation()),
+                post_state_digest: installed.0,
+                status: PendingAnchorStatus::Installed,
+            },
+            sequence,
+            keyring.metadata_integrity_key(),
+        )?;
+        write
+            .open_table(META)
+            .map_err(|_| StoreError::Database)?
+            .insert(META_KEY, meta.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        let job = RewriteJob {
+            kind: RewriteKind::RecordKey,
+            operation_id: operation_id.to_vec(),
+            owner_id: owner_id.to_vec(),
+            installed_generation: keyring.generation(),
+            installed_state_digest: installed.0,
+            checkpoint_digest: [0; 32],
+            backup_artifact_digest: [0; 32],
+            backup_signature_digest: [0; 32],
+            backup_receipt_digest: [0; 32],
+            backup_generation: 0,
+            signature_generation: 0,
+            receipt_generation: 0,
+            status: RewriteStatus::InstalledPendingAnchor,
+        }
+        .seal(sequence, keyring.metadata_integrity_key(), meta.store_id)?;
+        write
+            .open_table(REWRITE_JOBS)
+            .map_err(|_| StoreError::Database)?
+            .insert(operation_id.as_slice(), job.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        let event = AuditEvent {
+            event_id: operation_id,
+            request_id: owner_id,
+            authentication: AuditAuthentication {
+                method: AuditAuthMethod::LocalPeer,
+                identity_id: Some(owner_id),
+                credential_accessor: None,
+                succeeded: true,
+                failure_reason: None,
+            },
+            authorization: AuditAuthorization {
+                capability: Some(AuditCapability::StoreKeyRotate),
+                allowed: true,
+                reason: AuditReason::None,
+            },
+            consumer_instance_id: None,
+            resource: Some(AuditResource::Canonical("store/record-key".into())),
+            operation: AuditOperation::RecordKeyRotation,
+            outcome: AuditOutcome::Succeeded,
+            reason: AuditReason::OperatorRequested,
+            effective_timestamp_milliseconds,
+            wall_clock_observation_milliseconds: effective_timestamp_milliseconds,
+            secret_version: None,
+            state: AuditStateCommitment::WholeState(WholeStateTransition {
+                kind: BulkTransitionKind::RecordRewrite,
+                operation_id: operation_id.to_vec(),
+                before,
+                after: installed,
+            }),
+            previous_epoch_terminal: None,
+            flood: None,
+            overload_counts: Vec::new(),
+        };
+        let entry = StoredAuditEntry::prepare(
+            keyring,
+            &event,
+            head.audit_epoch,
+            sequence,
+            head.chain_hash()?,
+            random,
+        )
+        .map_err(|_| StoreError::Integrity)?;
+        write
+            .open_table(AUDIT_EVENTS)
+            .map_err(|_| StoreError::Database)?
+            .insert(
+                audit_key(&entry.envelope).as_slice(),
+                entry.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        write
+            .open_table(AUDIT_HEAD)
+            .map_err(|_| StoreError::Database)?
+            .insert(AUDIT_HEAD_KEY, entry.envelope.encode()?.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        write.commit().map_err(|_| StoreError::Database)?;
+        Ok(installed)
+    }
+
     pub fn create_from_archive_frames(
         path: impl AsRef<Path>,
         frames: &[crate::backup_format::ArchiveFrame],
@@ -1319,6 +1664,13 @@ impl Store {
                 .find(|frame| frame.table_id == id)
                 .ok_or(StoreError::Integrity)?;
             install(&write, definition, frame)?;
+        }
+        if let Some(frame) = frames.iter().find(|frame| frame.table_id == 20) {
+            install(&write, REWRITE_JOBS, frame)?;
+        } else {
+            write
+                .open_table(REWRITE_JOBS)
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         drop(database);
@@ -1687,6 +2039,7 @@ impl Store {
             collect(&write, "credential_epoch", CREDENTIAL_EPOCH)?,
             collect(&write, "checkpoint_prepared", CHECKPOINT_PREPARED)?,
             collect(&write, "checkpoint_registered", CHECKPOINT_REGISTERED)?,
+            collect(&write, "rewrite_jobs", REWRITE_JOBS)?,
         ];
         write.abort().map_err(|_| StoreError::Database)?;
         Ok(LogicalStoreSnapshot {
@@ -1816,6 +2169,9 @@ impl Store {
             write
                 .open_table(CHECKPOINT_REGISTERED)
                 .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(REWRITE_JOBS)
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {
@@ -1873,6 +2229,9 @@ impl Store {
                 .map_err(|_| StoreError::Database)?;
             write
                 .open_table(CHECKPOINT_REGISTERED)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(REWRITE_JOBS)
                 .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
@@ -2198,6 +2557,77 @@ impl Store {
         self.get(META, KEYRING_METADATA_KEY)?
             .map(|bytes| Sealed::decode(&bytes).map_err(StoreError::from))
             .transpose()
+    }
+
+    pub fn rewrite_job(
+        &self,
+        operation_id: &[u8],
+        keyring: &keyring::Keyring,
+    ) -> Result<Option<RewriteJob>, StoreError> {
+        let Some(bytes) = self.get(REWRITE_JOBS, operation_id)? else {
+            return Ok(None);
+        };
+        let sealed = Sealed::<RewriteJob>::decode(&bytes)?;
+        sealed.verify(
+            keyring.metadata_integrity_key(),
+            keyring.store_id(),
+            operation_id,
+        )?;
+        Ok(Some(sealed.value))
+    }
+
+    pub fn replace_rewrite_job(
+        &self,
+        expected: &RewriteJob,
+        replacement: &RewriteJob,
+        keyring: &keyring::Keyring,
+    ) -> Result<(), StoreError> {
+        if expected.operation_id != replacement.operation_id
+            || expected.owner_id != replacement.owner_id
+            || expected.kind != replacement.kind
+            || expected.installed_generation != replacement.installed_generation
+            || expected.installed_state_digest != replacement.installed_state_digest
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let mut table = write
+            .open_table(REWRITE_JOBS)
+            .map_err(|_| StoreError::Database)?;
+        let current_bytes = table
+            .get(expected.operation_id.as_slice())
+            .map_err(|_| StoreError::Database)?
+            .ok_or(StoreError::Integrity)?
+            .value()
+            .to_vec();
+        let current = Sealed::<RewriteJob>::decode(&current_bytes)?;
+        current.verify(
+            keyring.metadata_integrity_key(),
+            keyring.store_id(),
+            &expected.operation_id,
+        )?;
+        if current.value != *expected {
+            return Err(StoreError::Integrity);
+        }
+        let sealed = replacement.clone().seal(
+            current
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?,
+            keyring.metadata_integrity_key(),
+            keyring.store_id(),
+        )?;
+        table
+            .insert(
+                replacement.operation_id.as_slice(),
+                sealed.encode()?.as_slice(),
+            )
+            .map_err(|_| StoreError::Database)?;
+        drop(table);
+        write.commit().map_err(|_| StoreError::Database)
     }
 
     pub fn provisional_meta(&self) -> Result<Option<Sealed<ProvisionalMetaRecord>>, StoreError> {

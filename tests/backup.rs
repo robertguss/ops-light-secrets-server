@@ -186,7 +186,7 @@ fn one_snapshot_builds_recovery_openable_ciphertext_and_complete_manifest() {
         },
     )
     .unwrap();
-    assert_eq!(created.manifest.tables.len(), 18);
+    assert_eq!(created.manifest.tables.len(), 19);
     assert_eq!(
         created.manifest.state_digest,
         store.state_digest().unwrap().0

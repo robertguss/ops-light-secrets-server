@@ -732,6 +732,52 @@ enum KeyCommand {
         #[command(subcommand)]
         command: RecipientCommand,
     },
+    /// Offline whole-store record-encryption-key rotation
+    Record {
+        #[command(subcommand)]
+        command: RecordKeyCommand,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Subcommand)]
+enum RecordKeyCommand {
+    Rotate {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        identity_source: SecretSource,
+        #[arg(long)]
+        active_recipient: String,
+        #[arg(long)]
+        recovery_recipient: Option<String>,
+        #[arg(long)]
+        control_credential_source: SecretSource,
+        #[arg(long)]
+        archive_digest: String,
+        #[arg(long)]
+        signature_digest: String,
+        #[arg(long)]
+        recovery_receipt_digest: String,
+        #[arg(long)]
+        recovery_set_generation: u64,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        owner_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
+    Abort {
+        #[arg(long)]
+        identity_source: SecretSource,
+        #[arg(long)]
+        control_credential_source: SecretSource,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1095,6 +1141,11 @@ pub fn run() -> Result<(), String> {
                         unsafe_environment: cli.unsafe_dev_secret_env,
                     },
                 );
+            }
+            Command::Key {
+                command: KeyCommand::Record { command },
+            } => {
+                return run_record_key_command(&config, command, cli.unsafe_dev_secret_env);
             }
             Command::Credential {
                 command:
@@ -2002,6 +2053,32 @@ fn run_recipient_rewrap(config: &Config, request: RecipientRewrapCli<'_>) -> Res
         replacement.recipients(),
         false,
     )
+}
+
+fn run_record_key_command(
+    _config: &Config,
+    command: &RecordKeyCommand,
+    unsafe_environment: bool,
+) -> Result<(), String> {
+    let sources: Vec<&SecretSource> = match command {
+        RecordKeyCommand::Rotate {
+            identity_source,
+            control_credential_source,
+            ..
+        }
+        | RecordKeyCommand::Abort {
+            identity_source,
+            control_credential_source,
+        } => vec![identity_source, control_credential_source],
+    };
+    if !unsafe_environment
+        && sources
+            .iter()
+            .any(|source| matches!(source, SecretSource::UnsafeEnvironment(_)))
+    {
+        return Err("record_key_rotation_refused code=unsafe_environment_source".into());
+    }
+    Err("record_key_rotation_refused code=live_recovery_evidence_catalog_pending artifact_bytes_unchanged=true remediation='register exact signature and recovery-path rehearsal receipt through authenticated backup control adapter'".into())
 }
 
 fn authorize_recipient_rewrap(

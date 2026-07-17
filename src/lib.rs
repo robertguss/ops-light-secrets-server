@@ -18,6 +18,7 @@ pub mod kv;
 pub mod proxy;
 pub mod rate_limit;
 pub mod raw_target;
+pub mod reencrypt;
 pub mod restore;
 pub mod startup;
 pub mod storage_executor;

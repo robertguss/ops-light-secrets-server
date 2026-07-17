@@ -76,6 +76,7 @@ pub enum AuditOperation {
     AuditExport = 19,
     TransportReload = 20,
     Shutdown = 21,
+    RecordKeyRotation = 22,
 }
 
 impl AuditOperation {
@@ -94,12 +95,16 @@ impl AuditOperation {
                 | Self::Restore
                 | Self::Migration
                 | Self::Compaction
+                | Self::RecordKeyRotation
                 | Self::TransportReload
         )
     }
 
     fn is_bulk(self) -> bool {
-        matches!(self, Self::Restore | Self::Migration | Self::Compaction)
+        matches!(
+            self,
+            Self::Restore | Self::Migration | Self::Compaction | Self::RecordKeyRotation
+        )
     }
 }
 
@@ -979,7 +984,8 @@ fn decode_operation(value: u16) -> Result<AuditOperation, CodecError> {
             Backup,
             AuditExport,
             TransportReload,
-            Shutdown
+            Shutdown,
+            RecordKeyRotation
         ]
     )
 }

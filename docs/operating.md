@@ -184,6 +184,41 @@ Supply `--current-identity-source`, `--new-active-identity-source`, and
 flag). `--recovery-recipient` is an optional distinct public age recipient.
 Private identities and bearer credentials never belong in argv or output.
 
+## Whole-store record-key rotation
+
+`key record rotate` is the rare offline response to record-key compromise or a
+deliberate cryptographic-hygiene event. Stop the daemon and keep the independent
+data-directory lock for the whole operation. The final offline plan requires a
+registered signature and a registered recovery-recipient rehearsal receipt for
+the exact current backup; detached evidence whose registration is unknown does
+not qualify. The exceptional no-current-backup path requires both key-rotation
+and store-maintenance authority and an incident-specific confirmation.
+
+Supply an approved active or recovery identity through a typed source and the
+current active and optional recovery public recipients. Age envelopes retain
+recipient fingerprints, not enough public-key material to rebuild a changed
+envelope, so the command fingerprint-checks the supplied public recipients and
+never guesses them. The read-only plan binds those recipients indirectly through
+the current keyring, the generation, current state/head, exact recovery evidence,
+owner, operation, and reason.
+
+After confirmation, the original is atomically marked `reencrypting` with an
+audit event. The pass creates a private same-filesystem `.new` sibling, decrypts
+and re-encrypts every secret version with the same canonical AAD and a new nonce,
+writes a ready target with a whole-state completion event and
+`pending_anchor=record-key`, fsyncs it, and renames it over the original. There is
+no post-rename lifecycle edit. A pre-rename interruption leaves the original
+data authoritative; rerun the pass or use the owner-bound `key record abort` to
+remove the partial sibling and atomically audit restoration to `ready`. Abort is
+forbidden after installation.
+
+Installation reports `installed_pending_anchor`. Register the matching new
+checkpoint to reach `anchored_rewrite_complete_recovery_pending`, then create,
+sign and register a backup of the new-key state and register its recovery-path
+rehearsal receipt to reach `complete_recovery_current`. Until then doctor remains
+non-green, another bulk rewrite is refused, and old-copy retirement is unsafe.
+Rotation changes ciphertext but is not erasure.
+
 First omit `--confirm`. After authenticating the control credential and its
 current `key-rotation` grant, the command prints only old/new public
 fingerprints, generation, lockout/backup-receipt blast radius, and the exact
