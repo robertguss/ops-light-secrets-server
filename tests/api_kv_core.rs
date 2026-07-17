@@ -12,8 +12,11 @@ use ops_light_secrets_server::identity::{
 };
 use ops_light_secrets_server::input_hygiene::InputHygieneState;
 use ops_light_secrets_server::kv::{
-    CasSource, KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService, MAX_VERSION_BATCH,
-    MAX_VERSIONS, MaxVersionsSource, MetadataUpdate, kv_router,
+    CasSource, KvAuditOperation, KvAuditOutcome, KvCatalog, KvError, KvService,
+    MAX_CUSTOM_METADATA_KEY_CHARS, MAX_CUSTOM_METADATA_KEYS, MAX_CUSTOM_METADATA_VALUE_CHARS,
+    MAX_LIST_RESULTS, MAX_SECRET_ENCODED_BYTES, MAX_SECRET_FIELD_NAME_CHARS, MAX_SECRET_FIELDS,
+    MAX_SECRET_NESTING_DEPTH, MAX_VERSION_BATCH, MAX_VERSIONS, MaxVersionsSource, MetadataUpdate,
+    kv_router,
 };
 use ops_light_secrets_server::raw_target::parse_raw_target;
 use ops_light_secrets_server::store::keyring::{KeyringError, RandomSource};
@@ -379,6 +382,8 @@ async fn final_router_dispatches_literal_list_and_get_list_true_with_strict_shap
         .unwrap();
     let response = app.clone().oneshot(read).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!response.headers().contains_key("content-encoding"));
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(body["data"]["data"]["value"], "secret");
@@ -425,6 +430,301 @@ async fn final_router_dispatches_literal_list_and_get_list_true_with_strict_shap
         app.oneshot(namespace).await.unwrap().status(),
         StatusCode::BAD_REQUEST
     );
+}
+
+#[test]
+fn kv_value_bounds_hold_at_n_minus_one_n_and_n_plus_one() {
+    let service = service(&[Capability::SecretWrite], false);
+    let request = endpoint(&Method::POST, "/v1/secret/data/bounds");
+
+    for count in [MAX_SECRET_FIELDS - 1, MAX_SECRET_FIELDS] {
+        let data = (0..count)
+            .map(|index| (format!("k{index}"), Value::Null))
+            .collect();
+        service.write(IDENTITY, &request, data, None).unwrap();
+    }
+    let over_fields = (0..=MAX_SECRET_FIELDS)
+        .map(|index| (format!("k{index}"), Value::Null))
+        .collect();
+    assert!(matches!(
+        service.write(IDENTITY, &request, over_fields, None),
+        Err(KvError::BoundExceeded("secret_field_count"))
+    ));
+
+    for chars in [MAX_SECRET_FIELD_NAME_CHARS - 1, MAX_SECRET_FIELD_NAME_CHARS] {
+        service
+            .write(
+                IDENTITY,
+                &request,
+                Map::from_iter([("é".repeat(chars), Value::Null)]),
+                None,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        service.write(
+            IDENTITY,
+            &request,
+            Map::from_iter([("é".repeat(MAX_SECRET_FIELD_NAME_CHARS + 1), Value::Null,)]),
+            None,
+        ),
+        Err(KvError::BoundExceeded("secret_field_name_chars"))
+    ));
+
+    for payload in [MAX_SECRET_ENCODED_BYTES - 9, MAX_SECRET_ENCODED_BYTES - 8] {
+        service
+            .write(
+                IDENTITY,
+                &request,
+                Map::from_iter([("v".into(), Value::String("x".repeat(payload)))]),
+                None,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        service.write(
+            IDENTITY,
+            &request,
+            Map::from_iter([(
+                "v".into(),
+                Value::String("x".repeat(MAX_SECRET_ENCODED_BYTES - 7)),
+            )]),
+            None,
+        ),
+        Err(KvError::BoundExceeded("secret_encoded_bytes"))
+    ));
+}
+
+#[test]
+fn kv_depth_metadata_and_list_bounds_are_explicit() {
+    fn nested(depth: usize) -> Value {
+        (0..depth).fold(Value::Null, |value, _| json!({"n": value}))
+    }
+    let service = service(
+        &[
+            Capability::SecretWrite,
+            Capability::SecretList,
+            Capability::SecretReadCurrent,
+        ],
+        false,
+    );
+    let write = endpoint(&Method::POST, "/v1/secret/data/depth");
+    for depth in [MAX_SECRET_NESTING_DEPTH - 3, MAX_SECRET_NESTING_DEPTH - 2] {
+        service
+            .write(
+                IDENTITY,
+                &write,
+                Map::from_iter([("root".into(), nested(depth))]),
+                None,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        service.write(
+            IDENTITY,
+            &write,
+            Map::from_iter([("root".into(), nested(MAX_SECRET_NESTING_DEPTH - 1),)]),
+            None,
+        ),
+        Err(KvError::BoundExceeded("secret_nesting_depth"))
+    ));
+
+    let metadata = endpoint(&Method::GET, "/v1/secret/metadata/depth");
+    let at_limit = (0..MAX_CUSTOM_METADATA_KEYS)
+        .map(|index| {
+            (
+                format!("{index}{}", "é".repeat(MAX_CUSTOM_METADATA_KEY_CHARS - 3)),
+                "é".repeat(MAX_CUSTOM_METADATA_VALUE_CHARS),
+            )
+        })
+        .collect();
+    service
+        .update_metadata(
+            IDENTITY,
+            &metadata,
+            MetadataUpdate {
+                cas_required: None,
+                max_versions: None,
+                delete_version_after: None,
+                custom_metadata: Some(at_limit),
+            },
+        )
+        .unwrap();
+    let over = (0..=MAX_CUSTOM_METADATA_KEYS)
+        .map(|index| (index.to_string(), String::new()))
+        .collect();
+    assert_eq!(
+        service.update_metadata(
+            IDENTITY,
+            &metadata,
+            MetadataUpdate {
+                cas_required: None,
+                max_versions: None,
+                delete_version_after: None,
+                custom_metadata: Some(over),
+            },
+        ),
+        Err(KvError::BoundExceeded("custom_metadata_keys"))
+    );
+
+    for chars in [
+        MAX_CUSTOM_METADATA_KEY_CHARS - 1,
+        MAX_CUSTOM_METADATA_KEY_CHARS,
+    ] {
+        service
+            .update_metadata(
+                IDENTITY,
+                &metadata,
+                MetadataUpdate {
+                    cas_required: None,
+                    max_versions: None,
+                    delete_version_after: None,
+                    custom_metadata: Some(std::collections::BTreeMap::from([(
+                        "é".repeat(chars),
+                        String::new(),
+                    )])),
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        service.update_metadata(
+            IDENTITY,
+            &metadata,
+            MetadataUpdate {
+                cas_required: None,
+                max_versions: None,
+                delete_version_after: None,
+                custom_metadata: Some(std::collections::BTreeMap::from([(
+                    "é".repeat(MAX_CUSTOM_METADATA_KEY_CHARS + 1),
+                    String::new(),
+                )])),
+            },
+        ),
+        Err(KvError::BoundExceeded("custom_metadata_key_chars"))
+    );
+    for chars in [
+        MAX_CUSTOM_METADATA_VALUE_CHARS - 1,
+        MAX_CUSTOM_METADATA_VALUE_CHARS,
+    ] {
+        service
+            .update_metadata(
+                IDENTITY,
+                &metadata,
+                MetadataUpdate {
+                    cas_required: None,
+                    max_versions: None,
+                    delete_version_after: None,
+                    custom_metadata: Some(std::collections::BTreeMap::from([(
+                        "k".into(),
+                        "é".repeat(chars),
+                    )])),
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        service.update_metadata(
+            IDENTITY,
+            &metadata,
+            MetadataUpdate {
+                cas_required: None,
+                max_versions: None,
+                delete_version_after: None,
+                custom_metadata: Some(std::collections::BTreeMap::from([(
+                    "k".into(),
+                    "é".repeat(MAX_CUSTOM_METADATA_VALUE_CHARS + 1),
+                )])),
+            },
+        ),
+        Err(KvError::BoundExceeded("custom_metadata_value_chars"))
+    );
+
+    for index in 0..=MAX_LIST_RESULTS {
+        let item = endpoint(
+            &Method::POST,
+            &format!("/v1/secret/data/list/item-{index:04}"),
+        );
+        service.write(IDENTITY, &item, data(1), None).unwrap();
+        if index + 1 == MAX_LIST_RESULTS - 1 || index + 1 == MAX_LIST_RESULTS {
+            let list_method = Method::from_bytes(b"LIST").unwrap();
+            let list = endpoint(&list_method, "/v1/secret/metadata/list");
+            assert_eq!(service.list(IDENTITY, &list).unwrap().len(), index + 1);
+        }
+    }
+    let list_method = Method::from_bytes(b"LIST").unwrap();
+    let list = endpoint(&list_method, "/v1/secret/metadata/list");
+    assert_eq!(
+        service.list(IDENTITY, &list),
+        Err(KvError::BoundExceeded("list_results"))
+    );
+    service.with_catalog(|catalog| {
+        let event = catalog.audit().last().unwrap();
+        assert_eq!(event.outcome, KvAuditOutcome::Failed);
+        assert_eq!(event.reason, Some("list-result-limit"));
+    });
+}
+
+#[test]
+fn deletion_batch_bound_holds_at_n_minus_one_n_and_n_plus_one() {
+    let service = service(
+        &[Capability::SecretWrite, Capability::SecretSoftDelete],
+        false,
+    );
+    service.with_catalog(|catalog| catalog.set_mount_max_versions(MAX_VERSIONS).unwrap());
+    let write = endpoint(&Method::POST, "/v1/secret/data/delete-bounds");
+    for version in 1..=MAX_VERSION_BATCH {
+        service
+            .write(
+                IDENTITY,
+                &write,
+                data(version as i64),
+                (version > 1).then_some((version - 1) as u64),
+            )
+            .unwrap();
+    }
+    let delete = endpoint(&Method::POST, "/v1/secret/delete/delete-bounds");
+    for count in [MAX_VERSION_BATCH - 1, MAX_VERSION_BATCH] {
+        let versions = (1..=count as u64).collect::<Vec<_>>();
+        service
+            .mutate_versions(
+                IDENTITY,
+                &delete,
+                &versions,
+                ops_light_secrets_server::identity::SecretAction::SoftDelete,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        service.mutate_versions(
+            IDENTITY,
+            &delete,
+            &(1..=MAX_VERSION_BATCH as u64 + 1).collect::<Vec<_>>(),
+            ops_light_secrets_server::identity::SecretAction::SoftDelete,
+        ),
+        Err(KvError::BoundExceeded("version_batch"))
+    );
+}
+
+#[tokio::test]
+async fn content_encoding_is_rejected_before_body_processing() {
+    let (auth, token) = auth_fixture();
+    let app = kv_router(
+        auth,
+        service(&[Capability::SecretWrite], false),
+        InputHygieneState::new([9; 32]),
+    );
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/secret/data/compressed")
+        .header("x-vault-token", token)
+        .header("content-encoding", "gzip")
+        .body(Body::from("not-even-gzip"))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("content_encoding_not_supported"));
 }
 
 #[test]
@@ -585,7 +885,7 @@ fn deletion_metadata_and_retention_state_machine_is_atomic_and_bounded() {
             &vec![1; MAX_VERSION_BATCH + 1],
             ops_light_secrets_server::identity::SecretAction::SoftDelete,
         ),
-        Err(KvError::Invalid)
+        Err(KvError::BoundExceeded("version_batch"))
     );
 }
 

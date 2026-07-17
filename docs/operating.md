@@ -743,6 +743,17 @@ uses one shared bucket: one login flood can therefore rate-limit legitimate
 workload re-logins until the window resets. Operators should treat that mode
 as degraded and configure the verified forwarded-address path.
 
+KV values are one encrypted JSON object, bounded before encryption/storage to
+512 KiB encoded bytes, 256 total object fields, 256 Unicode scalar values per
+field name, and nesting depth 32. The shared strict parser additionally bounds
+the whole body to 1 MiB, 1,024 JSON keys and 4,096 JSON values. Version mutation
+arrays contain at most 64 unique nonzero versions. LIST returns at most 1,024
+immediate children and fails with `list_results` at N+1; it never truncates.
+`custom_metadata` permits 64 keys, 128 Unicode scalar values per key and 512 per
+value. These are character limits, not UTF-8 byte limits. Request
+`Content-Encoding` is unsupported and rejected before body processing. KV
+responses carry `Cache-Control: no-store` and no `Content-Encoding`.
+
 ## Fresh-host restore
 
 Restore only into an absent path inside an existing service-owned mode-0700

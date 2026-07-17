@@ -105,6 +105,7 @@ pub enum HygieneReason {
     NoncanonicalQuery,
     TooManyQueryParameters,
     InvalidQuery,
+    ContentEncoding,
 }
 
 impl HygieneReason {
@@ -124,6 +125,7 @@ impl HygieneReason {
             Self::NoncanonicalQuery => "noncanonical_query",
             Self::TooManyQueryParameters => "too_many_query_parameters",
             Self::InvalidQuery => "invalid_query",
+            Self::ContentEncoding => "content_encoding_not_supported",
         }
     }
 }
@@ -193,6 +195,18 @@ pub async fn input_hygiene_guard(
     next: Next,
 ) -> Response {
     let (mut parts, body) = request.into_parts();
+    if parts
+        .headers
+        .contains_key(axum::http::header::CONTENT_ENCODING)
+    {
+        let error = HygieneError::new(
+            HygieneReason::ContentEncoding,
+            0,
+            b"content-encoding",
+            &state.diagnostic_key,
+        );
+        return (StatusCode::UNSUPPORTED_MEDIA_TYPE, error.to_string()).into_response();
+    }
     let token = match validate_token_headers(&parts.headers, &state.diagnostic_key) {
         Ok(token) => token,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),

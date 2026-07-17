@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router, routing};
@@ -21,6 +21,14 @@ pub const SECRET_MOUNT: &str = "secret";
 pub const DEFAULT_MAX_VERSIONS: u16 = 10;
 pub const MAX_VERSIONS: u16 = 1_024;
 pub const MAX_VERSION_BATCH: usize = 64;
+pub const MAX_SECRET_ENCODED_BYTES: usize = 512 * 1024;
+pub const MAX_SECRET_FIELDS: usize = 256;
+pub const MAX_SECRET_FIELD_NAME_CHARS: usize = 256;
+pub const MAX_SECRET_NESTING_DEPTH: usize = 32;
+pub const MAX_LIST_RESULTS: usize = 1_024;
+pub const MAX_CUSTOM_METADATA_KEYS: usize = 64;
+pub const MAX_CUSTOM_METADATA_KEY_CHARS: usize = 128;
+pub const MAX_CUSTOM_METADATA_VALUE_CHARS: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CasSource {
@@ -277,8 +285,13 @@ impl KvService {
         data: Map<String, Value>,
         cas: Option<u64>,
     ) -> Result<WriteResult, KvError> {
-        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
         validate_endpoint(endpoint, EndpointKind::Data)?;
+        validate_secret_value(&data)?;
+        let encoded = serde_json::to_vec(&Value::Object(data)).map_err(|_| KvError::Invalid)?;
+        if encoded.len() > MAX_SECRET_ENCODED_BYTES {
+            return Err(KvError::BoundExceeded("secret_encoded_bytes"));
+        }
+        let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
         authorize_operation(&mut catalog, identity_id, endpoint, SecretAction::Write)?;
         let path = logical_path(endpoint);
         let effective = catalog.effective_cas_required(&path);
@@ -303,7 +316,6 @@ impl KvService {
             ));
             return Err(KvError::CasConflict);
         }
-        let encoded = serde_json::to_vec(&Value::Object(data)).map_err(|_| KvError::Invalid)?;
         let created = catalog.effective_unix_milliseconds;
         let entry = catalog
             .entries
@@ -430,6 +442,17 @@ impl KvService {
                     keys.insert(rest.to_owned());
                 }
             }
+            if keys.len() > MAX_LIST_RESULTS {
+                catalog.audit.push(audit_event(
+                    identity_id,
+                    &prefix,
+                    KvAuditOperation::List,
+                    KvAuditOutcome::Failed,
+                    None,
+                    Some("list-result-limit"),
+                ));
+                return Err(KvError::BoundExceeded("list_results"));
+            }
         }
         catalog.audit.push(audit_event(
             identity_id,
@@ -544,6 +567,9 @@ impl KvService {
         endpoint: &EndpointRequest,
         update: MetadataUpdate,
     ) -> Result<(), KvError> {
+        if let Some(custom) = &update.custom_metadata {
+            validate_custom_metadata(custom)?;
+        }
         let mut catalog = self.catalog.lock().map_err(|_| KvError::Internal)?;
         validate_endpoint(endpoint, EndpointKind::Metadata)?;
         authorize_operation(&mut catalog, identity_id, endpoint, SecretAction::Write)?;
@@ -678,7 +704,65 @@ pub enum KvError {
         destroyed: bool,
     },
     UnsupportedField,
+    BoundExceeded(&'static str),
     Internal,
+}
+
+fn validate_secret_value(data: &Map<String, Value>) -> Result<(), KvError> {
+    fn walk(value: &Value, depth: usize, fields: &mut usize) -> Result<(), KvError> {
+        if depth > MAX_SECRET_NESTING_DEPTH {
+            return Err(KvError::BoundExceeded("secret_nesting_depth"));
+        }
+        match value {
+            Value::Object(values) => {
+                *fields = fields
+                    .checked_add(values.len())
+                    .ok_or(KvError::BoundExceeded("secret_field_count"))?;
+                if *fields > MAX_SECRET_FIELDS {
+                    return Err(KvError::BoundExceeded("secret_field_count"));
+                }
+                for (key, value) in values {
+                    if key.chars().count() > MAX_SECRET_FIELD_NAME_CHARS {
+                        return Err(KvError::BoundExceeded("secret_field_name_chars"));
+                    }
+                    walk(value, depth + 1, fields)?;
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    walk(value, depth + 1, fields)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut fields = data.len();
+    if fields > MAX_SECRET_FIELDS {
+        return Err(KvError::BoundExceeded("secret_field_count"));
+    }
+    for (key, value) in data {
+        if key.chars().count() > MAX_SECRET_FIELD_NAME_CHARS {
+            return Err(KvError::BoundExceeded("secret_field_name_chars"));
+        }
+        walk(value, 2, &mut fields)?;
+    }
+    Ok(())
+}
+
+fn validate_custom_metadata(values: &BTreeMap<String, String>) -> Result<(), KvError> {
+    if values.len() > MAX_CUSTOM_METADATA_KEYS {
+        return Err(KvError::BoundExceeded("custom_metadata_keys"));
+    }
+    for (key, value) in values {
+        if key.is_empty() || key.chars().count() > MAX_CUSTOM_METADATA_KEY_CHARS {
+            return Err(KvError::BoundExceeded("custom_metadata_key_chars"));
+        }
+        if value.chars().count() > MAX_CUSTOM_METADATA_VALUE_CHARS {
+            return Err(KvError::BoundExceeded("custom_metadata_value_chars"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_endpoint(endpoint: &EndpointRequest, expected: EndpointKind) -> Result<(), KvError> {
@@ -796,7 +880,7 @@ async fn dispatch(
     {
         return vault_error(StatusCode::BAD_REQUEST, "namespaces are not supported");
     }
-    match (endpoint.kind, method.as_str()) {
+    let response = match (endpoint.kind, method.as_str()) {
         (EndpointKind::Data, "GET") => match state.service.read(token.identity_id, &endpoint) {
             Ok(result) => (
                 StatusCode::OK,
@@ -886,7 +970,8 @@ async fn dispatch(
             }
         }
         _ => vault_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported operation"),
-    }
+    };
+    secret_response_hygiene(response)
 }
 
 fn parse_write(value: Value) -> Result<(Map<String, Value>, Option<u64>), KvError> {
@@ -937,7 +1022,10 @@ fn parse_versions(value: Value) -> Result<Vec<u64>, KvError> {
 }
 
 fn validate_versions(versions: &[u64]) -> Result<(), KvError> {
-    if versions.is_empty() || versions.len() > MAX_VERSION_BATCH {
+    if versions.len() > MAX_VERSION_BATCH {
+        return Err(KvError::BoundExceeded("version_batch"));
+    }
+    if versions.is_empty() {
         return Err(KvError::Invalid);
     }
     let unique = versions.iter().copied().collect::<BTreeSet<_>>();
@@ -982,22 +1070,15 @@ fn parse_metadata(value: Value) -> Result<MetadataUpdate, KvError> {
             let Value::Object(values) = value else {
                 return Err(KvError::Invalid);
             };
-            if values.len() > 64 {
-                return Err(KvError::Invalid);
-            }
-            values
+            let result = values
                 .into_iter()
                 .map(|(key, value)| {
-                    if key.is_empty() || key.len() > 128 {
-                        return Err(KvError::Invalid);
-                    }
                     let value = value.as_str().ok_or(KvError::Invalid)?.to_owned();
-                    if value.len() > 512 {
-                        return Err(KvError::Invalid);
-                    }
                     Ok((key, value))
                 })
-                .collect::<Result<BTreeMap<_, _>, _>>()
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            validate_custom_metadata(&result)?;
+            Ok(result)
         })
         .transpose()?;
     Ok(MetadataUpdate {
@@ -1048,8 +1129,25 @@ fn error_response(error: KvError) -> Response {
             StatusCode::BAD_REQUEST,
             "delete_version_after is not supported",
         ),
+        KvError::BoundExceeded(id) => bounded_error(id),
         KvError::Internal => vault_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
+}
+
+fn bounded_error(id: &'static str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"errors": [format!("request exceeds {id} bound")]})),
+    )
+        .into_response()
+}
+
+fn secret_response_hygiene(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().remove(header::CONTENT_ENCODING);
+    response
 }
 
 fn vault_error(status: StatusCode, message: &'static str) -> Response {
