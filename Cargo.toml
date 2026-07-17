@@ -92,3 +92,7 @@ path = "tests/verification_contract.rs"
 [[test]]
 name = "systemd_examples"
 path = "tests/systemd_examples.rs"
+
+[[test]]
+name = "cli_coherence"
+path = "tests/cli_coherence.rs"
