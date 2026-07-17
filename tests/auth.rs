@@ -10,6 +10,9 @@ use ops_light_secrets_server::store::keyring::{KeyringError, KeyringOpener, Rand
 use ops_light_secrets_server::store::{
     Canonical, FORMAT_VERSION, Lifecycle, MetaRecord, StoreId, mac_conformance,
 };
+use std::path::Path;
+use std::sync::{Arc, Barrier};
+use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
 
 struct Counter(u8);
 
@@ -477,4 +480,253 @@ fn secret_id_child_tokens_inherit_consumer_and_identity_only_is_explicit() {
         CredentialIssueMetadata::require_workload_tracking(None, true).unwrap(),
         None
     );
+}
+
+#[test]
+fn epoch_and_verifier_key_bumps_reject_stale_credentials_with_fixed_work() {
+    let (wire, record) = issued(CredentialKind::Token, CredentialAudience::Data);
+    let lookup = Arc::new(move |accessor| (accessor == record.accessor).then(|| record.clone()));
+    let accepted = verify_credential(
+        &wire,
+        verification_context(
+            CredentialKind::Token,
+            CredentialAudience::Data,
+            7,
+            150,
+            StoreId([8; 16]),
+            &[9; 32],
+        ),
+        &*lookup,
+    );
+    let expected_work = accepted.work;
+    assert!(accepted.authenticated_id.is_some());
+
+    let barrier = Arc::new(Barrier::new(9));
+    let mut threads = Vec::new();
+    for _ in 0..8 {
+        let barrier = Arc::clone(&barrier);
+        let lookup = Arc::clone(&lookup);
+        let wire = wire.clone();
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            verify_credential(
+                &wire,
+                verification_context(
+                    CredentialKind::Token,
+                    CredentialAudience::Data,
+                    8,
+                    150,
+                    StoreId([8; 16]),
+                    &[9; 32],
+                ),
+                &*lookup,
+            )
+        }));
+    }
+    barrier.wait();
+    for result in threads.into_iter().map(|thread| thread.join().unwrap()) {
+        assert_eq!(result.authenticated_id, None);
+        assert_eq!(result.reason, Some(CredentialRejectReason::EpochChanged));
+        assert_eq!(result.work, expected_work);
+    }
+
+    let key_bumped = verify_credential(
+        &wire,
+        verification_context(
+            CredentialKind::Token,
+            CredentialAudience::Data,
+            7,
+            150,
+            StoreId([8; 16]),
+            &[10; 32],
+        ),
+        &*lookup,
+    );
+    let both_bumped = verify_credential(
+        &wire,
+        verification_context(
+            CredentialKind::Token,
+            CredentialAudience::Data,
+            8,
+            150,
+            StoreId([8; 16]),
+            &[10; 32],
+        ),
+        &*lookup,
+    );
+    assert_eq!(key_bumped.authenticated_id, None);
+    assert_eq!(both_bumped.authenticated_id, None);
+    assert_eq!(key_bumped.work, expected_work);
+    assert_eq!(both_bumped.work, expected_work);
+}
+
+const AUTH_SCENARIOS: [(&str, &[&str]); 15] = [
+    (
+        "auth-01-approle-envelope",
+        &[
+            "tests/auth_api.rs::f3_login_token_and_lookup_self_use_role_ttl_and_hide_bearer",
+            "tests/auth_api.rs::vault_routes_have_stable_envelopes_strict_json_and_explicit_renewal_refusal",
+        ],
+    ),
+    (
+        "auth-02-invalid-secret-audit",
+        &[
+            "tests/auth_api.rs::wrong_role_invalid_secret_and_deleted_role_have_one_normalized_failure",
+            "tests/auth_api.rs::audit_events_are_secret_free_and_operation_specific",
+        ],
+    ),
+    (
+        "auth-03-one-record-fixed-work",
+        &[
+            "tests/auth.rs::unknown_bad_revoked_expired_and_stale_all_compute_mac_and_read_epoch",
+            "tests/auth.rs::auth_path_has_no_password_kdf_dependency_or_call",
+        ],
+    ),
+    (
+        "auth-04-one-use-concurrent",
+        &[
+            "tests/auth_api.rs::one_use_concurrent_login_commits_once_and_lost_reply_never_rediscloses",
+        ],
+    ),
+    (
+        "auth-05-token-lifecycle",
+        &[
+            "tests/auth_api.rs::f3_login_token_and_lookup_self_use_role_ttl_and_hide_bearer",
+            "tests/auth_api.rs::vault_routes_have_stable_envelopes_strict_json_and_explicit_renewal_refusal",
+        ],
+    ),
+    (
+        "auth-06-secret-nondisclosure",
+        &[
+            "tests/auth.rs::init_stages_control_bootstrap_verifier_atomically_and_never_persists_secret",
+            "tests/control_mgmt.rs::token_disclosure_once_authenticate_revoke_and_lost_reply_recovery",
+        ],
+    ),
+    (
+        "auth-07-flood-and-size",
+        &[
+            "tests/rate_limit.rs::aggregate_buffer_is_bounded_secret_free_and_flushes_once",
+            "tests/rate_limit.rs::oversized_and_malformed_login_drop_before_handler_and_feed_aggregates",
+        ],
+    ),
+    (
+        "auth-08-audience-cross-use",
+        &[
+            "tests/auth_api.rs::token_middleware_resolves_identity_and_separates_listener_audiences",
+            "tests/control_mgmt.rs::wrong_surface_uid_credential_and_capability_are_denied_and_audited",
+        ],
+    ),
+    (
+        "auth-09-store-domain",
+        &["tests/auth.rs::verifier_domain_separates_store_kind_audience_epoch_and_runs_fixed_work"],
+    ),
+    (
+        "auth-10-epoch-linearization",
+        &["tests/auth.rs::epoch_and_verifier_key_bumps_reject_stale_credentials_with_fixed_work"],
+    ),
+    (
+        "auth-11-unix-peer",
+        &[
+            "tests/control_mgmt.rs::wrong_surface_uid_credential_and_capability_are_denied_and_audited",
+        ],
+    ),
+    (
+        "auth-12-kind-cross-use",
+        &[
+            "tests/auth.rs::verifier_domain_separates_store_kind_audience_epoch_and_runs_fixed_work",
+            "tests/auth_api.rs::credential_kind_cross_use_is_normalized_and_audited",
+        ],
+    ),
+    (
+        "auth-13-role-binding",
+        &[
+            "tests/auth_api.rs::wrong_role_invalid_secret_and_deleted_role_have_one_normalized_failure",
+            "tests/auth_api.rs::delete_login_race_is_linearized_and_never_accepts_after_delete",
+        ],
+    ),
+    (
+        "auth-14-forged-forwarding",
+        &[
+            "tests/rate_limit.rs::direct_ignores_forged_forwarding_and_proxy_uses_verified_forwarded_source",
+        ],
+    ),
+    (
+        "auth-15-identity-rate",
+        &[
+            "tests/rate_limit.rs::authenticated_identity_rate_and_global_concurrency_bound_looping_clients",
+        ],
+    ),
+];
+
+#[test]
+fn every_auth_contract_scenario_has_source_evidence_and_safe_observability() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let harness = Harness::builder("auth-contract")
+        .register_canary(b"auth-contract-secret-canary-71e49f")
+        .build()
+        .unwrap();
+    for (index, (id, evidence)) in AUTH_SCENARIOS.iter().enumerate() {
+        assert!(!evidence.is_empty());
+        for item in *evidence {
+            let (path, test) = item.split_once("::").unwrap();
+            let source = std::fs::read_to_string(root.join(path)).unwrap();
+            assert!(
+                source.contains(&format!("fn {test}")),
+                "missing evidence {item}"
+            );
+        }
+        let mut scenario = harness.scenario(id, 1).unwrap();
+        scenario
+            .step(
+                "contract-evidence",
+                SafeSummary::new()
+                    .field("scenario", SafeValue::Unsigned((index + 1) as u64))
+                    .field("evidence_count", SafeValue::Unsigned(evidence.len() as u64)),
+                ExpectedOutcome::Success,
+                ActualOutcome::Success,
+            )
+            .unwrap();
+        let report = scenario.finish_success().unwrap();
+        assert!(report.scan_attestation.clean);
+        assert!(report.jsonl.contains("\"event\":\"scenario_begin\""));
+        assert!(report.jsonl.contains("\"event\":\"step\""));
+        assert!(report.jsonl.contains("\"event\":\"scenario_end\""));
+        assert!(!report.jsonl.contains("auth-contract-secret-canary-71e49f"));
+    }
+}
+
+#[test]
+fn auth_path_has_no_password_kdf_dependency_or_call() {
+    let manifest = include_str!("../Cargo.toml");
+    for dependency in ["argon2", "bcrypt", "pbkdf2", "scrypt"] {
+        assert!(
+            !manifest.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix(dependency)
+                    .is_some_and(|tail| tail.trim_start().starts_with('='))
+            }),
+            "password KDF must not be a direct server dependency: {dependency}"
+        );
+    }
+    let auth_source = include_str!("../src/auth.rs");
+    let credential_source = include_str!("../src/credential.rs");
+    for call in ["argon2::", "bcrypt::", "pbkdf2::", "scrypt::"] {
+        assert!(!auth_source.contains(call), "auth path invokes {call}");
+        assert!(
+            !credential_source.contains(call),
+            "credential path invokes {call}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "U5.6 owns the final scoped AppRole-to-KV read tail"]
+fn scoped_approle_token_reads_authorized_kv_path() {
+    panic!("replace with U5.6 assembled KV authorization evidence");
+}
+
+#[test]
+#[ignore = "U5.6 owns the final expired-and-revoked KV rejection tail"]
+fn scoped_expired_and_revoked_tokens_cannot_read_kv() {
+    panic!("replace with U5.6 assembled KV authorization evidence");
 }

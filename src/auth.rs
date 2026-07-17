@@ -301,6 +301,7 @@ pub struct AuthAuditEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthOperation {
+    Authenticate,
     AppRoleLogin,
     LookupSelf,
     RenewSelf,
@@ -829,6 +830,35 @@ impl AuthService {
             identity_id: record.identity_id,
         })
     }
+
+    pub fn authenticate_with_request(
+        &self,
+        token: &str,
+        audience: CredentialAudience,
+        request_id: [u8; 16],
+    ) -> Result<AuthenticatedToken, AuthError> {
+        let mut catalog = self.catalog.lock().map_err(|_| AuthError::Conflict)?;
+        let credential_accessor = crate::credential::CredentialWire::parse(token)
+            .ok()
+            .map(|wire| wire.accessor);
+        let authenticated = catalog.authenticated_credential(token, audience);
+        let (outcome, identity_id) = authenticated
+            .as_ref()
+            .map_or((AuthAuditOutcome::Denied, None), |(_, record)| {
+                (AuthAuditOutcome::Succeeded, Some(record.identity_id))
+            });
+        catalog.audit.push(AuthAuditEvent {
+            request_id,
+            operation: AuthOperation::Authenticate,
+            outcome,
+            credential_accessor,
+            identity_id,
+        });
+        let (_, record) = authenticated.ok_or(AuthError::Unauthenticated)?;
+        Ok(AuthenticatedToken {
+            identity_id: record.identity_id,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -905,7 +935,11 @@ pub async fn token_auth_guard(
     let Ok(token) = std::str::from_utf8(&token.0) else {
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     };
-    let result = service.authenticate(token, CredentialAudience::Data);
+    let result = service.authenticate_with_request(
+        token,
+        CredentialAudience::Data,
+        request_id(request.headers()),
+    );
     let Ok(authenticated) = result else {
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     };
@@ -924,7 +958,11 @@ pub async fn control_token_auth_guard(
     let Ok(token) = std::str::from_utf8(&token.0) else {
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     };
-    let Ok(authenticated) = service.authenticate(token, CredentialAudience::Control) else {
+    let Ok(authenticated) = service.authenticate_with_request(
+        token,
+        CredentialAudience::Control,
+        request_id(request.headers()),
+    ) else {
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     };
     request.extensions_mut().insert(authenticated);
@@ -1007,7 +1045,7 @@ async fn renew_self(
         return vault_error(StatusCode::FORBIDDEN, "permission denied");
     };
     if service
-        .authenticate(token, CredentialAudience::Data)
+        .authenticate_with_request(token, CredentialAudience::Data, request_id(&headers))
         .is_err()
     {
         return vault_error(StatusCode::FORBIDDEN, "permission denied");

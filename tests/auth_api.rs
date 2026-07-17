@@ -544,3 +544,32 @@ fn audit_events_are_secret_free_and_operation_specific() {
     assert!(!rendered.contains(&secret));
     assert!(!rendered.contains(&token));
 }
+
+#[test]
+fn credential_kind_cross_use_is_normalized_and_audited() {
+    let (service, secret_id, _) = fixture(3, 600);
+    let login = service
+        .login("public-role-a", &secret_id, [70; 16])
+        .unwrap();
+    let token = login.credential.expose_once().to_owned();
+
+    assert!(matches!(
+        service.authenticate_with_request(&secret_id, CredentialAudience::Data, [69; 16]),
+        Err(AuthError::Unauthenticated)
+    ));
+    assert!(matches!(
+        service.login("public-role-a", &token, [71; 16]),
+        Err(AuthError::InvalidCredentials)
+    ));
+    let events = service.with_catalog(|catalog| catalog.audit().to_vec());
+    assert!(events.iter().rev().take(2).all(|event| {
+        event.outcome == AuthAuditOutcome::Denied
+            && matches!(
+                event.operation,
+                AuthOperation::Authenticate | AuthOperation::AppRoleLogin
+            )
+    }));
+    let rendered = format!("{events:?}");
+    assert!(!rendered.contains(&secret_id));
+    assert!(!rendered.contains(&token));
+}
