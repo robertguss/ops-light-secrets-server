@@ -61,7 +61,7 @@ impl SecretBytes {
         &self.0
     }
 
-    pub(crate) fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+    pub fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
         self.0
     }
 }

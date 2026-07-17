@@ -50,6 +50,8 @@ use crate::clock::WatermarkCommand;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -1257,7 +1259,10 @@ impl Store {
         if prepared.store_id != meta.store_id {
             return Err(StoreError::Integrity);
         }
+        let path = path.as_ref();
         let database = Database::create(path).map_err(|_| StoreError::Database)?;
+        std::fs::set_permissions(path, Permissions::from_mode(0o600))
+            .map_err(|_| StoreError::Database)?;
         let write = database.begin_write().map_err(|_| StoreError::Database)?;
         {
             let mut meta_table = write.open_table(META).map_err(|_| StoreError::Database)?;
@@ -1591,6 +1596,147 @@ impl Store {
     pub fn put_keyring(&self, envelope: &KeyringEnvelope) -> Result<(), StoreError> {
         self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
         self.put(SYSTEM_KEYRING, KEYRING_KEY, &envelope.encode()?)
+    }
+
+    pub fn commit_recipient_rewrap(
+        &self,
+        prepared: keyring::PreparedRecipientRewrap,
+        event: &AuditEvent,
+        random: &mut impl keyring::RandomSource,
+        fault: keyring::RecipientRewrapFault,
+    ) -> Result<keyring::Keyring, StoreError> {
+        self.ensure_integrity_operation(IntegrityOperation::ManagementMutation)?;
+        if prepared.keyring.store_id() != self.meta()?.store_id
+            || prepared.keyring.generation() < 2
+            || event.operation != AuditOperation::KeyringChange
+            || !event.authentication.succeeded
+            || event.authentication.method == AuditAuthMethod::None
+            || !event.authorization.allowed
+            || event.authorization.capability != Some(AuditCapability::StoreKeyRotate)
+        {
+            return Err(StoreError::Integrity);
+        }
+        let write = self
+            .database
+            .begin_write()
+            .map_err(|_| StoreError::Database)?;
+        let current_metadata = {
+            let table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(KEYRING_METADATA_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Uninitialized)?
+                .value()
+                .to_vec();
+            Sealed::<keyring::KeyringMetadata>::decode(&bytes)?
+        };
+        current_metadata.verify(
+            prepared.keyring.metadata_integrity_key(),
+            prepared.keyring.store_id(),
+            KEYRING_METADATA_KEY,
+        )?;
+        prepared.metadata.verify(
+            prepared.keyring.metadata_integrity_key(),
+            prepared.keyring.store_id(),
+            KEYRING_METADATA_KEY,
+        )?;
+        if current_metadata.value.generation
+            != prepared
+                .keyring
+                .generation()
+                .checked_sub(1)
+                .ok_or(StoreError::Integrity)?
+            || current_metadata.value.recipients != prepared.old_recipients
+            || prepared.metadata.value.generation != prepared.keyring.generation()
+            || prepared.metadata.value.recipients != prepared.new_recipients
+        {
+            return Err(StoreError::Integrity);
+        }
+        let head = {
+            let table = write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?;
+            let bytes = table
+                .get(AUDIT_HEAD_KEY)
+                .map_err(|_| StoreError::Database)?
+                .ok_or(StoreError::Integrity)?
+                .value()
+                .to_vec();
+            AuditEnvelope::decode(&bytes)?
+        };
+        let sequence = head
+            .epoch_sequence
+            .checked_add(1)
+            .ok_or(StoreError::Integrity)?;
+        if prepared.metadata.value.last_rewrap_audit_sequence != sequence
+            || event.effective_timestamp_milliseconds < head.effective_timestamp_milliseconds
+            || !matches!(
+                &event.state,
+                AuditStateCommitment::Delta(delta)
+                    if delta == &prepared.state_delta(&current_metadata)?
+            )
+        {
+            return Err(StoreError::Integrity);
+        }
+        let entry = StoredAuditEntry::prepare(
+            &prepared.keyring,
+            event,
+            head.audit_epoch,
+            sequence,
+            head.chain_hash()?,
+            random,
+        )
+        .map_err(|_| StoreError::Integrity)?;
+        let audit_key = audit_key(&entry.envelope);
+        let encoded_entry = entry.encode()?;
+        let encoded_head = entry.envelope.encode()?;
+        let encoded_envelope = prepared.envelope.encode()?;
+        let encoded_metadata = prepared.metadata.encode()?;
+        {
+            let mut table = write
+                .open_table(SYSTEM_KEYRING)
+                .map_err(|_| StoreError::Database)?;
+            table
+                .insert(KEYRING_KEY, encoded_envelope.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        if fault == keyring::RecipientRewrapFault::AfterEnvelopeStage {
+            return Err(StoreError::Database);
+        }
+        {
+            let mut table = write.open_table(META).map_err(|_| StoreError::Database)?;
+            table
+                .insert(KEYRING_METADATA_KEY, encoded_metadata.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        if fault == keyring::RecipientRewrapFault::AfterMetadataStage {
+            return Err(StoreError::Database);
+        }
+        {
+            let mut table = write
+                .open_table(AUDIT_EVENTS)
+                .map_err(|_| StoreError::Database)?;
+            if table
+                .get(audit_key.as_slice())
+                .map_err(|_| StoreError::Database)?
+                .is_some()
+            {
+                return Err(StoreError::Integrity);
+            }
+            table
+                .insert(audit_key.as_slice(), encoded_entry.as_slice())
+                .map_err(|_| StoreError::Database)?;
+        }
+        write
+            .open_table(AUDIT_HEAD)
+            .map_err(|_| StoreError::Database)?
+            .insert(AUDIT_HEAD_KEY, encoded_head.as_slice())
+            .map_err(|_| StoreError::Database)?;
+        if fault == keyring::RecipientRewrapFault::AfterAuditStage {
+            return Err(StoreError::Database);
+        }
+        write.commit().map_err(|_| StoreError::Database)?;
+        Ok(prepared.keyring)
     }
 
     pub fn keyring(&self) -> Result<Option<KeyringEnvelope>, StoreError> {

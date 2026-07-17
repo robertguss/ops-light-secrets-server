@@ -114,6 +114,30 @@ The cross-release format/domain registry and shared publication, signer,
 maintenance-preflight, and recovery evidence codecs are frozen in
 `docs/format-freeze-v1.md`.
 
+## Offline active-recipient rewrap
+
+`key recipient rewrap` is the cheap routine key operation: it changes only the
+age envelope, MAC-authenticated keyring metadata generation, and matching audit
+event. Purpose keys and protected record bytes do not change. Stop the daemon
+first; the command takes the independent exclusive data-directory lock and
+refuses unsafe/symlinked/foreign-owned store paths.
+
+Supply `--current-identity-source`, `--new-active-identity-source`, and
+`--control-credential-source` as typed descriptors (`tty`, `fd:N`, or
+`credential:NAME`; guarded development environments require the global unsafe
+flag). `--recovery-recipient` is an optional distinct public age recipient.
+Private identities and bearer credentials never belong in argv or output.
+
+First omit `--confirm`. After authenticating the control credential and its
+current `key-rotation` grant, the command prints only old/new public
+fingerprints, generation, lockout/backup-receipt blast radius, and the exact
+digest confirmation; it mutates nothing. Repeat with the same inputs, audited
+`--reason`, and `--confirm DIGEST`. The command self-tests the new private
+identity, reloads credential/identity/grants at the final barrier, then commits
+envelope, metadata, and audit together. A recovery identity may be the current
+unwrap source. Retry after a lost final reply with the installed recipient set
+returns a stable `already_installed` no-op. Any other stale generation refuses.
+
 Audit payloads use schema version 1 and are encrypted under the keyring's
 current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct
 `audit-event` record domain. The AAD-bound logical id contains the audit epoch,

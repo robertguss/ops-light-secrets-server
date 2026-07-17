@@ -742,6 +742,136 @@ pub struct PreparedKeyring {
     pub bootstrap_credential_secret: Option<Zeroizing<String>>,
 }
 
+pub struct PreparedRecipientRewrap {
+    pub keyring: Keyring,
+    pub envelope: KeyringEnvelope,
+    pub metadata: Sealed<KeyringMetadata>,
+    pub old_recipients: RecipientSet,
+    pub new_recipients: RecipientSet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecipientRewrapFault {
+    None,
+    AfterEnvelopeStage,
+    AfterMetadataStage,
+    AfterAuditStage,
+}
+
+pub struct RecipientRewrapRequest<'a> {
+    pub expected_generation: u64,
+    pub new_recovery: Option<&'a x25519::Recipient>,
+    pub audit_sequence: u64,
+    pub reason: &'a str,
+    pub confirmation: &'a str,
+    pub authorized: bool,
+}
+
+impl PreparedRecipientRewrap {
+    pub fn state_delta(
+        &self,
+        current: &Sealed<KeyringMetadata>,
+    ) -> Result<super::StateDeltaSet, CodecError> {
+        super::StateDeltaSet::new([super::StateDelta::replace(
+            current.state_tuple(super::KEYRING_METADATA_KEY)?,
+            self.metadata.state_tuple(super::KEYRING_METADATA_KEY)?,
+        )?])
+    }
+}
+
+pub fn recipient_rewrap_confirmation(
+    store_id: StoreId,
+    expected_generation: u64,
+    old_recipients: RecipientSet,
+    new_recipients: RecipientSet,
+    reason: &str,
+) -> Result<String, KeyringError> {
+    if reason.is_empty() || reason.len() > 1024 || reason.chars().any(char::is_control) {
+        return Err(KeyringError::Invalid);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ops-light-secrets-server.recipient-rewrap-confirmation.v1\0");
+    for field in [
+        &store_id.0[..],
+        &expected_generation.to_be_bytes(),
+        &old_recipients.active.0,
+        old_recipients
+            .recovery
+            .as_ref()
+            .map_or(&[][..], |value| &value.0[..]),
+        &new_recipients.active.0,
+        new_recipients
+            .recovery
+            .as_ref()
+            .map_or(&[][..], |value| &value.0[..]),
+        reason.as_bytes(),
+    ] {
+        hasher.update(&(field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+impl Keyring {
+    pub fn prepare_recipient_rewrap(
+        mut self,
+        new_active_identity: &x25519::Identity,
+        request: RecipientRewrapRequest<'_>,
+    ) -> Result<PreparedRecipientRewrap, KeyringError> {
+        let new_active = new_active_identity.to_public();
+        let new_recipients = RecipientSet::new(&new_active, request.new_recovery)?;
+        let old_recipients = self.recipients;
+        if new_recipients == old_recipients {
+            return Err(KeyringError::AlreadyInstalled);
+        }
+        if !request.authorized
+            || self.generation != request.expected_generation
+            || request.audit_sequence == 0
+        {
+            return Err(if self.generation != request.expected_generation {
+                KeyringError::GenerationMismatch
+            } else {
+                KeyringError::Invalid
+            });
+        }
+        let expected_confirmation = recipient_rewrap_confirmation(
+            self.store_id,
+            request.expected_generation,
+            old_recipients,
+            new_recipients,
+            request.reason,
+        )?;
+        if request.confirmation != expected_confirmation {
+            return Err(KeyringError::Invalid);
+        }
+        self.generation = self.generation.checked_add(1).ok_or(KeyringError::Limit)?;
+        self.recipients = new_recipients;
+        let envelope = self.wrap(&new_active, request.new_recovery)?;
+        let metadata = Sealed::seal(
+            KeyringMetadata {
+                generation: self.generation,
+                format_version: KEYRING_FORMAT_VERSION,
+                recipients: new_recipients,
+                last_rewrap_audit_sequence: request.audit_sequence,
+            },
+            self.generation,
+            self.metadata_integrity_key(),
+            self.store_id,
+            super::KEYRING_METADATA_KEY,
+        )?;
+        // Decrypt-self-test before any durable mutation. The opened copy is
+        // dropped immediately; this object retains the same purpose keys.
+        KeyringOpener::default().open(self.store_id, &envelope, &metadata, new_active_identity)?;
+        Ok(PreparedRecipientRewrap {
+            keyring: self,
+            envelope,
+            metadata,
+            old_recipients,
+            new_recipients,
+        })
+    }
+}
+
 pub fn prepare_keyring(
     store_id: StoreId,
     generation: u64,
@@ -1090,6 +1220,7 @@ pub enum KeyringError {
     Decrypt,
     Identity,
     AlreadyOpened,
+    AlreadyInstalled,
     StoreMismatch,
     MetadataIntegrity,
     MetadataMismatch,
@@ -1110,6 +1241,7 @@ impl fmt::Display for KeyringError {
             Self::Decrypt => "keyring envelope decryption failed",
             Self::Identity => "age identity invalid",
             Self::AlreadyOpened => "keyring open already attempted",
+            Self::AlreadyInstalled => "keyring recipient set already installed",
             Self::StoreMismatch => "keyring store id mismatch",
             Self::MetadataIntegrity => "keyring metadata integrity failed",
             Self::MetadataMismatch => "keyring metadata mismatch",

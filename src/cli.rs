@@ -1,18 +1,28 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use ops_light_secrets_server::clock::{ClockRepairRequest, validate_repair};
 use ops_light_secrets_server::config::{Config, SecretSource, SystemSecretInput};
+use ops_light_secrets_server::control::management::{
+    ControlCommand, ManagementCatalog, ManagementPrincipal,
+};
+use ops_light_secrets_server::credential::{CredentialAudience, CredentialKind};
+use ops_light_secrets_server::startup::DataDirectoryLock;
 use ops_light_secrets_server::startup::validate_serve_shell;
 use ops_light_secrets_server::store::keyring::{
-    AgeIdentityMetadata, IdentityPurpose, SystemRandom, generate_age_identity,
+    AgeIdentityMetadata, IdentityPurpose, KeyringError, KeyringOpener, RandomSource,
+    RecipientRewrapFault, RecipientRewrapRequest, RecipientSet, SystemRandom,
+    generate_age_identity, parse_identity, recipient_rewrap_confirmation,
 };
 use ops_light_secrets_server::store::{
-    Canonical, CheckpointDescriptor, CheckpointPublicKey, SignedSigningTransition,
-    SigningKeyCandidate, SigningTransition, generate_signing_key, sign_checkpoint_authorized,
+    AuditAuthMethod, AuditAuthentication, AuditAuthorization, AuditCapability, AuditEvent,
+    AuditOperation, AuditOutcome, AuditReason, AuditResource, AuditStateCommitment, Canonical,
+    CheckpointDescriptor, CheckpointPublicKey, SignedSigningTransition, SigningKeyCandidate,
+    SigningTransition, Store, generate_signing_key, sign_checkpoint_authorized,
     sign_signing_transition, write_checkpoint_atomic, write_signed_transition_atomic,
 };
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::fd::FromRawFd;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
 const LONG_ABOUT: &str = "Local secrets service. Configuration comes from --config and OLSS_* environment settings.\n\
@@ -468,6 +478,34 @@ enum KeyCommand {
         #[command(subcommand)]
         command: AgeIdentityCommand,
     },
+    /// Rotate the active age recipient without touching protected records
+    Recipient {
+        #[command(subcommand)]
+        command: RecipientCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RecipientCommand {
+    /// Offline atomic recipient rewrap under the key-rotation capability
+    Rewrap {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        current_identity_source: SecretSource,
+        #[arg(long)]
+        new_active_identity_source: SecretSource,
+        #[arg(long)]
+        recovery_recipient: Option<String>,
+        #[arg(long)]
+        control_credential_source: SecretSource,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long, value_enum, default_value = "human")]
+        output: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -676,7 +714,40 @@ pub fn run() -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
                 return Err("clock_repair_refused code=integration_pending setting=credential_epoch_replacement remediation='complete U8.3 R41 primitive'".into());
             }
-            Command::Key { .. } => unreachable!("stateless key command handled before config"),
+            Command::Key {
+                command: KeyCommand::AgeIdentity { .. },
+            } => unreachable!("stateless key command handled before config"),
+            Command::Key {
+                command:
+                    KeyCommand::Recipient {
+                        command:
+                            RecipientCommand::Rewrap {
+                                expected_generation,
+                                current_identity_source,
+                                new_active_identity_source,
+                                recovery_recipient,
+                                control_credential_source,
+                                reason,
+                                confirm,
+                                output,
+                            },
+                    },
+            } => {
+                return run_recipient_rewrap(
+                    &config,
+                    RecipientRewrapCli {
+                        expected_generation: *expected_generation,
+                        current_identity_source,
+                        new_active_identity_source,
+                        recovery_recipient: recovery_recipient.as_deref(),
+                        control_credential_source,
+                        reason,
+                        confirm: confirm.as_deref(),
+                        output: *output,
+                        unsafe_environment: cli.unsafe_dev_secret_env,
+                    },
+                );
+            }
             Command::Audit { .. } => {
                 return Err("signing_trust_refused code=integration_pending setting=authenticated_control_coordinator remediation='complete live signing-trust persistence adapter'".into());
             }
@@ -691,6 +762,361 @@ pub fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+struct RecipientRewrapCli<'a> {
+    expected_generation: u64,
+    current_identity_source: &'a SecretSource,
+    new_active_identity_source: &'a SecretSource,
+    recovery_recipient: Option<&'a str>,
+    control_credential_source: &'a SecretSource,
+    reason: &'a str,
+    confirm: Option<&'a str>,
+    output: OutputFormat,
+    unsafe_environment: bool,
+}
+
+fn run_recipient_rewrap(config: &Config, request: RecipientRewrapCli<'_>) -> Result<(), String> {
+    if !request.unsafe_environment
+        && [
+            request.current_identity_source,
+            request.new_active_identity_source,
+            request.control_credential_source,
+        ]
+        .into_iter()
+        .any(|source| matches!(source, SecretSource::UnsafeEnvironment(_)))
+    {
+        return Err("recipient_rewrap_refused code=unsafe_environment_source".into());
+    }
+    let _lock = DataDirectoryLock::acquire(&config.data_directory)
+        .map_err(|_| "recipient_rewrap_refused code=daemon_or_lock_active".to_owned())?;
+    let store_path = config.data_directory.join("store.redb");
+    let store_metadata = std::fs::symlink_metadata(&store_path)
+        .map_err(|_| "recipient_rewrap_refused code=store_path".to_owned())?;
+    if !store_metadata.is_file()
+        || store_metadata.file_type().is_symlink()
+        || store_metadata.uid() != unsafe { libc::geteuid() }
+        || store_metadata.permissions().mode() & 0o077 != 0
+        || store_metadata.nlink() != 1
+    {
+        return Err("recipient_rewrap_refused code=unsafe_store_path".into());
+    }
+    let store = Store::open(&store_path)
+        .map_err(|_| "recipient_rewrap_refused code=store_open_failed".to_owned())?;
+    let mut input = SystemSecretInput::from_environment();
+    let current_secret = request
+        .current_identity_source
+        .read("key.current_identity_source", &mut input)
+        .map_err(|_| "recipient_rewrap_refused code=current_identity_source".to_owned())?;
+    let current_identity = parse_identity(current_secret.into_zeroizing())
+        .map_err(|_| "recipient_rewrap_refused code=current_identity_invalid".to_owned())?;
+    let new_secret = request
+        .new_active_identity_source
+        .read("key.new_active_identity_source", &mut input)
+        .map_err(|_| "recipient_rewrap_refused code=new_identity_source".to_owned())?;
+    let new_identity = parse_identity(new_secret.into_zeroizing())
+        .map_err(|_| "recipient_rewrap_refused code=new_identity_invalid".to_owned())?;
+    let recovery = request
+        .recovery_recipient
+        .map(str::parse::<age::x25519::Recipient>)
+        .transpose()
+        .map_err(|_| "recipient_rewrap_refused code=recovery_recipient_invalid".to_owned())?;
+    let metadata = store
+        .keyring_metadata()
+        .map_err(|_| "recipient_rewrap_refused code=metadata_read".to_owned())?
+        .ok_or_else(|| "recipient_rewrap_refused code=uninitialized".to_owned())?;
+    let envelope = store
+        .keyring()
+        .map_err(|_| "recipient_rewrap_refused code=envelope_read".to_owned())?
+        .ok_or_else(|| "recipient_rewrap_refused code=uninitialized".to_owned())?;
+    let opened = KeyringOpener::default()
+        .open(
+            store
+                .meta()
+                .map_err(|_| "recipient_rewrap_refused code=meta_read")?
+                .store_id,
+            &envelope,
+            &metadata,
+            &current_identity,
+        )
+        .map_err(|_| "recipient_rewrap_refused code=current_identity_rejected".to_owned())?;
+    let credential = request
+        .control_credential_source
+        .read("key.control_credential_source", &mut input)
+        .map_err(|_| "recipient_rewrap_refused code=credential_source".to_owned())?;
+    let raw_credential = std::str::from_utf8(credential.expose())
+        .map_err(|_| "recipient_rewrap_refused code=credential_invalid".to_owned())?;
+    let effective_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "recipient_rewrap_refused code=clock")?
+        .as_secs()
+        .max(
+            store
+                .meta()
+                .map_err(|_| "recipient_rewrap_refused code=meta_read")?
+                .high_water_unix_seconds,
+        );
+    let verification = opened
+        .verify_credential(
+            &store,
+            raw_credential,
+            CredentialKind::Token,
+            CredentialAudience::Control,
+            effective_seconds,
+        )
+        .map_err(|_| "recipient_rewrap_refused code=credential_verify".to_owned())?;
+    let credential_id = verification
+        .authenticated_id
+        .ok_or_else(|| "recipient_rewrap_refused code=credential_denied".to_owned())?;
+    let identity_id = opened
+        .credential_records(&store)
+        .map_err(|_| "recipient_rewrap_refused code=credential_reload".to_owned())?
+        .into_iter()
+        .find(|record| record.value.id == credential_id)
+        .map(|record| record.value.identity_id)
+        .ok_or_else(|| "recipient_rewrap_refused code=credential_identity".to_owned())?;
+    let mut random = SystemRandom;
+    let mut request_id = [0_u8; 16];
+    let mut event_id = [0_u8; 16];
+    random
+        .fill(&mut request_id)
+        .and_then(|()| random.fill(&mut event_id))
+        .map_err(|_| "recipient_rewrap_refused code=random".to_owned())?;
+    authorize_recipient_rewrap(&opened, &store, identity_id, request_id)?;
+    let head = store
+        .audit_head()
+        .map_err(|_| "recipient_rewrap_refused code=audit_head".to_owned())?
+        .ok_or_else(|| "recipient_rewrap_refused code=audit_head_missing".to_owned())?;
+    let audit_sequence = head
+        .epoch_sequence
+        .checked_add(1)
+        .ok_or_else(|| "recipient_rewrap_refused code=sequence_limit".to_owned())?;
+    let old_recipients = opened.recipients();
+    let new_recipients = RecipientSet::new(&new_identity.to_public(), recovery.as_ref())
+        .map_err(|_| "recipient_rewrap_refused code=recipient_set".to_owned())?;
+    let expected_confirmation = recipient_rewrap_confirmation(
+        store
+            .meta()
+            .map_err(|_| "recipient_rewrap_refused code=meta_read")?
+            .store_id,
+        request.expected_generation,
+        old_recipients,
+        new_recipients,
+        request.reason,
+    )
+    .map_err(|_| "recipient_rewrap_refused code=reason".to_owned())?;
+    let Some(confirmation) = request.confirm else {
+        return render_recipient_plan(
+            request.output,
+            request.expected_generation,
+            old_recipients,
+            new_recipients,
+            &expected_confirmation,
+        );
+    };
+    let prepared = match opened.prepare_recipient_rewrap(
+        &new_identity,
+        RecipientRewrapRequest {
+            expected_generation: request.expected_generation,
+            new_recovery: recovery.as_ref(),
+            audit_sequence,
+            reason: request.reason,
+            confirmation,
+            authorized: true,
+        },
+    ) {
+        Ok(value) => value,
+        Err(KeyringError::AlreadyInstalled) => {
+            return render_recipient_rewrap(
+                request.output,
+                metadata.value.generation,
+                old_recipients,
+                new_recipients,
+                true,
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "recipient_rewrap_refused code=prepare cause={error}"
+            ));
+        }
+    };
+    // Final barrier: re-read credential, identity, and grants after expensive
+    // envelope construction and new-identity self-test.
+    let final_verification = prepared
+        .keyring
+        .verify_credential(
+            &store,
+            raw_credential,
+            CredentialKind::Token,
+            CredentialAudience::Control,
+            effective_seconds,
+        )
+        .map_err(|_| "recipient_rewrap_refused code=final_credential_verify".to_owned())?;
+    if final_verification.authenticated_id != Some(credential_id) {
+        return Err("recipient_rewrap_refused code=final_credential_denied".into());
+    }
+    authorize_recipient_rewrap(&prepared.keyring, &store, identity_id, request_id)?;
+    let reason_digest = blake3::hash(request.reason.as_bytes()).to_hex();
+    let event = AuditEvent {
+        event_id,
+        request_id,
+        authentication: AuditAuthentication {
+            method: AuditAuthMethod::Token,
+            identity_id: Some(identity_id),
+            credential_accessor: None,
+            succeeded: true,
+            failure_reason: None,
+        },
+        authorization: AuditAuthorization {
+            capability: Some(AuditCapability::StoreKeyRotate),
+            allowed: true,
+            reason: AuditReason::None,
+        },
+        consumer_instance_id: None,
+        resource: Some(AuditResource::Canonical(format!(
+            "keyring/recipients/reason-{}",
+            &reason_digest[..16]
+        ))),
+        operation: AuditOperation::KeyringChange,
+        outcome: AuditOutcome::Succeeded,
+        reason: AuditReason::OperatorRequested,
+        effective_timestamp_milliseconds: effective_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| "recipient_rewrap_refused code=clock_limit".to_owned())?,
+        wall_clock_observation_milliseconds: effective_seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| "recipient_rewrap_refused code=clock_limit".to_owned())?,
+        secret_version: None,
+        state: AuditStateCommitment::Delta(
+            prepared
+                .state_delta(&metadata)
+                .map_err(|_| "recipient_rewrap_refused code=state_delta".to_owned())?,
+        ),
+        previous_epoch_terminal: None,
+        flood: None,
+        overload_counts: Vec::new(),
+    };
+    let replacement = store
+        .commit_recipient_rewrap(prepared, &event, &mut random, RecipientRewrapFault::None)
+        .map_err(|_| "recipient_rewrap_refused code=commit".to_owned())?;
+    drop(credential);
+    render_recipient_rewrap(
+        request.output,
+        replacement.generation(),
+        old_recipients,
+        replacement.recipients(),
+        false,
+    )
+}
+
+fn authorize_recipient_rewrap(
+    keyring: &ops_light_secrets_server::store::keyring::Keyring,
+    store: &Store,
+    identity_id: [u8; 16],
+    request_id: [u8; 16],
+) -> Result<(), String> {
+    let identities = keyring
+        .identity_records(store)
+        .map_err(|_| "recipient_rewrap_refused code=identity_reload".to_owned())?
+        .into_iter()
+        .map(|record| record.value);
+    let grants = keyring
+        .grant_records(store, identity_id)
+        .map_err(|_| "recipient_rewrap_refused code=grant_reload".to_owned())?
+        .into_iter()
+        .map(|record| record.value);
+    let mut catalog = ManagementCatalog::new(identities, grants)
+        .map_err(|_| "recipient_rewrap_refused code=authorization_catalog".to_owned())?;
+    let uid = unsafe { libc::geteuid() };
+    catalog
+        .authorize_command(
+            ManagementPrincipal {
+                identity_id,
+                audience: CredentialAudience::Control,
+                peer_uid: uid,
+                expected_uid: uid,
+                credential_active: true,
+            },
+            ControlCommand::RecipientRewrap,
+            request_id,
+        )
+        .map_err(|_| "recipient_rewrap_refused code=authorization_denied".to_owned())
+}
+
+fn render_recipient_rewrap(
+    output: OutputFormat,
+    generation: u64,
+    old: RecipientSet,
+    new: RecipientSet,
+    already_installed: bool,
+) -> Result<(), String> {
+    let value = serde_json::json!({
+        "schema": 1,
+        "generation": generation,
+        "old_active_fingerprint": hex(&old.active.0),
+        "old_recovery_fingerprint": old.recovery.map(|value| hex(&value.0)),
+        "new_active_fingerprint": hex(&new.active.0),
+        "new_recovery_fingerprint": new.recovery.map(|value| hex(&value.0)),
+        "already_installed": already_installed,
+        "blast_radius": "old active identity loses keyring access; prior active-path backup receipts become stale",
+    });
+    let rendered = match output {
+        OutputFormat::Json => serde_json::to_string(&value)
+            .map_err(|_| "recipient rewrap output encoding failed".to_owned())?,
+        OutputFormat::Human => format!(
+            "generation: {}\nold active: {}\nnew active: {}\nalready installed: {}\nblast radius: old active identity loses access; prior active-path backup receipts become stale",
+            generation,
+            hex(&old.active.0),
+            hex(&new.active.0),
+            already_installed,
+        ),
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(rendered.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .map_err(|_| "recipient rewrap output failed".to_owned())
+}
+
+fn render_recipient_plan(
+    output: OutputFormat,
+    generation: u64,
+    old: RecipientSet,
+    new: RecipientSet,
+    confirmation: &str,
+) -> Result<(), String> {
+    let value = serde_json::json!({
+        "schema": 1,
+        "expected_generation": generation,
+        "old_active_fingerprint": hex(&old.active.0),
+        "old_recovery_fingerprint": old.recovery.map(|value| hex(&value.0)),
+        "new_active_fingerprint": hex(&new.active.0),
+        "new_recovery_fingerprint": new.recovery.map(|value| hex(&value.0)),
+        "confirmation": confirmation,
+        "mutation": false,
+        "blast_radius": "old active identity loses keyring access; prior active-path backup receipts become stale",
+    });
+    let rendered = match output {
+        OutputFormat::Json => serde_json::to_string(&value)
+            .map_err(|_| "recipient rewrap plan encoding failed".to_owned())?,
+        OutputFormat::Human => format!(
+            "expected generation: {}\nold active: {}\nnew active: {}\nconfirmation: {}\nmutation: false\nblast radius: old active identity loses access; prior active-path backup receipts become stale",
+            generation,
+            hex(&old.active.0),
+            hex(&new.active.0),
+            confirmation,
+        ),
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(rendered.as_bytes())
+        .and_then(|()| stdout.write_all(b"\n"))
+        .map_err(|_| "recipient rewrap plan output failed".to_owned())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn run_checkpoint_sign(

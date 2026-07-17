@@ -120,6 +120,10 @@ fn exhaustive_command_registry_has_one_mapping_and_no_server_aliases() {
             Some(Capability::StoreMaintenance)
         );
     }
+    assert_eq!(
+        command_authorization(ControlCommand::RecipientRewrap).capability,
+        Some(Capability::KeyRotation)
+    );
     for command in [
         ControlCommand::BackupList,
         ControlCommand::BackupShow,

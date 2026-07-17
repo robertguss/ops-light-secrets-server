@@ -63,6 +63,7 @@ pub enum ControlCommand {
     StoreReserveStatus,
     StoreReserveRelease,
     StoreReserveRecreate,
+    RecipientRewrap,
     ConsumerList,
     ConsumerShow,
     ConsumerReconcile,
@@ -81,7 +82,7 @@ pub enum ControlCommand {
 }
 
 impl ControlCommand {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 56] = [
         Self::IdentityCreate,
         Self::IdentityList,
         Self::IdentityShow,
@@ -122,6 +123,7 @@ impl ControlCommand {
         Self::StoreReserveStatus,
         Self::StoreReserveRelease,
         Self::StoreReserveRecreate,
+        Self::RecipientRewrap,
         Self::ConsumerList,
         Self::ConsumerShow,
         Self::ConsumerReconcile,
@@ -193,6 +195,7 @@ pub fn command_authorization(command: ControlCommand) -> CommandAuthorization {
         | O::StoreReserveStatus
         | O::StoreReserveRelease
         | O::StoreReserveRecreate => (CommandPhase::Server, Some(C::StoreMaintenance)),
+        O::RecipientRewrap => (CommandPhase::Server, Some(C::KeyRotation)),
         O::ConsumerList | O::ConsumerShow | O::ConsumerReconcile => {
             (CommandPhase::Server, Some(C::ConsumerEnumerate))
         }
