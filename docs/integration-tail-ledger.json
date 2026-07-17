@@ -28,8 +28,8 @@
     },
     {
       "contract": "startup.init_recovery_reserve",
-      "owner": "olss-charter-qul.4.5",
-      "verification": "Provision/reconcile the allocated reserve before commit, validate reserve artifacts through U1.2's inspector, and record matching identity/allocation metadata in the transaction."
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Wire U6.5's allocated no-follow reserve primitive into live init: provision/reconcile before commit, validate artifacts through U1.2's inspector, and atomically record matching identity/allocation metadata. Exercise real 576 MiB allocation or a production-equivalent capacity-controlled filesystem profile without sparse substitution."
     },
     {
       "contract": "startup.online_disclosure_handshake",
@@ -78,8 +78,8 @@
     },
     {
       "contract": "startup.reserve_recovery",
-      "owner": "olss-charter-qul.4.5",
-      "verification": "Reconcile authenticated reserve DB/file generations into ReserveState and exercise status/recreate remediation with the real allocated file."
+      "owner": "olss-charter-qul.12.14",
+      "verification": "Persist/hydrate U6.5 RecoveryReserveRecord and CapacityGuard through the real coordinator; reconcile every authenticated record/file/temp transition before data admission; bind online/offline store reserve status/release/recreate to owner peer plus store-maintenance; and execute exact-threshold minimal recovery, release, external cleanup, recreate, and readiness restoration with real allocated blocks."
     },
     {
       "contract": "startup.record_reencrypt_marker",

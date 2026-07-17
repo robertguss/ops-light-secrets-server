@@ -103,6 +103,46 @@ enum Command {
         #[command(subcommand)]
         command: AppRoleCommand,
     },
+    /// Local store maintenance operations
+    Store {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: StoreCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreCommand {
+    /// Inspect or recover the allocated capacity reserve
+    Reserve {
+        #[command(subcommand)]
+        command: StoreReserveCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreReserveCommand {
+    /// Show authenticated reserve generation, allocation, and capacity band
+    Status,
+    /// Release allocated blocks after data admission has stopped
+    Release {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
+    /// Reallocate and verify the reserve before restoring readiness
+    Recreate {
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -644,7 +684,8 @@ pub fn run() -> Result<(), String> {
             | Command::Grant { .. }
             | Command::Authz { .. }
             | Command::Token { .. }
-            | Command::Approle { .. } => {
+            | Command::Approle { .. }
+            | Command::Store { .. } => {
                 return Err("control_command_refused code=integration_pending setting=authenticated_request_coordinator remediation='complete U4.2 control-credential middleware and coordinator adapter'".into());
             }
         }

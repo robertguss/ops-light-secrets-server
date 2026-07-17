@@ -63,6 +63,50 @@ Handlers receive only typed submissions; neither the coordinator backend nor a
 raw database transaction is exposed. The coordinator owns the reserved 100 ms
 clock-watermark submission path as well as ordinary data and recovery lanes.
 
+## Capacity and recovery reserve
+
+The frozen maximum transaction/storage commitment is 9 MiB: the 8 MiB record
+ceiling plus 1 MiB for canonical headers, clear records, state commitment, and
+the audit frame. Every data request owner must reject a request that cannot fit
+this budget before RNG, allocation, decryption, or mutation. With the 64-entry
+data lane, admission permanently protects 576 MiB of worst-case in-flight
+headroom. The fixed idle clock event is bounded at 512 bytes every 30 seconds,
+or 538,214,400 bytes per 365-day year; that entire annual amount separates the
+warning band from data-stop.
+
+The recovery sequence has 64 worst-case transaction slots (576 MiB): checkpoint
+prepare/register; backup publication/outcome, signature, two receipts, and
+status; emergency credential and shutdown/release work; output retry/abandon;
+and eight incident investigations, each budgeted for query plus export
+publication/outcome/signature/recipient/status. The exact data-stop floor is
+1,207,959,552 bytes: 576 MiB queued data headroom, 558 MiB minimal recovery,
+and an 18 MiB shutdown+reserve-release floor. At or below that floor, data is
+refused before decryption. At or below 18 MiB, only shutdown and reserve release
+may enter. A publication reservation holds up to two 9 MiB completion/abandon
+transactions against its opaque output ID until terminal disposition.
+
+`recovery.reserve` is a same-filesystem 576 MiB mode-0600 regular file with real
+allocated blocks; sparse length is not capacity. Provisioning uses a no-follow,
+create-exclusive temporary file, `posix_fallocate`, allocation/mode/owner/link
+verification, file fsync, atomic rename, and parent-directory fsync. Release is
+the authenticated, generation-checked sequence `release_requested` → verified
+rename → parent fsync → unlink → parent fsync → `released`. Recreate records
+`recreate_requested`, allocates and verifies the full file while ordinary
+headroom still fits, then commits `healthy`. Startup never enables data while
+the record/file/temp combination disagrees; it finishes only a uniquely
+determined transition and rejects symlinks, foreign files, sparse files, quota,
+ENOSPC, wrong ownership/mode/link count, or ambiguous artifacts.
+
+Exact controls are `store reserve status`, `store reserve release
+--expected-generation G --reason TEXT --confirm DIGEST`, and the corresponding
+`recreate`. All require owner locality, an active control-audience credential,
+and `store-maintenance`; broad diagnostics, a filesystem lock, and keyring
+possession are not substitutes. Release is refused while capacity is healthy or
+warning. Stable status exposes only generation/state, expected/allocated bytes,
+band, held counts, and next action—never a raw path. The assembled online and
+offline coordinator adapters remain fail-closed until the recovery E2E owner
+wires these frozen primitives.
+
 Audit payloads use schema version 1 and are encrypted under the keyring's
 current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct
 `audit-event` record domain. The AAD-bound logical id contains the audit epoch,
