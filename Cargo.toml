@@ -46,5 +46,9 @@ name = "api_kv"
 path = "tests/api_kv.rs"
 
 [[test]]
+name = "compat"
+path = "tests/compat/mod.rs"
+
+[[test]]
 name = "txn_crash"
 path = "tests/fault/txn_crash.rs"
