@@ -16,8 +16,7 @@ fn doctor_exit_codes_and_offline_report_are_stable() {
         report
             .checks
             .iter()
-            .any(|check| check.id == "data_dir_permissions"
-                && check.severity == CheckSeverity::Ok)
+            .any(|check| check.id == "data_dir_permissions" && check.severity == CheckSeverity::Ok)
     );
     assert!(
         report
@@ -65,8 +64,10 @@ fn doctor_cli_emits_json_and_stable_exit() {
     scenario
         .step(
             "json-ok",
-            SafeSummary::new()
-                .field("exit", SafeValue::Unsigned(output.status.code().unwrap_or(99) as u64)),
+            SafeSummary::new().field(
+                "exit",
+                SafeValue::Unsigned(output.status.code().unwrap_or(99) as u64),
+            ),
             ExpectedOutcome::Success,
             ActualOutcome::Success,
         )

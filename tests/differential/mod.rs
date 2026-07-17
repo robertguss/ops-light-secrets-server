@@ -17,13 +17,13 @@ use std::time::Instant;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request};
 use ops_light_secrets_server::auth::{AppRoleRecord, AuthCatalog, AuthService};
+use ops_light_secrets_server::control::data_router_with_auth_and_kv;
 use ops_light_secrets_server::credential::{
     CredentialAudience, CredentialIssueMetadata, CredentialKind, issue_credential,
 };
 use ops_light_secrets_server::identity::{
     Capability, GrantRecord, GrantScope, IdentityKind, IdentityRecord,
 };
-use ops_light_secrets_server::control::data_router_with_auth_and_kv;
 use ops_light_secrets_server::input_hygiene::InputHygieneState;
 use ops_light_secrets_server::kv::{KvCatalog, KvService};
 use ops_light_secrets_server::store::StoreId;
@@ -200,18 +200,17 @@ fn auth_fixture() -> (AuthService, String) {
 
 fn kv_service(caps: &[Capability], mount_cas_required: bool) -> KvService {
     let mut catalog = KvCatalog::new(mount_cas_required, 1_800_000_000_000);
-    catalog
-        .replace_grants(vec![
-            GrantRecord::new(
-                [0xD2; 16],
-                IDENTITY,
-                "secret".into(),
-                GrantScope::Subtree,
-                Vec::new(),
-                caps.iter().copied().collect::<BTreeSet<_>>(),
-            )
-            .unwrap(),
-        ]);
+    catalog.replace_grants(vec![
+        GrantRecord::new(
+            [0xD2; 16],
+            IDENTITY,
+            "secret".into(),
+            GrantScope::Subtree,
+            Vec::new(),
+            caps.iter().copied().collect::<BTreeSet<_>>(),
+        )
+        .unwrap(),
+    ]);
     KvService::new(catalog)
 }
 
@@ -227,11 +226,7 @@ fn method_from(name: &str) -> Method {
     }
 }
 
-async fn dispatch(
-    app: &axum::Router,
-    step: &HttpStep,
-    token: Option<&str>,
-) -> (u16, Value) {
+async fn dispatch(app: &axum::Router, step: &HttpStep, token: Option<&str>) -> (u16, Value) {
     let mut builder = Request::builder()
         .method(method_from(&step.method))
         .uri(&step.path);
@@ -248,7 +243,11 @@ async fn dispatch(
         Some(text) => Body::from(text.clone()),
         None => Body::empty(),
     };
-    let response = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
     let status = response.status().as_u16();
     let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     // Non-JSON error bodies (input hygiene) compare as empty envelopes; status is the contract.
@@ -315,10 +314,7 @@ fn reference_pin_and_fixture_schema_are_consistent() {
     let case_ids: BTreeSet<String> = corpus.cases.iter().map(|case| case.id.clone()).collect();
     assert_eq!(case_ids.len(), corpus.cases.len(), "duplicate corpus ids");
     for id in &case_ids {
-        assert!(
-            oracle.outcomes.contains_key(id),
-            "oracle missing case {id}"
-        );
+        assert!(oracle.outcomes.contains_key(id), "oracle missing case {id}");
     }
     for id in oracle.outcomes.keys() {
         assert!(case_ids.contains(id), "oracle has unknown case {id}");

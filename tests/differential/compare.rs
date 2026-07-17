@@ -216,9 +216,7 @@ pub fn compare_to_oracle(
         let present = field_present(&actual.body, path);
         if present != *expected {
             diffs.push(FieldDiff {
-                kind: DiffKind::FieldPresence {
-                    path: path.clone(),
-                },
+                kind: DiffKind::FieldPresence { path: path.clone() },
                 left: present.to_string(),
                 right: expected.to_string(),
             });
@@ -233,11 +231,7 @@ pub fn compare_to_oracle(
         });
     }
 
-    if diffs.is_empty() {
-        Ok(())
-    } else {
-        Err(diffs)
-    }
+    if diffs.is_empty() { Ok(()) } else { Err(diffs) }
 }
 
 /// Inject a deliberate status mismatch so the suite proves the comparator fires.
@@ -316,7 +310,11 @@ pub fn validate_allowlist(
 }
 
 pub fn allowlisted_cases(allowlist: &AllowlistFile) -> BTreeSet<String> {
-    allowlist.entries.iter().map(|entry| entry.case.clone()).collect()
+    allowlist
+        .entries
+        .iter()
+        .map(|entry| entry.case.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -387,7 +385,11 @@ mod tests {
             allowlisted: false,
         };
         let diffs = compare_to_oracle(&actual, &oracle).unwrap_err();
-        assert!(diffs.iter().any(|diff| matches!(diff.kind, DiffKind::Status)));
+        assert!(
+            diffs
+                .iter()
+                .any(|diff| matches!(diff.kind, DiffKind::Status))
+        );
         assert!(
             diffs
                 .iter()
@@ -421,7 +423,11 @@ mod tests {
         };
         seed_status_divergence(&mut actual, 500);
         let diffs = compare_to_oracle(&actual, &oracle).unwrap_err();
-        assert!(diffs.iter().any(|diff| matches!(diff.kind, DiffKind::Status)));
+        assert!(
+            diffs
+                .iter()
+                .any(|diff| matches!(diff.kind, DiffKind::Status))
+        );
     }
 
     #[test]

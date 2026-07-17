@@ -27,23 +27,26 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(200);
     let mut catalog = KvCatalog::new(false, 1_800_000_000_000);
-    catalog.replace_grants(vec![GrantRecord::new(
-        [1; 16],
-        IDENTITY,
-        "secret".into(),
-        GrantScope::Subtree,
-        Vec::new(),
-        [
-            Capability::SecretWrite,
-            Capability::SecretReadCurrent,
-            Capability::SecretReadHistory,
-        ]
-        .into_iter()
-        .collect::<BTreeSet<_>>(),
-    )
-    .unwrap()]);
+    catalog.replace_grants(vec![
+        GrantRecord::new(
+            [1; 16],
+            IDENTITY,
+            "secret".into(),
+            GrantScope::Subtree,
+            Vec::new(),
+            [
+                Capability::SecretWrite,
+                Capability::SecretReadCurrent,
+                Capability::SecretReadHistory,
+            ]
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        )
+        .unwrap(),
+    ]);
     let service = KvService::new(catalog);
-    let write_ep = parse_raw_target(&axum::http::Method::POST, "/v1/secret/data/bench/key").unwrap();
+    let write_ep =
+        parse_raw_target(&axum::http::Method::POST, "/v1/secret/data/bench/key").unwrap();
     let read_ep = parse_raw_target(&axum::http::Method::GET, "/v1/secret/data/bench/key").unwrap();
     let mut data = Map::new();
     data.insert("value".into(), json!("bench"));

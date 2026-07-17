@@ -511,9 +511,7 @@ async fn remote_listener_has_no_rotation_routes() {
 
 #[test]
 fn adoption_status_classifies_instances_and_ignores_lookback_for_class() {
-    use ops_light_secrets_server::rotation::{
-        AdoptionClass, ReadObservation, classify_adoption,
-    };
+    use ops_light_secrets_server::rotation::{AdoptionClass, ReadObservation, classify_adoption};
     use std::collections::BTreeMap;
 
     let consumer_a = [0xA1; 16];
@@ -607,17 +605,15 @@ fn adoption_status_classifies_instances_and_ignores_lookback_for_class() {
     assert_eq!(identity(identity_a).class, AdoptionClass::OnPrior);
     assert_eq!(identity(identity_b).class, AdoptionClass::OnCurrent);
 
-    let silent = members
-        .iter()
-        .find(|member| member.kind == "instance" && member.class == AdoptionClass::SilentSinceWrite);
+    let silent = members.iter().find(|member| {
+        member.kind == "instance" && member.class == AdoptionClass::SilentSinceWrite
+    });
     assert!(silent.is_none());
 }
 
 #[test]
 fn adoption_status_marks_retired_and_no_instance_and_ae11_silent() {
-    use ops_light_secrets_server::rotation::{
-        AdoptionClass, ReadObservation, classify_adoption,
-    };
+    use ops_light_secrets_server::rotation::{AdoptionClass, ReadObservation, classify_adoption};
     use std::collections::BTreeMap;
 
     let consumer = [1; 16];
@@ -783,12 +779,18 @@ fn rotation_status_command_requires_cutover_and_is_management_gated() {
             &identity_to_consumer,
         )
         .unwrap();
-    assert_eq!(status.target_version, cutover.record.target_version.unwrap());
+    assert_eq!(
+        status.target_version,
+        cutover.record.target_version.unwrap()
+    );
     assert_eq!(
         status.instances[0].class,
         ops_light_secrets_server::rotation::AdoptionClass::OnCurrent
     );
-    assert_eq!(status.instances[0].fetched_version, Some(status.target_version));
+    assert_eq!(
+        status.instances[0].fetched_version,
+        Some(status.target_version)
+    );
 }
 
 #[test]
@@ -899,20 +901,22 @@ fn rotation_complete_guard_requires_current_target_and_adoption() {
         last_read_unix_seconds: None,
         recency_lookback_exceeded: false,
     }];
-    assert!(rotations
-        .complete(
-            &mut management,
-            principal,
-            [4; 16],
-            cutover.record.id,
-            cutover.generation,
-            cutover.record.target_version.unwrap(),
-            &members,
-            false,
-            None,
-            120,
-        )
-        .is_err());
+    assert!(
+        rotations
+            .complete(
+                &mut management,
+                principal,
+                [4; 16],
+                cutover.record.id,
+                cutover.generation,
+                cutover.record.target_version.unwrap(),
+                &members,
+                false,
+                None,
+                120,
+            )
+            .is_err()
+    );
     let report = rotations
         .complete(
             &mut management,
@@ -935,10 +939,22 @@ fn rotation_complete_guard_requires_current_target_and_adoption() {
 fn rotation_suite_registers_ae3_ae11_ae13_scenarios() {
     use test_support::{ActualOutcome, ExpectedOutcome, Harness, SafeSummary, SafeValue};
     let cases = [
-        ("ae3-begin-cutover", "begin_writes_no_secret_and_double_begin_refuses"),
-        ("ae11-adoption", "adoption_status_classifies_instances_and_ignores_lookback_for_class"),
-        ("ae13-closeout", "rotation_complete_guard_requires_current_target_and_adoption"),
-        ("interval", "secret_age_uses_completed_rotation_and_labels_hand_writes"),
+        (
+            "ae3-begin-cutover",
+            "begin_writes_no_secret_and_double_begin_refuses",
+        ),
+        (
+            "ae11-adoption",
+            "adoption_status_classifies_instances_and_ignores_lookback_for_class",
+        ),
+        (
+            "ae13-closeout",
+            "rotation_complete_guard_requires_current_target_and_adoption",
+        ),
+        (
+            "interval",
+            "secret_age_uses_completed_rotation_and_labels_hand_writes",
+        ),
     ];
     let source = include_str!("rotation.rs");
     let harness = Harness::builder("rotation-suite")

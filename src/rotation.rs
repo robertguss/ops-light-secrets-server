@@ -296,9 +296,7 @@ pub fn classify_adoption(
             let reads: Vec<&ReadObservation> = window
                 .iter()
                 .copied()
-                .filter(|item| {
-                    item.identity_id == *identity && item.consumer_instance_id.is_none()
-                })
+                .filter(|item| item.identity_id == *identity && item.consumer_instance_id.is_none())
                 .collect();
             let (class, version, last) = if reads.is_empty() {
                 (AdoptionClass::NoInstanceObservation, None, None)
@@ -861,7 +859,10 @@ impl RotationCatalog {
         let current = self.show_inner(id)?;
         require_state(&current, expected_generation, RotationLifecycle::Cutover)?;
         ensure_history_room(&current)?;
-        let target = current.record.target_version.ok_or(RotationError::Invalid)?;
+        let target = current
+            .record
+            .target_version
+            .ok_or(RotationError::Invalid)?;
         if current_version != target {
             // Condition (a): never overridable.
             return Err(RotationError::Conflict {

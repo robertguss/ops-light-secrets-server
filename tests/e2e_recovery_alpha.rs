@@ -94,9 +94,7 @@ fn recovery_alpha_matrix_covers_restore_rewrap_epoch_and_fork() {
         (
             "normal-restore-branch",
             "restore.rs",
-            &[
-                "signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure",
-            ][..],
+            &["signed_fresh_host_restore_rewraps_bumps_epoch_and_installs_only_after_disclosure"][..],
         ),
         (
             "recipient-rewrap-offline",
@@ -116,11 +114,7 @@ fn recovery_alpha_matrix_covers_restore_rewrap_epoch_and_fork() {
                 "malformed_forked_or_mixed_source_evidence_refuses_instead_of_ignoring",
             ][..],
         ),
-        (
-            "init-serve-contract",
-            "init.rs",
-            &["fn initialize"][..],
-        ),
+        ("init-serve-contract", "init.rs", &["fn initialize"][..]),
     ];
 
     for (step, path, needles) in producers {
@@ -137,10 +131,8 @@ fn recovery_alpha_matrix_covers_restore_rewrap_epoch_and_fork() {
                 SafeSummary::new()
                     .field(
                         "path_digest",
-                        SafeValue::digest_prefix(
-                            &blake3::hash(path.as_bytes()).to_hex()[..16],
-                        )
-                        .unwrap(),
+                        SafeValue::digest_prefix(&blake3::hash(path.as_bytes()).to_hex()[..16])
+                            .unwrap(),
                     )
                     .field("needles", SafeValue::Unsigned(needles.len() as u64)),
                 ExpectedOutcome::Success,
@@ -242,12 +234,7 @@ fn recovery_alpha_binary_owner_catalog_and_identity_sinks() {
     assert!(!stdout.contains("AGE-SECRET-KEY"));
     let public: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(public["purpose"], "active");
-    assert!(
-        public["recipient"]
-            .as_str()
-            .unwrap()
-            .starts_with("age1")
-    );
+    assert!(public["recipient"].as_str().unwrap().starts_with("age1"));
 }
 
 #[test]

@@ -66,11 +66,15 @@ pub fn exit_code(checks: &[DoctorCheck]) -> u8 {
     }
     if has_fail {
         2
-    } else if has_skip_only_blocker && checks.iter().all(|c| {
-        matches!(c.severity, CheckSeverity::Ok | CheckSeverity::Skip | CheckSeverity::Warn)
-            && !(c.severity == CheckSeverity::Skip && c.reason == Some("mode_unavailable"))
-            || c.severity == CheckSeverity::Skip
-    }) {
+    } else if has_skip_only_blocker
+        && checks.iter().all(|c| {
+            matches!(
+                c.severity,
+                CheckSeverity::Ok | CheckSeverity::Skip | CheckSeverity::Warn
+            ) && !(c.severity == CheckSeverity::Skip && c.reason == Some("mode_unavailable"))
+                || c.severity == CheckSeverity::Skip
+        })
+    {
         // Any Skip with mode_unavailable when required checks cannot run → 3
         // if nothing actually failed but required online-only checks were skipped offline
         // and no ok checks for required set... Keep simpler rule below.
@@ -189,9 +193,12 @@ pub fn run_offline(data_directory: &Path) -> DoctorReport {
     // Offline mode with only skip+ok/warn for online-only is healthy-enough for
     // local preflight: demote pure mode skips when store checks ran.
     if code == 3
-        && checks
-            .iter()
-            .any(|c| matches!(c.severity, CheckSeverity::Ok | CheckSeverity::Warn | CheckSeverity::Fail))
+        && checks.iter().any(|c| {
+            matches!(
+                c.severity,
+                CheckSeverity::Ok | CheckSeverity::Warn | CheckSeverity::Fail
+            )
+        })
     {
         code = if checks.iter().any(|c| c.severity == CheckSeverity::Fail) {
             2

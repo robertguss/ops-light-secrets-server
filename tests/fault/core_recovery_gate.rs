@@ -36,17 +36,17 @@ fn core_recovery_catalog_is_complete_and_allowlisted() {
                     .field("index", SafeValue::Unsigned(index as u64))
                     .field(
                         "point_digest",
-                        SafeValue::digest_prefix(
-                            &blake3::hash(point.as_bytes()).to_hex()[..16],
-                        )
-                        .unwrap(),
+                        SafeValue::digest_prefix(&blake3::hash(point.as_bytes()).to_hex()[..16])
+                            .unwrap(),
                     ),
                 ExpectedOutcome::Success,
                 ActualOutcome::Success,
             )
             .unwrap();
     }
-    for required in ["txn", "storage", "backup", "restore", "recovery", "reserve", "init"] {
+    for required in [
+        "txn", "storage", "backup", "restore", "recovery", "reserve", "init",
+    ] {
         assert!(
             families.contains(required),
             "missing fault family {required}"
@@ -101,8 +101,14 @@ fn core_recovery_catalog_is_complete_and_allowlisted() {
 
     // Existing producer suites that this gate consolidates (must remain present).
     let producers = [
-        ("tests/fault/txn_crash.rs", "mutation_and_audit_are_one_visibility_boundary_at_every_fault"),
-        ("tests/transaction_coordinator.rs", "read_secret_is_not_released_when_audit_or_commit_fails"),
+        (
+            "tests/fault/txn_crash.rs",
+            "mutation_and_audit_are_one_visibility_boundary_at_every_fault",
+        ),
+        (
+            "tests/transaction_coordinator.rs",
+            "read_secret_is_not_released_when_audit_or_commit_fails",
+        ),
         ("tests/backup.rs", "fn "),
         ("tests/restore.rs", "fn "),
         ("tests/recipient_rewrap.rs", "RecipientRewrapFault"),

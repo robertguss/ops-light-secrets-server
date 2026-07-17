@@ -417,7 +417,6 @@ fn unknown_purpose_rng_unsafe_sink_and_short_write_have_stable_outcomes() {
     );
 }
 
-
 #[test]
 fn audit_payload_rotation_is_forward_only_and_limits_hard() {
     use ops_light_secrets_server::store::keyring::{Keyring, RecipientSet};
@@ -442,7 +441,11 @@ fn audit_payload_rotation_is_forward_only_and_limits_hard() {
     assert_eq!(keyring.audit_payload_generations(), 2);
     assert_eq!(keyring.generation(), start + 1);
     // Stale generation refused (CAS).
-    assert!(keyring.rotate_audit_payload_key(start, &mut Counter(4)).is_err());
+    assert!(
+        keyring
+            .rotate_audit_payload_key(start, &mut Counter(4))
+            .is_err()
+    );
 }
 
 #[test]
@@ -470,7 +473,11 @@ fn metadata_integrity_key_rotation_advances_generation() {
     assert_ne!(next, old_id);
     assert_eq!(keyring.metadata_integrity_key_id(), next);
     assert_eq!(keyring.generation(), generation + 1);
-    assert!(keyring.rotate_metadata_integrity_key(generation, &mut Counter(5)).is_err());
+    assert!(
+        keyring
+            .rotate_metadata_integrity_key(generation, &mut Counter(5))
+            .is_err()
+    );
 }
 
 #[test]
