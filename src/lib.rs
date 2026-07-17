@@ -8,6 +8,7 @@ pub mod capacity;
 pub mod clock;
 pub mod compaction;
 pub mod config;
+pub mod consumer;
 pub mod control;
 pub mod credential;
 pub mod credential_epoch;

@@ -108,6 +108,13 @@ enum Command {
         #[command(subcommand)]
         command: GrantCommand,
     },
+    /// Manage declared consumers through the owner-only control socket
+    Consumer {
+        #[command(flatten)]
+        connection: ControlConnectionArgs,
+        #[command(subcommand)]
+        command: ConsumerCommand,
+    },
     /// Explain an authorization decision through the owner-only control socket
     Authz {
         #[command(flatten)]
@@ -596,6 +603,130 @@ enum AppRoleSecretIdCommand {
     },
     Revoke {
         accessor: String,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConsumerCommand {
+    Create {
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        resource: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        environment: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        identity_id: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        request_id: String,
+    },
+    List {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    Show {
+        consumer_id: String,
+    },
+    Update {
+        consumer_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    Retire {
+        consumer_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        reason: String,
+    },
+    Instance {
+        #[command(subcommand)]
+        command: ConsumerInstanceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConsumerInstanceCommand {
+    Create {
+        #[arg(long)]
+        consumer_id: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        environment: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        identity_id: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        request_id: String,
+    },
+    List {
+        #[arg(long)]
+        consumer_id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Show {
+        #[arg(long)]
+        consumer_id: String,
+        instance_id: String,
+    },
+    Update {
+        #[arg(long)]
+        consumer_id: String,
+        instance_id: String,
+        #[arg(long)]
+        expected_generation: u64,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    Retire {
+        #[arg(long)]
+        consumer_id: String,
+        instance_id: String,
+        #[arg(long)]
+        expected_generation: u64,
         #[arg(long)]
         reason: String,
     },
@@ -1277,6 +1408,7 @@ pub fn run() -> Result<(), String> {
             }
             Command::Identity { .. }
             | Command::Grant { .. }
+            | Command::Consumer { .. }
             | Command::Authz { .. }
             | Command::Token { .. }
             | Command::Approle { .. }

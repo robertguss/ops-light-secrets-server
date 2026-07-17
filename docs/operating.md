@@ -754,6 +754,23 @@ value. These are character limits, not UTF-8 byte limits. Request
 `Content-Encoding` is unsupported and rejected before body processing. KV
 responses carry `Cache-Control: no-store` and no `Content-Encoding`.
 
+## Declared consumer registry
+
+Before rotation, register every known consumer with `consumer create`, then add
+each deployment/process row with `consumer instance create`. Parent and instance
+IDs, labels, parent ownership and canonical secret resource are immutable;
+updates use the opaque ID plus expected generation. `consumer list|show` and
+their instance forms require `consumer-enumeration`; create, update and retire
+require `rotation-management` over the owner-only control socket. No consumer
+route exists on the remote listener.
+
+Lifecycle is exactly `declared`, `migrated`, or `retired`. Only forward
+transitions are accepted. Retirement is the sole delete-like operation, always
+requires an audited non-secret reason, and retains the MAC-authenticated row.
+Retire active child instances before their parent. A retired row no longer
+blocks rotation closeout. The registry stores bounded facts and notes only—never
+secret values, commands, scripts, webhooks, or executable configuration.
+
 ## Fresh-host restore
 
 Restore only into an absent path inside an existing service-owned mode-0700
