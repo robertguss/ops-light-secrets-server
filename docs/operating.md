@@ -160,6 +160,28 @@ The unanchored audit tail retains the documented live-compromise limitation.
 A metadata-key rotation changes these tuples and is incomplete until its new
 state digest is externally checkpointed.
 
+## Encrypted record format
+
+Encrypted records use the fixed, NCC-audited RustCrypto XChaCha20-Poly1305
+suite (suite ID 1; `chacha20poly1305` 0.10.1). It is not configurable. The
+authenticated header starts with `OLSSREC\0`, a big-endian format version and
+suite ID, then binds the store ID, closed record-domain ID, key ID, 192-bit
+nonce, bounded mount,
+length-prefixed canonical path segments, opaque logical record ID, optional
+secret version, and creation time in Unix milliseconds. Decoders reject unknown
+versions, suites, and domains; invalid UTF-8, noncanonical paths, truncation,
+limits, and trailing bytes also fail closed.
+
+Every encryption and rewrite asks the configured CSPRNG for a new 24-byte
+nonce, including identical-plaintext rewrites. There is no deterministic or
+counter nonce mode and no collision-budget readiness counter. The header is the
+AEAD associated data and is stored with the nonce and ciphertext; changing any
+bound field or transplanting a record makes decryption fail. State-digest
+callers hash the canonical header bytes followed by the ciphertext (whose
+authentication tag is appended by the suite). Diagnostics may report a bounded
+case ID, length, redacted key ID, or digest, but never plaintext, a full path,
+or nonce and key material together.
+
 ## Local control socket
 
 The management plane is a Unix socket owned by the service UID. Its parent

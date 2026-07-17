@@ -2,8 +2,9 @@
 
 use super::codec::{Canonical, CodecError, Decoder, Encoder};
 use super::{
-    ClearRecord, KeyringEnvelope, MetaRecord, ProvisionalMetaRecord, RecordClass, Sealed, Store,
-    StoreError, StoreId,
+    ClearRecord, EncryptedRecord, KeyringEnvelope, MetaRecord, ProvisionalMetaRecord,
+    RecordBinding, RecordClass, RecordCryptoError, RecordDomain, Sealed, Store, StoreError,
+    StoreId,
 };
 use crate::clock::WatermarkCommand;
 use age::x25519;
@@ -177,6 +178,46 @@ impl Keyring {
 
     pub fn audit_capacity_warning(&self) -> bool {
         self.audit_payload.len() >= AUDIT_PAYLOAD_WARNING_THRESHOLD
+    }
+
+    pub fn encrypt_record(
+        &self,
+        binding: &RecordBinding,
+        plaintext: &[u8],
+        random: &mut impl RandomSource,
+    ) -> Result<EncryptedRecord, RecordCryptoError> {
+        let key = self.encryption_key(binding.domain());
+        super::aead::encrypt(
+            self.store_id,
+            binding,
+            key.id(),
+            key.expose(),
+            plaintext,
+            random,
+        )
+    }
+
+    pub fn decrypt_record(
+        &self,
+        binding: &RecordBinding,
+        record: &EncryptedRecord,
+    ) -> Result<SecretBox<Vec<u8>>, RecordCryptoError> {
+        if record.header().store_id() != self.store_id || record.header().binding() != binding {
+            return Err(RecordCryptoError::Binding);
+        }
+        let key = match binding.domain() {
+            RecordDomain::AuditPayload => self
+                .audit_payload
+                .iter()
+                .find(|key| key.id() == record.header().key_id()),
+            RecordDomain::SecretValue | RecordDomain::CredentialMaterial => {
+                std::iter::once(&self.record_current)
+                    .chain(self.record_predecessors.iter())
+                    .find(|key| key.id() == record.header().key_id())
+            }
+        }
+        .ok_or(RecordCryptoError::KeyUnavailable)?;
+        super::aead::decrypt(self.store_id, binding, record, key.expose())
     }
 
     pub fn append_audit_payload_key(
@@ -359,6 +400,16 @@ impl Keyring {
             .chain(std::iter::once(&self.metadata_integrity))
             .chain(&self.audit_payload)
             .chain(std::iter::once(&self.audit_index))
+    }
+
+    fn encryption_key(&self, domain: RecordDomain) -> &PurposeKey {
+        match domain {
+            RecordDomain::AuditPayload => self
+                .audit_payload
+                .last()
+                .expect("keyring validation requires one audit key"),
+            RecordDomain::SecretValue | RecordDomain::CredentialMaterial => &self.record_current,
+        }
     }
 }
 

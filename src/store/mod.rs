@@ -1,9 +1,14 @@
 //! Versioned canonical codecs and the single-file redb schema.
 
+mod aead;
 mod codec;
 mod integrity;
 pub mod keyring;
 
+pub use aead::{
+    CIPHER_SUITE_XCHACHA20_POLY1305, EncryptedRecord, RECORD_FORMAT_VERSION, RecordBinding,
+    RecordCryptoError, RecordDomain, RecordHeader,
+};
 pub use codec::{Canonical, CodecError};
 pub use integrity::{
     BulkTransitionKind, ClearRecord, EncryptedTable, IntegrityDiagnostic, IntegrityOperation,
