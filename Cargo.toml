@@ -72,3 +72,7 @@ path = "tests/differential/mod.rs"
 [[bench]]
 name = "audited_kv"
 harness = false
+
+[[test]]
+name = "key_rotation_suite"
+path = "tests/key_rotation_suite.rs"
