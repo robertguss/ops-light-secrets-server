@@ -3,7 +3,7 @@
   "ignored_scenarios": [],
   "scenarios": [
     {"id":"startup-01-no-key-material","evidence":["tests/startup.rs::command_line_config_path_overrides_environment_path","tests/startup_skeleton.rs::invalid_state_never_binds_and_valid_state_serves_health"],"tails":[]},
-    {"id":"startup-02-init-state-and-exclusion","evidence":["tests/init.rs::initialized_store_refusal_is_audited_only_after_lock","tests/init.rs::concurrent_initializers_admit_exactly_one"],"tails":["startup.init_exclusion_audit","startup.init_audit_genesis"]},
+    {"id":"startup-02-init-state-and-exclusion","evidence":["tests/init.rs::initialized_store_refusal_is_audited_only_after_lock","tests/init.rs::concurrent_initializers_admit_exactly_one","tests/audit.rs::init_atomically_persists_an_encrypted_genesis","src/store/coordinator.rs::real_redb_factory_commits_overloads_init_refusal_and_shutdown_chain"],"tails":["startup.init_exclusion_audit","startup.init_audit_genesis"]},
     {"id":"startup-03-remote-plaintext","evidence":["tests/startup_skeleton.rs::refusal_matrix_is_closed_stable_and_safe"],"tails":[]},
     {"id":"startup-04-second-instance-lock","evidence":["tests/startup_skeleton.rs::real_exclusive_lock_refuses_second_instance"],"tails":[]},
     {"id":"startup-05-lifecycle-and-schema","evidence":["tests/startup_skeleton.rs::refusal_matrix_is_closed_stable_and_safe","tests/startup_skeleton.rs::lifecycle_marker_agreement_and_pending_anchor_policy_are_explicit"],"tails":["startup.store_schema_lifecycle_marker"]},
@@ -20,7 +20,7 @@
     {"id":"startup-15-keyring-store-id","evidence":["src/store/keyring.rs::envelope_opens_once_and_binds_store_and_metadata","tests/keyring.rs::transplanted_envelope_refuses_on_store_id_before_metadata"],"tails":[]},
     {"id":"startup-16-lock-fault","evidence":["tests/startup_skeleton.rs::real_exclusive_lock_refuses_second_instance"],"tails":[]},
     {"id":"startup-17-init-while-serving","evidence":["tests/init.rs::concurrent_initializers_admit_exactly_one"],"tails":["startup.init_exclusion_audit"]},
-    {"id":"startup-18-graceful-shutdown","evidence":["tests/startup_skeleton.rs::shutdown_order_deadline_and_second_signal_are_frozen"],"tails":["shutdown.audit_event","shutdown.executor_barrier"]},
+    {"id":"startup-18-graceful-shutdown","evidence":["tests/startup_skeleton.rs::shutdown_order_deadline_and_second_signal_are_frozen","src/store/coordinator.rs::real_redb_factory_commits_overloads_init_refusal_and_shutdown_chain"],"tails":["shutdown.audit_event","shutdown.executor_barrier"]},
     {"id":"startup-19-unsafe-environment","evidence":["tests/startup.rs::environment_secret_descriptor_needs_explicit_unsafe_flag"],"tails":[]},
     {"id":"startup-20-stdin-and-fd","evidence":["src/config.rs::secret_sources_dispatch_each_channel_and_redact_debug","src/config.rs::system_input_reads_runtime_credential_directory_and_inherited_socket_fd","tests/keyring.rs::every_typed_source_reaches_real_decrypt_and_failures_are_closed"],"tails":[]},
     {"id":"startup-21-real-pty","evidence":["tests/tty_secret_input.rs::tty_is_hidden_refuses_empty_and_eof_restores_terminal_and_handles_breakage","tests/tty_secret_input.rs::tty_source_refuses_when_process_has_no_controlling_terminal","tests/keyring.rs::every_typed_source_reaches_real_decrypt_and_failures_are_closed"],"tails":[]},

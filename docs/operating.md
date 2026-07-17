@@ -63,6 +63,29 @@ Handlers receive only typed submissions; neither the coordinator backend nor a
 raw database transaction is exposed. The coordinator owns the reserved 100 ms
 clock-watermark submission path as well as ordinary data and recovery lanes.
 
+Audit payloads use schema version 1 and are encrypted under the keyring's
+current audit-payload key with the U2.4 XChaCha20-Poly1305 frame in the distinct
+`audit-event` record domain. The AAD-bound logical id contains the audit epoch,
+epoch sequence, event id, effective timestamp, and previous hash. Only the
+versioned audit epoch, epoch-scoped sequence, monotone effective timestamp,
+previous hash, and digest of the complete encrypted frame remain clear. The
+domain-separated chain hash and frame digest can therefore be checked without
+decrypting identity, resource, operation, authorization, or wall-clock fields.
+Decoders reject unknown versions, truncation, trailing bytes, noncanonical
+ordering, missing mutation commitments, and wrong delta/whole-state forms.
+Each epoch starts at sequence one with an encrypted genesis event binding the
+prior epoch terminal hash; a fresh store binds the all-zero predecessor.
+
+The canonical event type has no request-body, header, credential-secret, or
+secret-value field and intentionally has no debug renderer. Successful secret
+reads/writes record only the served/written version. Rejected raw targets record
+only a typed reason, bounded digest, and offset. Admission overloads and
+pre-verifier flood counts are bounded aggregates. The real redb transaction
+factory stages authenticated clock state, exact tuple commitments, the
+encrypted event, audit head, and overload snapshot in one writer transaction;
+init-refusal and final-shutdown events use the same audit-only transaction path.
+Golden version-1 event and envelope vectors live under `tests/fixtures/`.
+
 Audit query and backup use the internal snapshot service rather than exporting
 raw database handles. It defaults to two named workers, eight queued requests, a
 30-second cursor lifetime, and a 1 MiB buffered-result ceiling. Cursors receive a

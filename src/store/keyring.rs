@@ -621,6 +621,7 @@ pub struct PreparedKeyring {
     pub envelope: KeyringEnvelope,
     pub metadata: Sealed<KeyringMetadata>,
     pub provisional_meta: Option<Sealed<ProvisionalMetaRecord>>,
+    pub audit_genesis: Option<super::StoredAuditEntry>,
 }
 
 pub fn prepare_keyring(
@@ -650,6 +651,7 @@ pub fn prepare_keyring(
         envelope,
         metadata,
         provisional_meta: None,
+        audit_genesis: None,
     })
 }
 
@@ -661,6 +663,10 @@ pub fn prepare_keyring_for_init(
     random: &mut impl RandomSource,
 ) -> Result<PreparedKeyring, KeyringError> {
     let store_id = provisional_meta.store_id;
+    let effective = provisional_meta
+        .high_water_unix_seconds
+        .checked_mul(1_000)
+        .ok_or(KeyringError::Invalid)?;
     let active = active_identity.to_public();
     let mut prepared = prepare_keyring(store_id, generation, &active, recovery, random)?;
     let opened = KeyringOpener::default().open(
@@ -671,6 +677,20 @@ pub fn prepare_keyring_for_init(
     )?;
     prepared.provisional_meta =
         Some(opened.seal_clear(provisional_meta, generation, super::PROVISIONAL_META_KEY)?);
+    let mut epoch = [0; 16];
+    let mut event_id = [0; 16];
+    let mut request_id = [0; 16];
+    random.fill(&mut epoch)?;
+    random.fill(&mut event_id)?;
+    random.fill(&mut request_id)?;
+    if epoch == [0; 16] || event_id == [0; 16] || request_id == [0; 16] {
+        return Err(KeyringError::Random);
+    }
+    let event = super::genesis_event(event_id, request_id, effective, [0; 32]);
+    prepared.audit_genesis = Some(
+        super::StoredAuditEntry::prepare(&opened, &event, epoch, 1, [0; 32], random)
+            .map_err(|_| KeyringError::Invalid)?,
+    );
     Ok(prepared)
 }
 

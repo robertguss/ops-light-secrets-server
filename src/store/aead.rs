@@ -118,6 +118,10 @@ impl RecordBinding {
         self.created_unix_milliseconds
     }
 
+    pub fn logical_record_id(&self) -> &[u8] {
+        &self.logical_record_id
+    }
+
     fn validate(&self) -> Result<(), RecordCryptoError> {
         if self.mount.is_empty()
             || self.mount.len() > MAX_MOUNT

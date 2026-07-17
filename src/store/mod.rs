@@ -1,7 +1,10 @@
 //! Versioned canonical codecs and the single-file redb schema.
 
 mod aead;
+mod audit;
 mod codec;
+#[allow(dead_code)]
+mod coordinator;
 mod integrity;
 pub mod keyring;
 #[cfg(test)]
@@ -10,6 +13,12 @@ mod versioned_secrets_tests;
 pub use aead::{
     CIPHER_SUITE_XCHACHA20_POLY1305, EncryptedRecord, PlaintextSecret, RECORD_FORMAT_VERSION,
     RecordBinding, RecordCryptoError, RecordDomain, RecordHeader,
+};
+pub use audit::{
+    AUDIT_ENVELOPE_VERSION, AUDIT_SCHEMA_VERSION, AuditAuthMethod, AuditAuthentication,
+    AuditAuthorization, AuditCapability, AuditEnvelope, AuditError, AuditEvent, AuditOperation,
+    AuditOutcome, AuditOverloadCount, AuditReason, AuditResource, AuditStateCommitment,
+    FloodAggregate, StoredAuditEntry, genesis_event, verify_chain,
 };
 pub use codec::{Canonical, CodecError};
 pub use integrity::{
@@ -40,10 +49,13 @@ const META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("meta");
 const SYSTEM_KEYRING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("system_keyring");
 const SECRET_META: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secret_meta");
 const SECRETS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("secrets");
+const AUDIT_EVENTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_events");
+const AUDIT_HEAD: TableDefinition<&[u8], &[u8]> = TableDefinition::new("audit_head");
 const META_KEY: &[u8] = b"\x01store";
 const KEYRING_KEY: &[u8] = b"\x01current";
 pub(crate) const KEYRING_METADATA_KEY: &[u8] = b"\x01keyring_metadata";
 pub(crate) const PROVISIONAL_META_KEY: &[u8] = b"\x01provisional_meta";
+const AUDIT_HEAD_KEY: &[u8] = b"\x01current";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StoreId(pub [u8; 16]);
@@ -1234,6 +1246,23 @@ impl Store {
             write
                 .open_table(SECRETS)
                 .map_err(|_| StoreError::Database)?;
+            let genesis = prepared
+                .audit_genesis
+                .as_ref()
+                .ok_or(StoreError::Integrity)?;
+            let event_key = audit_key(&genesis.envelope);
+            let event_bytes = genesis.encode()?;
+            let head_bytes = genesis.envelope.encode()?;
+            write
+                .open_table(AUDIT_EVENTS)
+                .map_err(|_| StoreError::Database)?
+                .insert(event_key.as_slice(), event_bytes.as_slice())
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(AUDIT_HEAD)
+                .map_err(|_| StoreError::Database)?
+                .insert(AUDIT_HEAD_KEY, head_bytes.as_slice())
+                .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
         Ok(Self {
@@ -1269,6 +1298,12 @@ impl Store {
                 .map_err(|_| StoreError::Database)?;
             write
                 .open_table(SECRETS)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(AUDIT_EVENTS)
+                .map_err(|_| StoreError::Database)?;
+            write
+                .open_table(AUDIT_HEAD)
                 .map_err(|_| StoreError::Database)?;
         }
         write.commit().map_err(|_| StoreError::Database)?;
@@ -1654,6 +1689,39 @@ impl Store {
         Ok(value)
     }
 
+    pub fn audit_head(&self) -> Result<Option<AuditEnvelope>, StoreError> {
+        self.get(AUDIT_HEAD, AUDIT_HEAD_KEY)?
+            .map(|bytes| AuditEnvelope::decode(&bytes).map_err(StoreError::from))
+            .transpose()
+    }
+
+    pub fn audit_entries(&self) -> Result<Vec<StoredAuditEntry>, StoreError> {
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| StoreError::Database)?;
+        let table = read
+            .open_table(AUDIT_EVENTS)
+            .map_err(|_| StoreError::Database)?;
+        let mut entries = Vec::new();
+        for row in table.iter().map_err(|_| StoreError::Database)? {
+            let (key, value) = row.map_err(|_| StoreError::Database)?;
+            let entry = StoredAuditEntry::decode(value.value())?;
+            if key.value() != audit_key(&entry.envelope) {
+                return Err(StoreError::Integrity);
+            }
+            entries.push(entry);
+        }
+        let head = self.audit_head()?.ok_or(StoreError::Integrity)?;
+        let verified = verify_chain(&entries).map_err(|_| StoreError::Integrity)?;
+        if entries.last().map(|entry| entry.envelope) != Some(head)
+            || verified != head.chain_hash()?
+        {
+            return Err(StoreError::Integrity);
+        }
+        Ok(entries)
+    }
+
     pub fn integrity_status(&self) -> IntegrityStatus {
         self.integrity.status()
     }
@@ -1714,4 +1782,11 @@ impl Store {
             .map_err(|_| StoreError::Database)?
             .map(|value| value.value().to_vec()))
     }
+}
+
+fn audit_key(envelope: &AuditEnvelope) -> Vec<u8> {
+    let mut key = Vec::with_capacity(24);
+    key.extend_from_slice(&envelope.audit_epoch);
+    key.extend_from_slice(&envelope.epoch_sequence.to_be_bytes());
+    key
 }
