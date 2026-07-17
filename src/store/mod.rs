@@ -251,6 +251,16 @@ pub struct Sealed<T> {
 }
 
 impl<T: ClearRecord> Sealed<T> {
+    #[doc(hidden)]
+    pub fn encode_for_fixture(&self) -> Result<Vec<u8>, CodecError> {
+        self.encode()
+    }
+
+    #[doc(hidden)]
+    pub fn decode_for_fixture(bytes: &[u8]) -> Result<Self, CodecError> {
+        Self::decode(bytes)
+    }
+
     pub fn seal(
         value: T,
         generation: u64,

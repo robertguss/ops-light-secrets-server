@@ -20,6 +20,12 @@
       "args": []
     },
     {
+      "id": "crypto-vectors",
+      "toolchain": "default",
+      "program": "./scripts/check-crypto-vectors.sh",
+      "args": []
+    },
+    {
       "id": "fmt",
       "toolchain": "default",
       "program": "cargo",

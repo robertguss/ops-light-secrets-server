@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "architectures": ["x86_64", "aarch64"],
+  "byte_order": "network-big-endian",
+  "generator": {
+    "id": "examples/crypto_fixture_generator.rs@v1",
+    "rust_toolchain_floor": "1.85.0",
+    "regeneration_command": "./scripts/check-crypto-vectors.sh --regenerate",
+    "review_rule": "fixture byte drift requires an R35 forward-only migration and upgrade notes after Gate G2"
+  },
+  "formats": [
+    {"id": "record-header", "version": 1, "domain_ids": {"secret-value": 1, "audit-payload": 2, "credential-material": 3}},
+    {"id": "encrypted-record", "version": 1, "cipher_suite": "XChaCha20-Poly1305", "cipher_suite_id": 1},
+    {"id": "clear-record-mac", "version": 1, "domain": "ops-light-secrets-server.clear-record-mac.v1"},
+    {"id": "age-keyring-envelope", "version": "age-0.12.0"}
+  ],
+  "fixtures": [
+    {"path": "tests/fixtures/crypto-vectors-v1.json", "schema": 1, "sha256": "040999e418c7854b6aec09e38e273c0a3cd57ba6b29bcbdd09fd002f4456f68d"},
+    {"path": "tests/fixtures/keyring-age-v0.12.json", "schema": 1, "sha256": "dacda1606cd553e96a0008f6e6bfc91ce643ea54b28f0ac194696d703728f1d4"}
+  ],
+  "negative_cases": [
+    "header.magic",
+    "header.unknown-version",
+    "header.unknown-suite",
+    "header.unknown-domain",
+    "header.truncated",
+    "header.trailing",
+    "header.little-endian-alias",
+    "aad.store-id",
+    "aad.domain",
+    "aad.mount",
+    "aad.path",
+    "aad.logical-record-id",
+    "aad.version",
+    "aad.key-id",
+    "aad.nonce",
+    "aad.created-time",
+    "ciphertext.edit",
+    "clear-mac.value",
+    "clear-mac.primary-key",
+    "clear-mac.store-id",
+    "clear-mac.generation",
+    "clear-mac.class",
+    "clear-mac.schema",
+    "clear-mac.unknown-version",
+    "age.truncated",
+    "age.unknown-version"
+  ],
+  "verification_command": "./scripts/check-crypto-vectors.sh"
+}

@@ -336,6 +336,17 @@ authentication tag is appended by the suite). Diagnostics may report a bounded
 case ID, length, redacted key ID, or digest, but never plaintext, a full path,
 or nonce and key material together.
 
+The release-frozen record/AAD, encrypted-record, secret-metadata clear-MAC, and
+age 0.12 envelope artifacts live under `tests/fixtures/`; their schema, domain
+IDs, hashes, negative-case IDs, generator, and regeneration command are in
+`crypto-fixtures-manifest-v1.json`. Run `./scripts/check-crypto-vectors.sh` on
+native x86_64 and aarch64 runners. It regenerates to a private temporary file,
+requires byte equality, verifies fixture hashes, and exercises strict decode
+and tamper rejection. `--regenerate` is deliberately explicit and leaves hash
+drift failing until reviewed. After Gate G2, accepted drift requires an R35
+forward-only migration plus upgrade notes; never update golden bytes merely to
+make a test pass.
+
 Decrypted values are owned by a non-`Clone`, non-`Debug` zeroizing wrapper and
 are decrypted anew for each value read; the server keeps no cross-request
 plaintext cache. Metadata-only queries verify the clear-record MAC and never

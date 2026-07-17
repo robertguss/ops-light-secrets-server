@@ -32,6 +32,7 @@ jobs:
           - compat-pins
           - compat-capture
           - lock-msrv
+          - crypto-vectors
           - fmt
           - clippy
           - test
@@ -47,3 +48,23 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Run required check through shared runner
         run: ./scripts/verify.sh "${{ matrix.check }}"
+
+  crypto-vectors-cross-architecture:
+    name: required / crypto-vectors / ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify frozen crypto vectors on native architecture
+        env:
+          OLSS_EXPECT_ARCHITECTURE: ${{ matrix.architecture }}
+        run: ./scripts/verify.sh crypto-vectors
